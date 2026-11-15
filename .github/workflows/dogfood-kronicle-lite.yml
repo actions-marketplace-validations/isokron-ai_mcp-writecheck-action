@@ -9,6 +9,13 @@
 # a plan job's output). When kronicle-lite, the manifest or the CLI pin changes, the full run is
 # refused with a hash mismatch: read the new plan in the plan step's summary and update the hash.
 #
+# A dispatch with `candidate-manifest` (it needs `cli-ref`) runs the candidate manifest instead:
+# writecheck.yaml plus document-reput, a put_document resource with a caller-chosen key, built by
+# dogfood/kronicle-lite/candidate-manifest.sh, with its own known violations
+# (known-violations-candidate.txt). The key makes the run re-put an existing slug, the call MWS-ANN-2
+# and MWS-ANN-5 judge put_document by; the pinned CLI refuses the key's `class` field, so it waits
+# here until the CLI pin moves past it. Scheduled, pull-request and push runs are unchanged.
+#
 # Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`), so
 # a fork never gets MWS_CLI_TOKEN (read-only on isokron-ai/mcp-write-safety), which only the
 # "Check out mcp-writecheck" step uses, before any server code is installed or started; the action
@@ -24,6 +31,11 @@ on:
         description: mcp-writecheck commit to test with (full 40-character SHA). Empty for the action's default.
         required: false
         default: ''
+      candidate-manifest:
+        description: Run the candidate manifest (writecheck.yaml plus a put_document resource with a re-put key; needs cli-ref, a CLI that reads key.class) and its known violations.
+        type: boolean
+        required: false
+        default: false
       plan-hashes:
         description: "Accepted plan hashes for that CLI, after reading the plans: space-separated job=hash pairs (job names as in this file)."
         required: false
@@ -47,6 +59,9 @@ env:
   PLAN_HASHES: ${{ inputs.plan-hashes }}
   # isokron-ai/kronicle-lite main, 0.11.2 (14 Nov 2026).
   KL_REF: 3bac5a73266c668fe77ed831924cded90e18a7b0
+  # dogfood/kronicle-lite/candidate-manifest.sh replaces both on a candidate-manifest dispatch.
+  KL_MANIFEST: dogfood/kronicle-lite/writecheck.yaml
+  KL_KNOWN: dogfood/kronicle-lite/known-violations.txt
 
 jobs:
   own:
@@ -54,7 +69,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: ddd33f124a3e5c40
+      PLAN_HASH: 7778fd8957105f8a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -68,6 +83,15 @@ jobs:
         env:
           INPUT_REF: ${{ inputs.cli-ref }}
         run: dogfood/cli-ref.sh
+      - name: The candidate manifest needs a chosen CLI (candidate-manifest)
+        if: inputs.candidate-manifest
+        env:
+          NAME: cli-ref (candidate-manifest needs it)
+          REF: ${{ inputs.cli-ref }}
+        run: dogfood/check-ref.sh
+      - name: Use the candidate manifest
+        if: inputs.candidate-manifest
+        run: dogfood/kronicle-lite/candidate-manifest.sh
       - name: Check out mcp-writecheck
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,7 +123,7 @@ jobs:
         name: Plan
         uses: ./
         with:
-          manifest: dogfood/kronicle-lite/writecheck.yaml
+          manifest: ${{ env.KL_MANIFEST }}
           mode: plan
           artifact-name: kronicle-lite-plan
           cli-path: ${{ env.MWSC_CLI_PATH }}
@@ -110,7 +134,7 @@ jobs:
       - name: Catalog
         uses: ./
         with:
-          manifest: dogfood/kronicle-lite/writecheck.yaml
+          manifest: ${{ env.KL_MANIFEST }}
           mode: catalog
           fail-on: must
           artifact-name: kronicle-lite-catalog
@@ -122,7 +146,7 @@ jobs:
         name: Full run
         uses: ./
         with:
-          manifest: dogfood/kronicle-lite/writecheck.yaml
+          manifest: ${{ env.KL_MANIFEST }}
           mode: full
           fail-on: none
           confirm-target: kronicle-lite-dogfood
@@ -133,4 +157,4 @@ jobs:
         if: always() && steps.full.outputs.results-path != ''
         env:
           RESULTS: ${{ steps.full.outputs.results-path }}
-        run: node dogfood/expect-violations.mjs dogfood/kronicle-lite/known-violations.txt "$RESULTS"
+        run: node dogfood/expect-violations.mjs "$KL_KNOWN" "$RESULTS"
