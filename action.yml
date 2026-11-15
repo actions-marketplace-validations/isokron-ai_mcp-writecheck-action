@@ -1,0 +1,141 @@
+name: mcp-writecheck
+description: >-
+  Runs mcp-writecheck against an MCP server in CI and reports each MCP Write-Safety Requirement
+  (MWS 0.9) per write path. Mode full makes real writes; point it only at a test environment.
+author: IsoKron
+
+inputs:
+  manifest:
+    description: Path of the mcp-writecheck manifest, relative to the workspace (the repository root after checkout).
+    required: true
+  mode:
+    description: >-
+      plan: build and print the plan and its hash. No tool is called, nothing is written, and no
+      test environment is needed. There are no verdicts in this mode.
+      catalog: catalog-only verdicts (MWS-ANN-4 per tool) from tools/list or a saved catalog. No
+      tool is called and nothing is written; every other requirement is not tested.
+      full: run the checks. This makes real writes to whatever the manifest points at.
+    required: false
+    default: plan
+  fail-on:
+    description: >-
+      Which verdicts fail the job in modes full and catalog. none: no verdict does. must: a
+      violated MUST. any: any violated record. A run that did not complete, lost an object the
+      tester did not create, left setup unreleased or could not finish its clean-up always fails
+      the job.
+    required: false
+    default: must
+  cli-ref:
+    description: >-
+      The commit of mcp-writecheck to fetch and build. Use a full 40-character SHA. The default
+      is the commit this version of the action was written and tested against.
+    required: false
+    default: 0295ed6494d99ce5467f0d6e94e91a5c436a18c2
+  confirm-target:
+    description: Mode full only, required there. The manifest's target.confirm, typed back.
+    required: false
+    default: ''
+  plan-hash:
+    description: >-
+      Mode full only, required there. The plan hash a person has read and accepted, as printed
+      by mode plan. The run is refused when today's plan has another hash.
+    required: false
+    default: ''
+  catalog:
+    description: >-
+      Modes plan and catalog, optional. A saved tools/list answer, a list of tools, or the
+      catalog.json of an earlier run. With it, no server is started at all.
+    required: false
+    default: ''
+  spec-url:
+    description: Base URL of the public MWS page. Each requirement ID in the summary links to its anchor there.
+    required: false
+    default: https://isokron.ai/mws
+  results-dir:
+    description: Folder the results are written to and the artifact is made from.
+    required: false
+    default: mwsc-results
+  artifact-name:
+    description: Name of the uploaded artifact. Give each job of a matrix its own name.
+    required: false
+    default: mcp-writecheck-results
+  cli-path:
+    description: >-
+      Optional. Folder of an mcp-writecheck package that is already built (it holds
+      dist/src/cli/main.js). When set, nothing is fetched and cli-ref is not used.
+    required: false
+    default: ''
+  cli-token:
+    description: >-
+      Optional. A token that can read the mcp-writecheck repository, needed only while that
+      repository is private: fine-grained, that one repository, Contents read-only, short expiry.
+      Only the step that fetches the CLI gets it, and only its git fetch uses it.
+    required: false
+    default: ''
+
+outputs:
+  plan-hash:
+    description: The plan hash mcp-writecheck printed (both modes), or empty.
+    value: ${{ steps.run.outputs.plan-hash }}
+  results-path:
+    description: The folder of this run's results (modes full and catalog) or of plan.txt (mode plan), or empty.
+    value: ${{ steps.run.outputs.results-path }}
+  cli-exit-code:
+    description: The exit status of mcp-writecheck itself.
+    value: ${{ steps.run.outputs.cli-exit-code }}
+  exit-status:
+    description: The job status this action decided, 0 or 1, before the last step applies it.
+    value: ${{ steps.run.outputs.exit-status }}
+
+runs:
+  using: composite
+  steps:
+    # Inputs reach the script as environment variables, never by interpolation into a command.
+    # This is the only step that gets cli-token; the run step below cannot read it.
+    - name: Obtain mcp-writecheck
+      id: cli
+      shell: bash
+      env:
+        INPUT_CLI_REF: ${{ inputs.cli-ref }}
+        INPUT_CLI_PATH: ${{ inputs.cli-path }}
+        INPUT_CLI_TOKEN: ${{ inputs.cli-token }}
+      run: exec node "$GITHUB_ACTION_PATH/src/main.mjs" obtain
+
+    - name: Run mcp-writecheck
+      id: run
+      shell: bash
+      env:
+        MWSC_CLI_ENTRY: ${{ steps.cli.outputs.cli-entry }}
+        INPUT_MANIFEST: ${{ inputs.manifest }}
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_CONFIRM_TARGET: ${{ inputs.confirm-target }}
+        INPUT_PLAN_HASH: ${{ inputs.plan-hash }}
+        INPUT_CATALOG: ${{ inputs.catalog }}
+        INPUT_SPEC_URL: ${{ inputs.spec-url }}
+        INPUT_RESULTS_DIR: ${{ inputs.results-dir }}
+        INPUT_ARTIFACT_NAME: ${{ inputs.artifact-name }}
+      # exec: a signal the runner sends to this step's shell reaches the script itself.
+      run: exec node "$GITHUB_ACTION_PATH/src/main.mjs"
+
+    # The results are uploaded whatever the status is, and also when the job was cancelled: the
+    # state folder holds the ledger that `mcp-writecheck cleanup` needs after an interrupted run.
+    # The folder and name are the ones the script resolved (trimmed, defaulted).
+    - name: Upload the results folder
+      if: ${{ always() }}
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: ${{ steps.run.outputs.artifact-name || inputs.artifact-name }}
+        path: ${{ steps.run.outputs.results-root || inputs.results-dir }}
+        if-no-files-found: warn
+
+    - name: Set the job status from fail-on
+      shell: bash
+      env:
+        EXIT_STATUS: ${{ steps.run.outputs.exit-status }}
+      run: |
+        if [ "$EXIT_STATUS" = "0" ]; then
+          exit 0
+        fi
+        echo "mcp-writecheck: the job fails; the job summary says why."
+        exit 1

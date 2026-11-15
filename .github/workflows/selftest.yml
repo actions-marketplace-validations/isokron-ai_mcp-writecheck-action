@@ -1,0 +1,123 @@
+# The action's script against tiny-tracker, the MWS sample server, as test/local-test.sh runs it:
+# every mode, a lost bystander, a stopped, a cancelled and a crashed run, and the unit tests with
+# the built CLI and the spec. Needs the secret MWS_CLI_TOKEN while isokron-ai/mcp-write-safety is
+# private: a fine-grained token for that one repository, Contents read-only, short expiry.
+# Without the secret the job says how to add it and ends without failing.
+#
+# Not run on pull_request: a pull request from a fork gets no secrets, and this job uses one.
+
+name: selftest
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest
+  cancel-in-progress: false
+
+env:
+  # The commits the action is tested against: the CLI (contract.mjs CLI_DEFAULT_REF), tiny-tracker
+  # (branch examples/tiny-tracker-resync) and the spec (branch spec/0.9-review).
+  CLI_REF: 0295ed6494d99ce5467f0d6e94e91a5c436a18c2
+  TINY_TRACKER_REF: b9265fe3d768a40f316837cf31528e856ff809d8
+  SPEC_REF: e2bb9b05f951bba4424a53e6b9cda27abe9c852c
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - name: Check for the secret
+        id: secret
+        env:
+          MWS_CLI_TOKEN: ${{ secrets.MWS_CLI_TOKEN }}
+        run: |
+          if [ -n "$MWS_CLI_TOKEN" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          echo "::notice title=selftest skipped::The secret MWS_CLI_TOKEN is not set; see the job summary for how to add it."
+          {
+            echo "## Self-test skipped: no MWS_CLI_TOKEN"
+            echo
+            echo "The self-test builds mcp-writecheck from the private repository isokron-ai/mcp-write-safety, so it needs a token that can read it. To add one:"
+            echo
+            echo "1. Create a fine-grained personal access token: resource owner isokron-ai, repository access only isokron-ai/mcp-write-safety, permission Contents: read-only, a short expiry."
+            echo "2. Add it to this repository as the Actions secret MWS_CLI_TOKEN (Settings, Secrets and variables, Actions)."
+            echo "3. Run this workflow again (Actions, selftest, Run workflow)."
+            echo
+            echo "The secret is not needed once the CLI is on npm or the repository is public."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.secret.outputs.present == 'true'
+        with:
+          path: action
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        if: steps.secret.outputs.present == 'true'
+        with:
+          node-version: 22
+
+      - name: The pinned CLI commit is the action's default
+        if: steps.secret.outputs.present == 'true'
+        working-directory: action
+        run: |
+          node --input-type=module -e "
+            import { CLI_DEFAULT_REF } from './contract.mjs';
+            if (CLI_DEFAULT_REF !== process.env.CLI_REF) { console.error('contract.mjs CLI_DEFAULT_REF ' + CLI_DEFAULT_REF + ' is not CLI_REF ' + process.env.CLI_REF); process.exit(1); }
+          "
+
+      # The token is used here and nowhere else; it is not kept in the checkout's git config.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.secret.outputs.present == 'true'
+        with:
+          repository: isokron-ai/mcp-write-safety
+          ref: ${{ env.CLI_REF }}
+          token: ${{ secrets.MWS_CLI_TOKEN }}
+          path: mws
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build the CLI, tiny-tracker and the spec at the pinned commits
+        if: steps.secret.outputs.present == 'true'
+        run: |
+          set -euo pipefail
+          test "$(git -C mws rev-parse HEAD)" = "$CLI_REF"
+          (cd mws/packages/writecheck && npm ci --ignore-scripts --no-audit --no-fund && npm run build)
+          mkdir -p tt spec
+          git -C mws archive "$TINY_TRACKER_REF" examples/tiny-tracker | tar -x -C tt
+          (cd tt/examples/tiny-tracker && npm ci --ignore-scripts --no-audit --no-fund && npm run build)
+          git -C mws show "$SPEC_REF:spec/mws.md" > spec/mws.md
+
+      - name: Local test against tiny-tracker
+        if: steps.secret.outputs.present == 'true'
+        run: |
+          set -o pipefail
+          # tiny-tracker's backend token for this job only, masked before anything can print it.
+          TRACKER_BACKEND_TOKEN="local-test-$(openssl rand -hex 16)"
+          echo "::add-mask::$TRACKER_BACKEND_TOKEN"
+          export TRACKER_BACKEND_TOKEN
+          status=0
+          MWS_REPO="$PWD/mws" \
+          CLI_DIR="$PWD/mws/packages/writecheck" \
+          TINY_TRACKER_DIR="$PWD/tt/examples/tiny-tracker" \
+          MWS_SPEC="$PWD/spec/mws.md" \
+            action/test/local-test.sh "$RUNNER_TEMP/local-test" 2>&1 | tee "$RUNNER_TEMP/local-test.txt" || status=$?
+          {
+            echo "## Self-test against tiny-tracker"
+            echo
+            echo "CLI $CLI_REF, tiny-tracker $TINY_TRACKER_REF, spec $SPEC_REF. Exit status $status."
+            echo
+            echo '````text'
+            cut -c1-240 "$RUNNER_TEMP/local-test.txt"
+            echo '````'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"

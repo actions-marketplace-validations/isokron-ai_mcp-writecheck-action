@@ -1,0 +1,45 @@
+# Unit tests that need no secret. The contract tests that need a built CLI (CLI_DIR) or the
+# spec (MWS_SPEC) skip themselves here; selftest.yml runs them with both.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Unit tests
+        run: |
+          node --test --test-reporter=spec --test-reporter-destination=stdout \
+            --test-reporter=tap --test-reporter-destination="$RUNNER_TEMP/unit.tap" test/*.test.mjs
+      - name: Job summary
+        if: always()
+        run: |
+          TAP="$RUNNER_TEMP/unit.tap"
+          [ -f "$TAP" ] || { echo "No test output." >> "$GITHUB_STEP_SUMMARY"; exit 0; }
+          count() { sed -n "s/^# $1 //p" "$TAP" | tail -1; }
+          {
+            echo "## Unit tests"
+            echo
+            echo "tests $(count tests), pass $(count pass), fail $(count fail), skipped $(count skipped)"
+            if grep -q '# SKIP' "$TAP"; then
+              echo
+              echo "Skipped here because they need a built CLI (\`CLI_DIR\`) or the spec (\`MWS_SPEC\`), which this workflow does not have; \`selftest.yml\` runs them:"
+              echo
+              grep '# SKIP' "$TAP" | sed -E 's/^ *ok [0-9]+ - (.*) # SKIP (.*)$/- \1 (\2)/'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
