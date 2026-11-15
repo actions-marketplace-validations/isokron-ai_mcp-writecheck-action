@@ -4,6 +4,14 @@
 #            fail-on: must. Expected green.
 #   defects  the same server with every teaching defect on (TRACKER_DEFECTS=all). The action must FAIL
 #            this job's run step; the job itself passes only when it does, with violated records.
+#   defect   a matrix, one tiny-tracker defect per cell (dogfood/tiny-tracker/defects.json): each cell
+#            expects a violated record of its defect's requirement (for a review-only clause, a self-attested
+#            record answered no), or is a known miss of the CLI
+#            (an expected failure, flipped when the CLI detects it). Pinned CLI only: a cli-ref
+#            dispatch skips it (its plans would need one accepted hash per cell).
+#   traps    known CLI bugs as expected failures, flipped when the CLI is fixed: a backend killed
+#            during the run (reported complete with exit 0), and a run in which every set-up fails
+#            (exit 0; manifest dogfood/tiny-tracker/writecheck-setup-fails.yaml). Pinned CLI only.
 #
 # The plan hashes below were read and accepted by a person (the action's rule: never take a hash
 # from a plan job's output). When tiny-tracker, the manifest or the CLI pin changes, the full run is
@@ -109,6 +117,18 @@ jobs:
       - name: Build tiny-tracker
         working-directory: tt/examples/tiny-tracker
         run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      - name: The defect matrix lists every defect of this tiny-tracker
+        if: inputs.tiny-tracker-ref == ''
+        run: |
+          node --input-type=module -e '
+            import { readFileSync } from "node:fs";
+            const { DEFECTS } = await import(process.cwd() + "/tt/examples/tiny-tracker/dist/src/start.js");
+            const listed = new Set(JSON.parse(readFileSync("dogfood/tiny-tracker/defects.json", "utf8")).cells.map((c) => c.defect));
+            const missing = DEFECTS.map((d) => d.name).filter((n) => !listed.has(n));
+            const extra = [...listed].filter((n) => !DEFECTS.some((d) => d.name === n));
+            if (missing.length || extra.length) { console.log("::error::defects.json and tiny-tracker differ: missing " + missing.join(", ") + "; not in tiny-tracker " + extra.join(", ")); process.exit(1); }
+            console.log("the matrix lists all " + DEFECTS.length + " defects");
+          '
       - name: Start the tiny-tracker backend
         run: dogfood/tiny-tracker/backend.sh start
       - id: plan
@@ -234,6 +254,213 @@ jobs:
           CLI_EXIT: ${{ steps.full.outputs.cli-exit-code }}
           RESULTS: ${{ steps.full.outputs.results-path }}
         run: dogfood/tiny-tracker/expect-defects.sh
+      - name: Stop the backend
+        if: always()
+        run: dogfood/tiny-tracker/backend.sh stop
+
+  defect-list:
+    if: inputs.cli-ref == '' && inputs.tiny-tracker-ref == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      cells: ${{ steps.cells.outputs.cells }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          sparse-checkout: dogfood/tiny-tracker/defects.json
+          sparse-checkout-cone-mode: false
+      - id: cells
+        run: |
+          node -e '
+            const c = JSON.parse(require("fs").readFileSync("dogfood/tiny-tracker/defects.json", "utf8")).cells;
+            if (!Array.isArray(c) || c.length === 0 || new Set(c.map((x) => x.defect)).size !== c.length) { console.error("cells must be a non-empty list of distinct defects"); process.exit(1); }
+            for (const x of c) if (!/^[a-z0-9-]+$/.test(x.defect) || !/^MWS-[A-Z]+-[0-9]+$/.test(x.requirement) || !/^[0-9a-f]{16}$/.test(x.plan_hash) || !["detected", "missed"].includes(x.expect)) { console.error("bad cell", JSON.stringify(x)); process.exit(1); }
+            require("fs").appendFileSync(process.env.GITHUB_OUTPUT, "cells=" + JSON.stringify(c) + "\n");
+          '
+
+  defect:
+    needs: defect-list
+    if: inputs.cli-ref == '' && inputs.tiny-tracker-ref == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    name: defect ${{ matrix.defect }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        include: ${{ fromJSON(needs.defect-list.outputs.cells) }}
+    env:
+      TRACKER_DEFECTS: ${{ matrix.defect }}
+      PLAN_HASH: ${{ matrix.plan_hash }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tiny-tracker ref is a full commit SHA
+        env:
+          NAME: tiny-tracker-ref
+          REF: ${{ env.TT_REF }}
+        run: dogfood/check-ref.sh
+      - name: Check out tiny-tracker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: isokron-ai/mcp-write-safety
+          ref: ${{ env.TT_REF }}
+          token: ${{ secrets.MWS_CLI_TOKEN }}
+          path: tt
+          sparse-checkout: examples/tiny-tracker
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Build tiny-tracker
+        working-directory: tt/examples/tiny-tracker
+        run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      - name: Start the tiny-tracker backend
+        run: dogfood/tiny-tracker/backend.sh start
+      - id: plan
+        name: Plan
+        uses: ./
+        with:
+          manifest: ${{ env.TT_MANIFEST }}
+          mode: plan
+          artifact-name: tiny-tracker-defect-${{ matrix.defect }}-plan
+          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
+      - name: Compare the plan hash with the accepted one
+        env:
+          SEEN: ${{ steps.plan.outputs.plan-hash }}
+        run: dogfood/check-plan-hash.sh "$PLAN_HASH" "$SEEN"
+      - id: full
+        name: Full run (fail-on none; the next step decides)
+        uses: ./
+        with:
+          manifest: ${{ env.TT_MANIFEST }}
+          mode: full
+          fail-on: none
+          confirm-target: tiny-tracker
+          plan-hash: ${{ env.ACCEPTED_PLAN_HASH }}
+          artifact-name: tiny-tracker-defect-${{ matrix.defect }}-full
+          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
+      - name: Was the defect detected?
+        if: always() && steps.full.outputs.results-path != ''
+        env:
+          DEFECT: ${{ matrix.defect }}
+          REQUIREMENT: ${{ matrix.requirement }}
+          EXPECT: ${{ matrix.expect }}
+          RESULTS: ${{ steps.full.outputs.results-path }}
+        run: node dogfood/tiny-tracker/expect-defect.mjs "$RESULTS"
+      - name: Stop the backend
+        if: always()
+        run: dogfood/tiny-tracker/backend.sh stop
+
+  traps:
+    if: inputs.cli-ref == '' && inputs.tiny-tracker-ref == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The tiny-tracker ref is a full commit SHA
+        env:
+          NAME: tiny-tracker-ref
+          REF: ${{ env.TT_REF }}
+        run: dogfood/check-ref.sh
+      - name: Check out tiny-tracker
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: isokron-ai/mcp-write-safety
+          ref: ${{ env.TT_REF }}
+          token: ${{ secrets.MWS_CLI_TOKEN }}
+          path: tt
+          sparse-checkout: examples/tiny-tracker
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Build tiny-tracker
+        working-directory: tt/examples/tiny-tracker
+        run: npm ci --ignore-scripts --no-audit --no-fund && npm run build
+      # Trap 1: the backend crashes during the run.
+      - name: Start the tiny-tracker backend
+        run: dogfood/tiny-tracker/backend.sh start
+      - id: plan-crash
+        name: Plan (backend-crash)
+        uses: ./
+        with:
+          manifest: dogfood/tiny-tracker/writecheck.yaml
+          mode: plan
+          artifact-name: tiny-tracker-trap-crash-plan
+          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
+      - name: Compare the plan hash with the accepted one
+        env:
+          SEEN: ${{ steps.plan-crash.outputs.plan-hash }}
+        run: dogfood/check-plan-hash.sh 1cd00c43789a075f "$SEEN"
+      - name: Arm the crash (kills the backend once the run is under way)
+        run: |
+          nohup dogfood/tiny-tracker/crash-backend.sh mwsc-crash > "$RUNNER_TEMP/crash.log" 2>&1 &
+          echo $! > "$RUNNER_TEMP/crash-watcher.pid"
+      - id: crash
+        name: Full run, backend killed during it
+        continue-on-error: true
+        uses: ./
+        with:
+          manifest: dogfood/tiny-tracker/writecheck.yaml
+          mode: full
+          fail-on: none
+          confirm-target: tiny-tracker
+          plan-hash: ${{ env.ACCEPTED_PLAN_HASH }}
+          results-dir: mwsc-crash
+          artifact-name: tiny-tracker-trap-crash-full
+          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
+      - name: Trap backend-crash
+        if: always()
+        env:
+          TRAP: backend-crash
+          CLI_EXIT: ${{ steps.crash.outputs.cli-exit-code }}
+          EXIT_STATUS: ${{ steps.crash.outputs.exit-status }}
+          RESULTS: ${{ steps.crash.outputs.results-path }}
+        run: |
+          kill "$(cat "$RUNNER_TEMP/crash-watcher.pid")" 2>/dev/null || true
+          CRASH_LOG="$RUNNER_TEMP/crash.log" dogfood/tiny-tracker/expect-trap.sh
+      # Trap 2: every resource's set-up fails.
+      - name: Start a fresh backend
+        if: always()
+        run: dogfood/tiny-tracker/backend.sh stop; dogfood/tiny-tracker/backend.sh start
+      - id: plan-setup
+        name: Plan (setup-fails)
+        uses: ./
+        with:
+          manifest: dogfood/tiny-tracker/writecheck-setup-fails.yaml
+          mode: plan
+          artifact-name: tiny-tracker-trap-setup-plan
+          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
+      - name: Compare the plan hash with the accepted one
+        env:
+          SEEN: ${{ steps.plan-setup.outputs.plan-hash }}
+        run: dogfood/check-plan-hash.sh df91a667f2a42138 "$SEEN"
+      - id: setup
+        name: Full run, every set-up failing
+        continue-on-error: true
+        uses: ./
+        with:
+          manifest: dogfood/tiny-tracker/writecheck-setup-fails.yaml
+          mode: full
+          fail-on: none
+          confirm-target: tiny-tracker
+          plan-hash: ${{ env.ACCEPTED_PLAN_HASH }}
+          results-dir: mwsc-setup
+          artifact-name: tiny-tracker-trap-setup-full
+          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
+      - name: Trap setup-fails
+        if: always()
+        env:
+          TRAP: setup-fails
+          CLI_EXIT: ${{ steps.setup.outputs.cli-exit-code }}
+          EXIT_STATUS: ${{ steps.setup.outputs.exit-status }}
+          RESULTS: ${{ steps.setup.outputs.results-path }}
+        run: dogfood/tiny-tracker/expect-trap.sh
       - name: Stop the backend
         if: always()
         run: dogfood/tiny-tracker/backend.sh stop
