@@ -1,0 +1,30 @@
+# Violated MUST records the research build is known to give, one per line:
+#   <requirement> <resource>:<tool> <scenario>
+# dogfood/expect-violations.mjs fails the job on a violated MUST record not listed here, and
+# reports a listed one that no longer appears (remove it, so that a return is caught).
+# The full run's job summary gives each record's reason. Grouped by requirement:
+#
+# MWS-IN-4
+MWS-IN-4 dashboard:get_dashboard_by_uid schema-probes
+MWS-IN-4 dashboard:update_dashboard schema-probes
+MWS-IN-4 dashboard-full:update_dashboard schema-probes
+MWS-IN-4 dashboard-v2:get_dashboard_by_uid schema-probes
+MWS-IN-4 dashboard-v2:update_dashboard schema-probes
+MWS-IN-4 alert-rule:alerting_rules_read schema-probes
+MWS-IN-4 alert-rule:alerting_rules_write schema-probes
+MWS-IN-4 alert-rule-alt:alerting_rules_read schema-probes
+MWS-IN-4 alert-rule-alt:alerting_rules_write schema-probes
+MWS-IN-4 annotation:get_annotations schema-probes
+MWS-IN-4 annotation:update_annotation schema-probes
+# MWS-IN-3
+MWS-IN-3 alert-rule:alerting_rules_read schema-probes
+MWS-IN-3 alert-rule:alerting_rules_write schema-probes
+MWS-IN-3 alert-rule-alt:alerting_rules_read schema-probes
+MWS-IN-3 alert-rule-alt:alerting_rules_write schema-probes
+# MWS-CONC-2
+MWS-CONC-2 dashboard-v2:update_dashboard stale-write
+# MWS-CONC-3
+MWS-CONC-3 alert-rule:alerting_rules_write barrier-pairs
+MWS-CONC-3 alert-rule:alerting_rules_write held-request
+MWS-CONC-3 alert-rule-alt:alerting_rules_write barrier-pairs
+MWS-CONC-3 alert-rule-alt:alerting_rules_write held-request
