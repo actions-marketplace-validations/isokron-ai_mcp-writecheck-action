@@ -105,7 +105,7 @@ These fail the job whatever `fail-on` says:
 
 - **A run that lost an object it did not create.** The bystander inventory found an object outside the tester's own gone, changed, or missing from every listing after a targeting call (`numbers.bystanders_lost` in `results.json`). The summary lists them first. Check them, and restore what was lost from your backup.
 - **A clean-up that did not finish:** deletes that failed, creates whose outcome is unknown, or a clean-up that stopped (`cleanup.failed`, `cleanup.unknown`, `cleanup.stopped`). Objects of the run may still be in the test environment, and the next run against it is refused until `mcp-writecheck cleanup` has run with the artifact's `state` folder. This is also how a test environment that failed during the run shows: the CLI then reports the run as complete, with every later check `not tested`.
-- **A run in which the set-up of every object under test failed.** Every resource with an object under test (an update tool and two fields, created by the run or named as a fixture) has its checks recorded `not tested` with "setup failed: …", so none of their write paths was tested. The action reads this from `results.json` and the run's `plan.json`. The CLI at the pinned commit reports such a run as complete with exit 0; later CLI commits stop it (exit 4). Where only some set-ups failed, the others were tested: the failed ones are listed under "Needs attention" and `fail-on` decides. A plan, a catalog-only run, and a manifest whose resources have no object under test have no set-up, so this never applies to them.
+- **A run in which the set-up of every object under test failed.** Every resource with an object under test (an update tool and two fields, created by the run or named as a fixture) has its checks recorded `not tested` with "setup failed: …", so none of their write paths was tested. The action reads this from `results.json` and the run's `plan.json`. The CLI at the pinned commit reports such a run as complete with exit 0; the CLI's fix (commit `e613620`, not yet the pin) stops it with exit 4, and the job then fails as a run that did not complete. Where only some set-ups failed, the others were tested: the failed ones are listed under "Needs attention" and `fail-on` decides. A plan, a catalog-only run, and a manifest whose resources have no object under test have no set-up, so this never applies to them.
 - **Setup left on the platform.** Setup the run made through the platform's own API that it could not release or confirm released (`safety.setup_unresolved`, written by CLI releases that make such setup; the CLI then exits 4).
 - **A run that did not complete:** a usage or manifest error (CLI exit 2), a refusal (3), a run that stopped or failed (4, or a `stopped` status in the results), an interruption (130), or results the action cannot read. There is then nothing to judge, and a green job would hide that.
 
@@ -113,7 +113,7 @@ Otherwise only `violated` records can fail the job:
 
 | `fail-on` | The job fails when |
 |---|---|
-| `none` | never, for a completed run that lost nothing, cleaned up and set up at least one object under test |
+| `none` | never, for a completed run that lost nothing, cleaned up, and did not fail the set-up of every object under test it had |
 | `must` | a record of a MUST is `violated` |
 | `any` | any record is `violated` |
 

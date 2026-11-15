@@ -206,6 +206,8 @@ The backend token of the run appears in no log, summary or results file of the o
 
 Runs: the selftest on the branch (pinned CLI, unit tests with `CLI_DIR` and `MWS_SPEC`, both cases ok): https://github.com/isokron-ai/mcp-writecheck-action/actions/runs/43774351584. The same script on a Mac (Node 26) against both CLIs: every case as expected, except the crashed-environment case under `e613620`, where the CLI now exits 4 (its fix of CLI problem 14) instead of the 0 the script expects at the pin. `test/setup.test.mjs` replays recorded runs of both CLIs (five manifests each) without a CLI.
 
+The traps job on a `cli-ref` dispatch needs the plan hashes of that CLI. For `e613620` against tiny-tracker `b9265fe` they are `crash=2d043bbaf9cf8f22` (the same manifest as `clean`) and `setup=ab0e2f57711a06b4`. Both plans were read in full in the review of 15 November (made again locally; same hashes as in the dispatch run). Each differs from the plan accepted for the pinned CLI (`1cd00c43789a075f`, `df91a667f2a42138`) only by what the CLI changed: stale-write v4 (the stale test on one connection and one credential), larger schema-probe budgets (252 and 52 writes instead of 150 and 30), and one more `not tested` line (MWS-CONC-2 for `delete_ticket` on `ticket-replace`, whose delete carries no version). At most 1601 writes in all, the only host is `127.0.0.1:4610`, and the two plans differ from each other only in the manifest hash.
+
 ## What has not been tested
 
 None of these has run on a GitHub runner. Each needs a real workflow run before any release.
