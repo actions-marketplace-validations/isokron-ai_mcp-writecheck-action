@@ -1,0 +1,11 @@
+# Violated MUST records kronicle-lite is known to give with the candidate manifest (writecheck.yaml plus
+# the document-reput resource, made by candidate-manifest.sh; dispatch with candidate-manifest and a
+# cli-ref that reads key.class). Same format and rules as known-violations.txt.
+#
+# The records of known-violations.txt:
+MWS-RETRY-2 document:put_document idempotency-replay
+MWS-ATOM-1 document-apply:apply multi-item
+# A re-put of an existing slug replaces the document's markdown (changed blocks superseded, dropped
+# ones tombstoned), but put_document declares destructiveHint: false (MWS-ANN-2; MWS-ANN-5, a SHOULD,
+# is violated by the same call). kronicle-lite PR #57 declares destructiveHint: true.
+MWS-ANN-2 document-reput:put_document annotation-effects

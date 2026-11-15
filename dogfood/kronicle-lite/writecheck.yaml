@@ -53,9 +53,11 @@ patterns:
   not_used: '\bnot used\b|\bignored\b'
 
 # Arguments for the annotation checks (MWS-ANN-1 to ANN-3, ANN-5), each called on a scratch object.
-# supersede_block (destructiveHint: false) is not called here: the check counts a replaced field as
-# named only when an argument of the same name is passed, and supersede_block names the block's
-# content through new_content, so its record would not say anything true about the server.
+# supersede_block is not called here: the check counts a replaced field as named only when an argument
+# of the same name is passed, and supersede_block names the block's content through new_content, so
+# its record would not say anything true about the server. It is destructive: it replaces a block's
+# live content (kronicle-lite declares destructiveHint: true for it since #56, a67327f; the pinned
+# 0.11.2 still declares false).
 calls:
   tombstone_block: { resource: block, args: { block_id: "{{id}}", reason: dogfood annotation check } }
   recall: { resource: block, args: { query: paragraph } }
