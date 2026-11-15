@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { CLI, CLI_DEFAULT_REF, CLI_ENTRY, LEFT_BY_DECLARATION, REQUIREMENT_ID, requirementUrl, SPEC, SPEC_DEFAULT_URL, VERDICTS } from '../contract.mjs';
+import { CLI, CLI_DEFAULT_REF, CLI_ENTRY, LEFT_BY_DECLARATION, REQUIREMENT_ID, requirementUrl, SETUP, SPEC, SPEC_DEFAULT_URL, VERDICTS } from '../contract.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const cliDir = process.env.CLI_DIR;
@@ -166,4 +166,19 @@ test('the pinned CLI writes the leftover reasons LEFT_BY_DECLARATION matches', {
     const literal = re.source.replace(/^\^|\$$/g, '').replace(/\\(.)/g, '$1');
     assert.ok(src.includes(literal), `core/cleanup.js does not write the leftover reason "${literal}"`);
   }
+});
+
+test('the pinned CLI records a failed set-up and writes plan.json the way SETUP describes', { skip: !cliDir && 'set CLI_DIR to a built packages/writecheck' }, () => {
+  // why: decide() fails a run whose every set-up failed (Action finding A4) from two things the CLI writes: the set-up
+  // steps in plan.json and the reason of each check of a resource whose set-up failed. If the CLI changes either, the
+  // rule would stop firing without a sound, so both are checked here, in the compiled CLI (CLI_DIR may be any commit).
+  const run = readFileSync(join(cliDir, 'dist', 'src', 'cli', 'run.js'), 'utf8');
+  const prefix = SETUP.failedReason.source.replace(/^\^/, '');
+  assert.equal(run.split(`allNotRun(\`${prefix}\${`).length - 1, 1, `cli/run.js does not record "${prefix}…" for each check of a resource whose set-up failed`);
+  assert.ok(run.includes(`writeFileSync(join(outDir, '${CLI.planFile}'), JSON.stringify(red.value({ hash, plan })`), `cli/run.js does not write ${CLI.planFile} as { hash, plan }`);
+  // The set-up is attempted only for a resource with an update tool and set-up steps in the plan.
+  assert.match(run, /if \(!res\.update\) \{[\s\S]{0,400}?continue;[\s\S]{0,80}?if \(!rp\.setup\.length\) \{/, 'cli/run.js no longer skips resources without an update tool or without set-up steps before the set-up');
+  const plan = readFileSync(join(cliDir, 'dist', 'src', 'core', 'plan.js'), 'utf8');
+  assert.match(plan, /if \(!res\.update \|\| !res\.fields\)\s*return \{ object: '[^']*', setup: \[\]/, 'core/plan.js no longer gives a resource without an object under test empty set-up steps');
+  assert.match(plan, /resources\.push\(\{ resource: res\.name, object: s\.object, setup: blocked \? \[\] : s\.setup,/, 'core/plan.js no longer writes resources[].setup');
 });

@@ -14,7 +14,7 @@
  * that were lost (the bystander inventory), setup that was not released, objects left behind.
  */
 
-import { CLI, LEFT_BY_DECLARATION, RESULTS_FIELDS, requirementUrl, REQUIREMENT_ID, SPEC, VERDICTS } from '../contract.mjs';
+import { CLI, LEFT_BY_DECLARATION, RESULTS_FIELDS, requirementUrl, REQUIREMENT_ID, SETUP, SPEC, VERDICTS } from '../contract.mjs';
 
 const REGISTRY = new Map(SPEC.requirements.map((r) => [r.id, r]));
 
@@ -109,12 +109,40 @@ export function safetyFacts(doc) {
   };
 }
 
+/**
+ * Which set-ups of an object under test failed (contract.mjs, SETUP).
+ *
+ * `failed` comes from results.json alone: the resources with a record whose reason is the CLI's set-up
+ * failure text, each with the first such reason. `attempted` needs the run's plan.json: the resources
+ * whose plan lists set-up steps. It is null when there is no plan, or the plan is not this run's (another
+ * hash), and then `every` is false: without the plan the action cannot tell a resource that was set up
+ * from one that has no object under test, so it does not fail the job.
+ *
+ * @param {object|null} doc   results.json
+ * @param {object|null} plan  plan.json of the same run ({ hash, plan })
+ * @returns {{ failed: { resource: string, reason: string }[], attempted: string[]|null, every: boolean }}
+ */
+export function setupFacts(doc, plan) {
+  const failed = [];
+  for (const r of Array.isArray(doc?.results) ? doc.results : []) {
+    const resource = r?.write_path?.resource;
+    if (typeof resource !== 'string' || typeof r.reason !== 'string' || !SETUP.failedReason.test(r.reason)) continue;
+    if (!failed.some((f) => f.resource === resource)) failed.push({ resource, reason: r.reason });
+  }
+  const entries = plan?.plan?.resources;
+  const ours = Array.isArray(entries) && typeof plan.hash === 'string' && plan.hash === doc?.plan?.hash;
+  const attempted = ours ? entries.filter((e) => typeof e?.resource === 'string' && Array.isArray(e.setup) && e.setup.length > 0).map((e) => e.resource) : null;
+  const every = !!attempted && attempted.length > 0 && attempted.every((name) => failed.some((f) => f.resource === name));
+  return { failed, attempted, every };
+}
+
 // ---------------------------------------------------------------------------------------------
 // The job status
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @param {{ failOn: 'none'|'must'|'any', cliExit: number|null, doc: object|null }} o
+ * @param {{ failOn: 'none'|'must'|'any', cliExit: number|null, doc: object|null, plan?: object|null }} o
+ *   plan: the run's plan.json, where there is one (mode full)
  * @returns {{ fail: boolean, reasons: string[], failing: object[] }}
  *
  * 1. A run that lost an object the tester did not create (a bystander), left setup on the platform
@@ -123,9 +151,12 @@ export function safetyFacts(doc) {
  *    act, and with an open ledger the next run against the target is refused.
  * 2. A run that did not complete fails the job whatever fail-on says: there is nothing to judge,
  *    and a green job would hide that.
- * 3. Otherwise fail-on decides, from the `violated` records alone. No other verdict fails a job.
+ * 3. A complete run in which the set-up of every object under test failed fails the job whatever
+ *    fail-on says: none of their write paths was tested, and a green job would hide that. Where only
+ *    some set-ups failed, the others were tested; the summary lists the failed ones, and fail-on decides.
+ * 4. Otherwise fail-on decides, from the `violated` records alone. No other verdict fails a job.
  */
-export function decide({ failOn, cliExit, doc }) {
+export function decide({ failOn, cliExit, doc, plan = null }) {
   const reasons = [];
   const facts = safetyFacts(doc);
   // why: these come first. They hold whether or not the run completed, and they are about the test
@@ -146,6 +177,12 @@ export function decide({ failOn, cliExit, doc }) {
     reasons.push(`The run stopped before it finished${doc.run?.stopped_reason ? ` (${md(doc.run.stopped_reason)})` : ''}. The records below are partial.`);
   }
   if (!CLI.exitRanToCompletion.includes(cliExit) || doc.run?.status !== 'complete') return { fail: true, reasons, failing: [] };
+
+  // why: Action finding A4. At the pinned CLI a run whose every set-up failed (seen: a create.id that names a
+  // field the create result does not have) is complete with exit 0 and no violated record, so no fail-on
+  // value failed it. A CLI that stops such a run (exit 4) is handled by rule 2 above and never gets here.
+  const setup = setupFacts(doc, plan);
+  if (setup.every) reasons.push(`The set-up of every object under test failed (${setup.failed.map((f) => `${code(f.resource)}: ${md(f.reason)}`).join('; ')}). None of their write paths was tested. This fails the job whatever \`fail-on\` says.`);
 
   const violated = (doc.results ?? []).filter((r) => r.verdict === 'violated');
   const failing = failOn === 'none' ? [] : failOn === 'must' ? violated.filter((r) => levelOf(r).must) : violated;
@@ -241,6 +278,7 @@ function safetySections(doc, facts) {
   if (facts.cleanupUnknown.length) warn.push(`Creates whose outcome is unknown are still open in the ledger (${facts.cleanupUnknown.slice(0, 20).map((x) => md(x.resource ?? '?')).join(', ')}). Download the artifact and run \`mcp-writecheck cleanup\` with its \`state\` folder against the same target.`);
   for (const c of facts.canariesChanged) warn.push(`Untouched-state canary ${code(c.name)} changed during the run${c.note ? ` (${md(c.note)})` : ''}.`);
   for (const f of facts.fixturesNotRestored) warn.push(`Fixture ${code(f.resource)} was not put back to its original values${f.note ? ` (${md(f.note)})` : ''}.`);
+  for (const f of setupFacts(doc, null).failed) warn.push(`The set-up of the object under test of ${code(f.resource)} failed, so its checks are \`not tested\`: ${md(f.reason)}.`);
   if (facts.leftByDeclaration.length) {
     const policies = uniq(facts.leftByDeclaration.map((x) => x.reason)).map(md).join('; ');
     L.push('');

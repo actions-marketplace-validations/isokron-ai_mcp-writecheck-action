@@ -21,8 +21,8 @@ inputs:
     description: >-
       Which verdicts fail the job in modes full and catalog. none: no verdict does. must: a
       violated MUST. any: any violated record. A run that did not complete, lost an object the
-      tester did not create, left setup unreleased or could not finish its clean-up always fails
-      the job.
+      tester did not create, left setup unreleased, could not finish its clean-up or could set up
+      none of its objects under test always fails the job.
     required: false
     default: must
   cli-ref:

@@ -1,0 +1,606 @@
+{
+ "recorded": "mcp-writecheck e613620, tiny-tracker b9265fe, partial-replace-fails; trimmed by hand-run script (one record per resource, verdict, level and set-up outcome)",
+ "cli_exit": 0,
+ "action_exit_status_before": 0,
+ "results": {
+  "format": "mws-results/1",
+  "scope": "Scope: server node dist/src/cli.js server --port 0 (launched by the tester) (catalog sha256:dddaaf30c3dc76c2…), resources project through create_project; ticket through update_ticket (fields assignee, status); ticket-replace through replace_ticket (fields assignee, status). Results are per write path; requirements marked not tested or not applicable say why.",
+  "run": {
+   "id": "recorded",
+   "prefix": "mwsc-recorded-",
+   "started": "2026-11-15T23:05:19.998Z",
+   "ended": "2026-11-15T23:05:31.462Z",
+   "status": "complete",
+   "stopped_reason": null,
+   "writes": 776,
+   "processes_started": 59
+  },
+  "target": {
+   "confirm": "tiny-tracker"
+  },
+  "plan": {
+   "hash": "bc9ea18c10da960d"
+  },
+  "results": [
+   {
+    "requirement": "MWS-CONC-2",
+    "level": "MUST",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "project",
+     "tool": "delete_project",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write",
+     "version": "4"
+    },
+    "reason": "the declaration states that the backend has no version check for delete_project; the stale call through it, with a control arm (row 3, platform) or without (row 4), is not built in this preview",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-5",
+    "level": "SHOULD",
+    "verdict": "self-attested",
+    "write_path": {
+     "resource": "project",
+     "tool": "delete_project",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write.review",
+     "version": "4"
+    },
+    "reason": "The backend cannot detect a change for delete_project (as declared). Does its description state that stale writes are not detected, or are detected only on a best-effort basis? Answer: yes — the statement of the tiny-tracker maintainers (rules written before the run), by the declared rule /not detected|best-effort/i over 1 captured text(s).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-1",
+    "level": "MUST",
+    "verdict": "not applicable",
+    "write_path": {
+     "resource": "project",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "schema-probes",
+     "version": "1"
+    },
+    "reason": "the input schema of list_projects declares no typed argument that the tester may probe",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-6",
+    "level": "SHOULD",
+    "verdict": "not applicable",
+    "write_path": {
+     "resource": "project",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "schema-probes",
+     "version": "1"
+    },
+    "reason": "the input schema of list_projects declares no typed argument that the tester may probe",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-2",
+    "level": "MUST",
+    "verdict": "held",
+    "write_path": {
+     "resource": "project",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "schema-probes",
+     "version": "1"
+    },
+    "reason": "list_projects rejected 1 and named as not used 0 of the 1 extra argument(s) judged.",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-7",
+    "level": "SHOULD",
+    "verdict": "held",
+    "write_path": {
+     "resource": "project",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "schema-probes",
+     "version": "1"
+    },
+    "reason": "list_projects rejected each of the 1 extra argument(s).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-4",
+    "level": "MUST",
+    "verdict": "self-attested",
+    "write_path": {
+     "resource": "project",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "schema-probes.review",
+     "version": "1"
+    },
+    "reason": "Does each rejection by list_projects give the reason the argument was refused? Answer: yes — the statement of the tiny-tracker maintainers (rules written before the run), by the declared rule /must|expected|one of|at (most|least)|not allowed|unknown|required|does not match|invalid/i over 1 captured text(s).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-ANN-1",
+    "level": "MUST",
+    "verdict": "not observed",
+    "write_path": {
+     "resource": "project",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "annotation-effects",
+     "version": "2"
+    },
+    "reason": "No change to this run's object in 2 call(s) of list_projects. Only this run's objects were watched, not the whole system (spec 8.2, rule 8).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-ANN-5",
+    "level": "SHOULD",
+    "verdict": "not observed",
+    "write_path": {
+     "resource": "project",
+     "tool": "create_project",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "annotation-effects",
+     "version": "2"
+    },
+    "reason": "create_project changed or removed nothing that was watched in the forced call. Only this run's objects were watched, not the whole system (spec 8.2, rule 8).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-UPD-1",
+    "level": "MUST",
+    "verdict": "held",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "read-after-write",
+     "version": "1"
+    },
+    "reason": "In 7 successful write(s), each changed only the field it named (assignee, status, description, details.component; ignored: updated_at, created_at, version).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-5",
+    "level": "SHOULD",
+    "verdict": "not applicable",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write",
+     "version": "4"
+    },
+    "reason": "The control arm of MWS-CONC-2 refused the stale write: the backend can detect the change.",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-4",
+    "level": "MUST",
+    "verdict": "self-attested",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write.review",
+     "version": "4"
+    },
+    "reason": "Does each conflict result say that the write was not applied? Answer: yes — the statement of the tiny-tracker maintainers (rules written before the run), by the declared rule /nothing was (written|deleted|changed)/i over 3 captured text(s).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-6",
+    "level": "SHOULD",
+    "verdict": "held",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write",
+     "version": "4"
+    },
+    "reason": "Each of the 3 conflict(s) carried the object's current state (the second writer's value and version).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-5",
+    "level": "SHOULD",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "set_labels",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write",
+     "version": "4"
+    },
+    "reason": "Neither a control arm nor the declaration shows whether the backend can detect the change (declare a control, or list the tool in no_version_check).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-3",
+    "level": "MUST",
+    "verdict": "not observed",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "barrier-pairs",
+     "version": "1"
+    },
+    "reason": "No lost update in 40 simultaneous pairs (40 overlapped); the per-pair loss rate under these conditions could still be up to about 8% (95% bound). No lost update was seen in these simultaneous pairs. This does not show the server is safe under concurrency. To force the interleaving, configure backend.gate.",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-5",
+    "level": "SHOULD",
+    "verdict": "not observed",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "schema-probes.in5",
+     "version": "1"
+    },
+    "reason": "update_ticket accepted the 1 declared value(s) valid by its schema. This is a search (spec 8.2, rule 8).",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-ANN-1",
+    "level": "MUST",
+    "verdict": "not applicable",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "update_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "annotation-effects",
+     "version": "2"
+    },
+    "reason": "update_ticket does not declare readOnlyHint: true",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-TGT-1",
+    "level": "MUST",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "ticket",
+     "tool": "bulk_update_tickets",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "targeting",
+     "version": "1"
+    },
+    "reason": "bulk_update_tickets updates or deletes and takes the scope argument project: the test with an object of the same name in each scope (spec R7-5) is not built in this preview",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-UPD-1",
+    "level": "MUST",
+    "verdict": "not applicable",
+    "write_path": {
+     "resource": "ticket-replace",
+     "tool": "replace_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "read-after-write",
+     "version": "1"
+    },
+    "reason": "replace_ticket is declared full_replace: a whole-object write is judged by MWS-CONC-2, not by \"only named fields change\"",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-RES-1",
+    "level": "MUST",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "ticket-replace",
+     "tool": "replace_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "read-after-write",
+     "version": "1"
+    },
+    "reason": "setup failed: could not create the object under test: no id in the create result",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-2",
+    "level": "MUST",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "ticket-replace",
+     "tool": "delete_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write",
+     "version": "4"
+    },
+    "reason": "delete_ticket's arguments in the manifest carry no {{version}}: declare where the delete takes the version the caller read (a delete that takes none cannot refuse a stale delete; if the tool has no such argument, it is a finding to check by hand against MWS-CONC-2)",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CONC-5",
+    "level": "SHOULD",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "ticket-replace",
+     "tool": "replace_ticket",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "stale-write",
+     "version": "4"
+    },
+    "reason": "setup failed: could not create the object under test: no id in the create result",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CFG-1",
+    "level": "MUST",
+    "verdict": "held",
+    "write_path": {
+     "resource": "(server)",
+     "tool": "TRACKER_READ_ONLY",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "launch-settings",
+     "version": "1"
+    },
+    "reason": "For every value tried the server either did not start or started with writes refused. (A value it recognised and one it treated as restrictive look the same; both are held.)",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CFG-4",
+    "level": "SHOULD",
+    "verdict": "held",
+    "write_path": {
+     "resource": "(server)",
+     "tool": "TRACKER_TOOLS",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "launch-settings",
+     "version": "1"
+    },
+    "reason": "The server refused to start with TRACKER_TOOLS=\"get_ticket,pudate_ticket\": exited (2) before printing its URL (exit 2): tiny-tracker: TRACKER_TOOLS names unknown tools: pudate_ticket. Not starting..",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-CFG-3",
+    "level": "MUST",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "(server)",
+     "tool": "TRACKER_READ_ONLY",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "launch-settings",
+     "version": "1"
+    },
+    "reason": "in read-only mode no write was seen to take effect, but replace_ticket was not called (replace_ticket: no call declared; give one as calls.replace_ticket: { resource, args }, the arguments for a call on a scratch object of that resource, or on an object the arguments name), so \"absent or refused\" is not shown for every declared write tool (the test calls each one, listed or not)",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-SEC-1",
+    "level": "MUST",
+    "verdict": "not observed",
+    "write_path": {
+     "resource": "(server)",
+     "tool": "add_comment",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "credential-scan",
+     "version": "1"
+    },
+    "reason": "No credential of the run (TRACKER_BACKEND_TOKEN) and no token-bearing URL in 7 result(s) of add_comment. A search cannot show that no credential is ever returned.",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-ANN-4",
+    "level": "SHOULD",
+    "verdict": "held",
+    "write_path": {
+     "resource": "(catalog)",
+     "tool": "list_projects",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "catalog",
+     "version": "1"
+    },
+    "reason": "list_projects sets readOnlyHint explicitly.",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   },
+   {
+    "requirement": "MWS-IN-6",
+    "level": "SHOULD",
+    "verdict": "not tested",
+    "write_path": {
+     "resource": "project",
+     "tool": "create_project",
+     "arm": "mcp"
+    },
+    "scenario": {
+     "id": "coverage",
+     "version": "1"
+    },
+    "reason": "create_project was not exercised for MWS-IN-6: not built in this preview",
+    "numbers": {},
+    "steps": [],
+    "notes": [],
+    "attribution": null
+   }
+  ],
+  "not_built": [],
+  "leftovers": [],
+  "cleanup": {
+   "deleted": [],
+   "failed": [],
+   "unknown": [],
+   "stopped": null,
+   "prefix": "mwsc-a1265f0767-"
+  },
+  "safety": {
+   "canaries": [
+    {
+     "name": "projects",
+     "tool": "list_projects",
+     "unchanged": true
+    }
+   ],
+   "fixtures_restored": []
+  }
+ },
+ "plan": {
+  "hash": "bc9ea18c10da960d",
+  "plan": {
+   "resources": [
+    {
+     "resource": "project",
+     "object": "no object under test (no update tool declared); checks create their own objects",
+     "setup": []
+    },
+    {
+     "resource": "ticket",
+     "object": "one new object named {{prefix}}… (cleanup: delete)",
+     "setup": [
+      "create_ticket (ledger intent first); get_ticket to verify the returned id carries the run prefix",
+      "update_ticket assignee and status to the baseline (\"ann\", \"in_progress\"); get_ticket"
+     ]
+    },
+    {
+     "resource": "ticket-replace",
+     "object": "one new object named {{prefix}}… (cleanup: delete)",
+     "setup": [
+      "create_ticket (ledger intent first); get_ticket to verify the returned id carries the run prefix",
+      "replace_ticket assignee and status to the baseline (\"ann\", \"in_progress\"); get_ticket"
+     ]
+    }
+   ]
+  }
+ }
+}

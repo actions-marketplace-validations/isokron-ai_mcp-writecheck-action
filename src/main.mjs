@@ -154,6 +154,16 @@ function readResults(runDir) {
   }
 }
 
+/** The run's plan.json, or null. Only decide() reads it, and it tells nothing without one (setupFacts). */
+function readPlan(runDir) {
+  if (!runDir) return null;
+  try {
+    return JSON.parse(readFileSync(join(runDir, CLI.planFile), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
 /** Error and warning lines for the job's annotations, from the decision and the safety facts. */
 function annotateRun(decision, doc) {
   if (decision.fail) for (const why of decision.reasons) annotate('error', plain(why));
@@ -270,7 +280,7 @@ async function main() {
 
   const runDir = findResultsDir(resultsRoot, before, r.out);
   const { doc, unreadable } = readResults(runDir);
-  const decision = decide({ failOn: i.failOn, cliExit: r.code, doc });
+  const decision = decide({ failOn: i.failOn, cliExit: r.code, doc, plan: readPlan(runDir) });
   if (unreadable) decision.reasons.push(unreadable);
   const planHashSeen = doc?.plan?.hash ?? lastMatch(CLI.runPlanLine, r.out)?.[1] ?? '';
   if (doc) writeSummary(renderRun({ doc, specUrl: i.specUrl, failOn: i.failOn, cliExit: r.code, decision, cliVersion: version, artifactName: i.artifactName, mode: 'full' }));

@@ -6,9 +6,10 @@
 #                ended). Known bug at CLI 0295ed6: the run is reported complete with exit 0. Fixed when
 #                it exits 4 (stopped or failed) or is not complete. The action must fail the job either way.
 # setup-fails    every resource's set-up fails (results.json must show it). Known bug at 0295ed6: exit 0.
-#                Fixed when non-zero.
+#                Fixed when non-zero. The action must fail the job either way (its own rule since A4).
 # While the bug is present the step passes with a notice; once the CLI is fixed it fails, so that the
-# trap is flipped to a plain expectation. A trap that did not happen as designed fails the step.
+# trap is flipped to a plain expectation. With FIXED=notice (a dispatch with another cli-ref, to see what
+# a candidate CLI does) a fixed bug is a notice instead. A trap that did not happen as designed fails the step.
 set -euo pipefail
 fail() { echo "::error::$1"; exit 1; }
 [ -n "${CLI_EXIT:-}" ] || fail "trap $TRAP did not run (no CLI exit status)"
@@ -28,12 +29,17 @@ case "$TRAP" in
   setup-fails)
     n=$(node -e 'const d=require(process.argv[1]); console.log(d.results.filter((r) => /^setup failed:/.test(r.reason ?? "")).length)' "$RESULTS/results.json")
     [ "$n" -gt 0 ] || fail "trap setup-fails: no record says the set-up failed; the trap did not happen as designed"
+    [ "${EXIT_STATUS:-}" = 1 ] || fail "the action did not fail the job in which every set-up failed"
     buggy=$([ "$CLI_EXIT" = 0 ] && echo yes || echo no)
     ;;
   *) fail "unknown trap $TRAP" ;;
 esac
 if [ "$buggy" = yes ]; then
   echo "::notice::known CLI bug still present ($TRAP): expected failure"
+  exit 0
+fi
+if [ "${FIXED:-}" = notice ]; then
+  echo "::notice::this CLI does not show the known bug ($TRAP): CLI exit $CLI_EXIT, run status $status"
   exit 0
 fi
 fail "the CLI no longer shows the known bug ($TRAP): flip this trap to an expectation in the workflow"

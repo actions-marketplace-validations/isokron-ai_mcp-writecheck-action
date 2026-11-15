@@ -115,6 +115,30 @@ export const CLI = {
   resultsFile: 'results.json',
   reportFile: 'report.md',
   resultsFormat: 'mws-results/1',
+  /**
+   * `run` also writes the plan it ran as <out>/<run id>/plan.json, `{ hash, plan }`, whose `hash` is the
+   * results' `plan.hash`. `catalog` writes none. The action reads `hash` and `plan.resources[].setup` (SETUP, below).
+   */
+  planFile: 'plan.json',
+};
+
+/**
+ * The set-up of an object under test, as `run` records it (src/cli/run.ts and src/core/plan.ts, the same
+ * at CLI_DEFAULT_REF and at the candidate e613620):
+ *
+ *   plan.json plan.resources[].setup  the set-up steps of each resource. Non-empty exactly for a resource
+ *                                     with an object under test (an update tool and its two fields) that the
+ *                                     run creates, or reads as a fixture: the resources whose set-up the run
+ *                                     attempts. Empty for a resource whose checks make their own objects.
+ *   results.json results[].reason     each check of a resource whose set-up failed is recorded `not tested`
+ *                                     on that resource, with a reason that starts with `failedReason`.
+ *
+ * At CLI_DEFAULT_REF a run in which every such set-up failed is `complete` with exit status 0, so it
+ * passed under every fail-on (Action finding A4). From e613620 on the CLI stops such a run itself
+ * (`stopped`, exit 4). src/summary.mjs, decide(), rule 3.
+ */
+export const SETUP = {
+  failedReason: /^setup failed: /,
 };
 
 /**

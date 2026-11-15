@@ -11,7 +11,9 @@
 #            dispatch skips it (its plans would need one accepted hash per cell).
 #   traps    known CLI bugs as expected failures, flipped when the CLI is fixed: a backend killed
 #            during the run (reported complete with exit 0), and a run in which every set-up fails
-#            (exit 0; manifest dogfood/tiny-tracker/writecheck-setup-fails.yaml). Pinned CLI only.
+#            (exit 0; manifest dogfood/tiny-tracker/writecheck-setup-fails.yaml). The action must fail
+#            both jobs whatever the CLI does. A cli-ref dispatch runs them too (plan-hashes keys crash and
+#            setup), and reports a fixed bug as a notice.
 #
 # The plan hashes below were read and accepted by a person (the action's rule: never take a hash
 # from a plan job's output). When tiny-tracker, the manifest or the CLI pin changes, the full run is
@@ -40,7 +42,7 @@ on:
         required: false
         default: false
       plan-hashes:
-        description: "Accepted plan hashes for that CLI, after reading the plans: space-separated job=hash pairs (jobs: clean, defects)."
+        description: "Accepted plan hashes for that CLI, after reading the plans: space-separated job=hash pairs (jobs: clean, defects, crash, setup)."
         required: false
         default: ''
   schedule:
@@ -355,9 +357,12 @@ jobs:
         run: dogfood/tiny-tracker/backend.sh stop
 
   traps:
-    if: inputs.cli-ref == '' && inputs.tiny-tracker-ref == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    if: inputs.tiny-tracker-ref == '' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      # A dispatch with another CLI shows what that CLI does: a fixed bug is a notice there, not a failure.
+      FIXED: ${{ inputs.cli-ref != '' && 'notice' || 'error' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -392,11 +397,12 @@ jobs:
           manifest: dogfood/tiny-tracker/writecheck.yaml
           mode: plan
           artifact-name: tiny-tracker-trap-crash-plan
+          cli-ref: ${{ inputs.cli-ref }}
           cli-token: ${{ secrets.MWS_CLI_TOKEN }}
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-crash.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh 1cd00c43789a075f "$SEEN"
+        run: dogfood/check-plan-hash.sh 1cd00c43789a075f "$SEEN" crash
       - name: Arm the crash (kills the backend once the run is under way)
         run: |
           nohup dogfood/tiny-tracker/crash-backend.sh mwsc-crash > "$RUNNER_TEMP/crash.log" 2>&1 &
@@ -413,6 +419,7 @@ jobs:
           plan-hash: ${{ env.ACCEPTED_PLAN_HASH }}
           results-dir: mwsc-crash
           artifact-name: tiny-tracker-trap-crash-full
+          cli-ref: ${{ inputs.cli-ref }}
           cli-token: ${{ secrets.MWS_CLI_TOKEN }}
       - name: Trap backend-crash
         if: always()
@@ -435,11 +442,12 @@ jobs:
           manifest: dogfood/tiny-tracker/writecheck-setup-fails.yaml
           mode: plan
           artifact-name: tiny-tracker-trap-setup-plan
+          cli-ref: ${{ inputs.cli-ref }}
           cli-token: ${{ secrets.MWS_CLI_TOKEN }}
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-setup.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh df91a667f2a42138 "$SEEN"
+        run: dogfood/check-plan-hash.sh df91a667f2a42138 "$SEEN" setup
       - id: setup
         name: Full run, every set-up failing
         continue-on-error: true
@@ -452,6 +460,7 @@ jobs:
           plan-hash: ${{ env.ACCEPTED_PLAN_HASH }}
           results-dir: mwsc-setup
           artifact-name: tiny-tracker-trap-setup-full
+          cli-ref: ${{ inputs.cli-ref }}
           cli-token: ${{ secrets.MWS_CLI_TOKEN }}
       - name: Trap setup-fails
         if: always()

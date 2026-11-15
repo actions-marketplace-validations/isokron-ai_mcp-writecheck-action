@@ -106,7 +106,7 @@ CLI_DIR="$CLI_DIR" nice node --test --test-reporter=tap "$HERE"/*.test.mjs > "$O
 
 # The safety lines of a summary: the job status, the sections before the verdicts, the violated records.
 show() {
-  grep -E '^\*\*Job status|^### (Objects the tester|Setup not released|Needs attention)|^- `MWS-[A-Z0-9-]*` on|^- (Objects of this run|Clean-up|Creates whose)' "$OUT/$1.summary.md" | grep -v 'objects listed:' | cut -c1-240 | sed 's/^/   /' || true
+  grep -E '^\*\*Job status|^### (Objects the tester|Setup not released|Needs attention)|^- `MWS-[A-Z0-9-]*` on|^- (Objects of this run|Clean-up|Creates whose|The set-up of)' "$OUT/$1.summary.md" | grep -v 'objects listed:' | cut -c1-240 | sed 's/^/   /' || true
   grep -o '^- \[MWS-[A-Z0-9-]*\]([^)]*) on `[^`]*`, scenario `[^`]*`: \*\*violated ([^)]*)\*\*[^.]*' "$OUT/$1.summary.md" | sed 's/^/   /' || true
 }
 
@@ -192,6 +192,22 @@ run_case plan-budget INPUT_MODE=plan INPUT_MANIFEST="$OUT/writecheck-budget.yaml
 run_case full-budget-none INPUT_MODE=full INPUT_FAIL_ON=none INPUT_CONFIRM_TARGET=tiny-tracker INPUT_PLAN_HASH="$PLAN_HASH" INPUT_MANIFEST="$OUT/writecheck-budget.yaml"
 expect "full, fail-on none" 1 4
 show full-budget-none
+
+echo "== set-ups that fail (create.id names a field the create result does not have; Action finding A4)"
+# Every resource with an object under test (ticket, ticket-replace): no write path of theirs is tested. The pinned CLI
+# reports the run complete with exit 0; a CLI with the fix (e613620 on) stops it with exit 4. The job fails either way.
+sed 's/}, id: id, name_path: title }$/}, id: no_such_id, name_path: title }/' "$MANIFEST" > "$OUT/writecheck-setup-fails.yaml"
+run_case plan-setup-fails INPUT_MODE=plan INPUT_MANIFEST="$OUT/writecheck-setup-fails.yaml"
+run_case full-setup-fails-none INPUT_MODE=full INPUT_FAIL_ON=none INPUT_CONFIRM_TARGET=tiny-tracker INPUT_PLAN_HASH="$PLAN_HASH" INPUT_MANIFEST="$OUT/writecheck-setup-fails.yaml"
+case "$CLI_EXIT" in 0|4) want_exit=$CLI_EXIT ;; *) want_exit="0 or 4" ;; esac
+expect "every set-up fails, fail-on none" 1 "$want_exit"
+show full-setup-fails-none
+# Only ticket-replace's: ticket is tested, so fail-on decides; the failed set-up is listed under Needs attention.
+awk '/^  - name: ticket-replace$/ { r = 1 } r && /}, id: id, name_path: title }$/ { sub(/}, id: id, name_path: title }$/, "}, id: no_such_id, name_path: title }") } { print }' "$MANIFEST" > "$OUT/writecheck-setup-partial.yaml"
+run_case plan-setup-partial INPUT_MODE=plan INPUT_MANIFEST="$OUT/writecheck-setup-partial.yaml"
+run_case full-setup-partial-none INPUT_MODE=full INPUT_FAIL_ON=none INPUT_CONFIRM_TARGET=tiny-tracker INPUT_PLAN_HASH="$PLAN_HASH" INPUT_MANIFEST="$OUT/writecheck-setup-partial.yaml"
+expect "one of two set-ups fails, fail-on none" 0 0
+show full-setup-partial-none
 
 echo "== a cancelled run (SIGTERM to the action's script once the run has written 100 ledger entries)"
 SIGNAL_AT=100 run_case full-cancelled-none INPUT_MODE=full INPUT_FAIL_ON=none INPUT_CONFIRM_TARGET=tiny-tracker INPUT_PLAN_HASH="$HASH"
