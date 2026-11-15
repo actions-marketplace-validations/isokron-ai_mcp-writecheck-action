@@ -195,6 +195,17 @@ The first two re-runs showed two faults of the script itself, fixed before the t
 
 The backend token of the run appears in no log, summary or results file of the output folder.
 
+## Every set-up failed (Action finding A4, 15 November)
+
+`test/local-test.sh` has two more cases, run from a copy of tiny-tracker's manifest: every resource's `create.id` names a field the create result does not have, and only `ticket-replace`'s does.
+
+| Case | CLI `0295ed6` (pinned) | CLI `e613620` (candidate) |
+|---|---|---|
+| every set-up fails, `fail-on: none` | CLI exit 0, `complete`; **job fails** (new rule) | CLI exit 4, `stopped`; job fails (run did not complete) |
+| one of two set-ups fails, `fail-on: none` | CLI exit 0; job passes; the failed set-up is under "Needs attention" | the same |
+
+Runs: the selftest on the branch (pinned CLI, unit tests with `CLI_DIR` and `MWS_SPEC`, both cases ok): https://github.com/isokron-ai/mcp-writecheck-action/actions/runs/43774351584. The same script on a Mac (Node 26) against both CLIs: every case as expected, except the crashed-environment case under `e613620`, where the CLI now exits 4 (its fix of CLI problem 14) instead of the 0 the script expects at the pin. `test/setup.test.mjs` replays recorded runs of both CLIs (five manifests each) without a CLI.
+
 ## What has not been tested
 
 None of these has run on a GitHub runner. Each needs a real workflow run before any release.
