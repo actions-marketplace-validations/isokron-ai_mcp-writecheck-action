@@ -1,0 +1,16 @@
+{
+  "name": "isokron",
+  "description": "IsoKron's plugins for MCP write safety.",
+  "owner": {
+    "name": "IsoKron",
+    "url": "https://isokron.ai/mws?utm_source=claude-plugins&utm_medium=directory&utm_campaign=skills"
+  },
+  "plugins": [
+    {
+      "name": "mcp-write-safety",
+      "source": "./",
+      "category": "development",
+      "tags": ["mcp", "agent-skills", "write-safety"]
+    }
+  ]
+}

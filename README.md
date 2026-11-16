@@ -11,7 +11,7 @@
 
 Runs [`mcp-writecheck`](https://github.com/isokron-ai/mcp-write-safety/tree/main/packages/writecheck) in the CI of a repository that holds an MCP server, and reports the result against the MCP Write-Safety Requirements (MWS 0.9) in the job summary.
 
-Status: draft. No release is tagged yet, and it is not listed on the Marketplace. It is pinned to commit [`7b95215`](https://github.com/isokron-ai/mcp-write-safety/commit/7b952151dddd84260d057cdb506081820003fe56) of the public [`isokron-ai/mcp-write-safety`](https://github.com/isokron-ai/mcp-write-safety) repository: MWS 0.9 (the public draft, 37 requirements) and `mcp-writecheck` 0.1.0, which is also published to npm as [`@mcp-write-safety/writecheck`](https://www.npmjs.com/package/@mcp-write-safety/writecheck). Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs). Commit SHAs in this repository's notes from before 16 November 2026 refer to the private pre-publication history of the spec and the CLI and do not resolve publicly.
+Status: 0.1 (preview). Use `isokron-ai/mcp-writecheck-action@v0` for updates within 0.x, or pin a release tag or commit SHA. It is pinned to commit [`7b95215`](https://github.com/isokron-ai/mcp-write-safety/commit/7b952151dddd84260d057cdb506081820003fe56) of the public [`isokron-ai/mcp-write-safety`](https://github.com/isokron-ai/mcp-write-safety) repository: MWS 0.9 (the public draft, 37 requirements) and `mcp-writecheck` 0.1.0, which is also published to npm as [`@mcp-write-safety/writecheck`](https://www.npmjs.com/package/@mcp-write-safety/writecheck). Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs). Commit SHAs in this repository's notes from before 16 November 2026 refer to the private pre-publication history of the spec and the CLI and do not resolve publicly.
 
 **Mode `full` makes real writes.** It creates, changes and deletes objects in whatever system the manifest points at. Point it only at a test environment that you are allowed to change. The default mode, `plan`, writes nothing.
 
@@ -162,7 +162,30 @@ Two agent skills, in [`skills/`](skills/):
 - [`mcp-write-safe-builder`](skills/mcp-write-safe-builder/SKILL.md): for agents that build or change the write tools of an MCP server. It walks the requirements, the result shape and the helper kits ([`@mcp-write-safety/kit`](https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/ts) and [`mcp-write-safety-kit`](https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/py)), and ends with running this Action.
 - [`mcp-write-safe-caller`](skills/mcp-write-safe-caller/SKILL.md): for agents that call write tools. It treats a tool with no annotations as destructive, retries with the same key and the same arguments, and reads back before acting on an unknown outcome.
 
-Each is a single `SKILL.md`; copy its folder into your agent's skills directory.
+Each is a single `SKILL.md`. Copy its folder into your agent's skills directory, or install both with the `skills` CLI:
+
+```sh
+npx skills add isokron-ai/mcp-writecheck-action
+```
+
+It lists the two skills and asks which agents to install them for. `--skill '*' --agent claude-code --yes` installs both into `.claude/skills/` without prompts.
+
+### Install as a plugin
+
+The repository is also a plugin, `mcp-write-safety`, and a marketplace, `isokron`, that lists it (both in [`.claude-plugin/`](.claude-plugin/)). The plugin holds the two skills above and nothing else: no hooks, commands, MCP servers or scripts, so installing it runs nothing and sends nothing. From a shell:
+
+```sh
+claude plugin marketplace add isokron-ai/mcp-writecheck-action
+claude plugin install mcp-write-safety@isokron
+```
+
+Or in a session (version 2.1.275 or later), in one step:
+
+```text
+/plugin install mcp-write-safety --marketplace isokron-ai/mcp-writecheck-action
+```
+
+The skills then load as `mcp-write-safety:mcp-write-safe-builder` and `mcp-write-safety:mcp-write-safe-caller`. `claude plugin update mcp-write-safety@isokron` fetches a new version when one is released.
 
 ## Licence
 
