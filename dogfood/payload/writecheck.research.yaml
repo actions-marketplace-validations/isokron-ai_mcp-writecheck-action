@@ -105,6 +105,12 @@ resources:
     fields:
       - { path: price, values: [10, 12] }
       - { path: name, values: [first name, second name] }
+    # Spec R15-4 (CLI 2443620): the arguments of updateListings the tester may send with another value and put back
+    # through the same tool. price and name are stored scalars the read shows. depth and returnDocument act on the call alone (they shape the answer; nothing
+    # is stored). Not listed: archived (a hook then refuses every update), draft and _status (a draft or a published
+    # version is created), locale and fallbackLocale (another locale's values), overrideLock (lock handling), all
+    # (the bulk form).
+    restorable: [price, name, { arg: depth, call_only: true }, { arg: returnDocument, call_only: true }]
     delete: { tool: deleteListings, args: { id: "{{id}}" } }
     # No list block: a list answer is one fenced json block per document, and only the first is read.
     # list: { tool: findListings, args: { where: '{"sku":{"contains":"{{prefix}}"}}', limit: 100 }, items: docs, id: id, name: sku }
@@ -127,6 +133,12 @@ resources:
     fields:
       - { path: locale, values: [en-GB, de-DE] }
       - { path: draft, values: [true, false] }
+    # Spec R15-4 (CLI 2443620): the arguments of updateListings the tester may send with another value and put back
+    # through the same tool. name and price are stored scalars the read shows. depth and returnDocument act on the call alone (they shape the answer; nothing
+    # is stored). Not listed: archived (a hook then refuses every update), draft and _status (a draft or a published
+    # version is created), locale and fallbackLocale (another locale's values), overrideLock (lock handling), all
+    # (the bulk form).
+    restorable: [name, price, { arg: depth, call_only: true }, { arg: returnDocument, call_only: true }]
     delete: { tool: deleteListings, args: { id: "{{id}}" } }
     cleanup: delete
     control:
@@ -165,6 +177,12 @@ resources:
     fields:
       - { path: author, values: [ann, bob] }
       - { path: category, values: [guide, release] }
+    # Spec R15-4 (CLI 2443620): the arguments of updatePosts the tester may send with another value and put back
+    # through the same tool. author, category, summary and readingMinutes are stored scalars the read shows. depth and returnDocument act on the call alone (they shape the answer; nothing
+    # is stored). Not listed: archived (a hook then refuses every update), draft and _status (a draft or a published
+    # version is created), locale and fallbackLocale (another locale's values), overrideLock (lock handling), all
+    # (the bulk form).
+    restorable: [author, category, summary, readingMinutes, { arg: depth, call_only: true }, { arg: returnDocument, call_only: true }]
     delete: { tool: deletePosts, args: { id: "{{id}}" } }
     # No list block: a list answer is one fenced json block per document, and only the first is read.
     # list: { tool: findPosts, args: { where: '{"slug":{"contains":"{{prefix}}"}}', limit: 100 }, items: docs, id: id, name: slug }
@@ -201,6 +219,9 @@ resources:
     fields:
       - { path: "items[0].url", values: ["https://example.test/a0", "https://example.test/a1"] }
       - { path: author, values: [ann, bob] }
+    # Spec R15-4: no restorable here. A whole-object updatePosts gives the array rows new ids on every call
+    # (finding PR-1), so no put-back can make the object read as it was; the run with them listed retired this
+    # object after the first counterpart, and its MWS-ANN-3 check (PR-1) was not run.
     delete: { tool: deletePosts, args: { id: "{{id}}" } }
     cleanup: delete
     control:

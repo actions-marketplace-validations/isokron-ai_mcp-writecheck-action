@@ -98,6 +98,10 @@ resources:
       # `value` is declared with every JSON type, so no value is of the wrong type for it.
       - { path: description, values: ["mwsv alpha", "mwsv beta"], skip: [invalid] }
       - { path: timezone, values: [utc, browser], skip: [invalid] }
+    # Spec R15-4 (CLI 2443620): overwrite and expectedVersion act on that save alone (an override and the version
+    # check), so they are put back by sending the base call without them. Not listed: message (a version-history note
+    # that cannot be removed).
+    restorable: [{ arg: overwrite, call_only: true }, { arg: expectedVersion, call_only: true }]
     version: { read: version }
     missing_id: mwsv-missing-uid
     failures:
@@ -135,6 +139,10 @@ resources:
     fields:
       - { path: description, values: ["mwsv alpha", "mwsv beta"] }
       - { path: timezone, values: [utc, browser] }
+    # Spec R15-4 (CLI 2443620): overwrite and expectedVersion act on that save alone (an override and the version
+    # check), so they are put back by sending the base call without them. Not listed: message (a version-history note
+    # that cannot be removed).
+    restorable: [{ arg: overwrite, call_only: true }, { arg: expectedVersion, call_only: true }]
     version: { read: version }
     cleanup: control_delete
     control:
@@ -176,6 +184,10 @@ resources:
     fields:
       - { path: description, values: ["mwsv alpha", "mwsv beta"] }
       - { path: tags, values: [[mwsv-one], [mwsv-two]] }
+    # Spec R15-4 (CLI 2443620): overwrite and expectedVersion act on that save alone (an override and the version
+    # check), so they are put back by sending the base call without them. Not listed: message (a version-history note
+    # that cannot be removed).
+    restorable: [{ arg: overwrite, call_only: true }, { arg: expectedVersion, call_only: true }]
     version: { read: version }
     cleanup: control_delete
     control:
@@ -293,6 +305,8 @@ resources:
     fields:
       - { path: tags, values: [[mwsv, one], [mwsv, two]] }
       - { path: text, values: ["mwsv text one", "mwsv text two"] }
+    # Spec R15-4 (CLI 2443620): stored fields of this annotation that the read shows and update_annotation sets back.
+    restorable: [tags, text, time, timeEnd]
     delete: { tool: delete_annotation, args: { id: "{{id}}" } }
     list: { tool: get_annotations, args: { dashboardUid: "{{dash}}", limit: 1000 }, items: Payload, id: id, name: data.marker }
     cleanup: delete

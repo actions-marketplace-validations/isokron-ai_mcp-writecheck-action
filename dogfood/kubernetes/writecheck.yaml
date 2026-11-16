@@ -171,6 +171,10 @@ resources:
     fields:
       - { path: data, values: [{ alpha: a1 }, { alpha: a2 }], skip: [empty] }
       - { path: binaryData, values: [{ blob: "YjE=" }, { blob: "YjI=" }], skip: [empty] }
+    # Spec R15-4: no restorable here. resources_create_or_update is also the multi-item tool of configmap and
+    # configmap-norv, and the CLI (from 17851d7) refuses restorable for a tool that any resource uses as its multi-item
+    # tool. (With 2443620's per-resource rule, dry_run, wait and output were listed here, call_only, and IN-1, IN-4 and
+    # IN-6 were held.)
     version: { read: metadata.resourceVersion }
     delete: { tool: resources_delete, args: { apiVersion: v1, kind: ConfigMap, name: "{{id}}", namespace: "{{ns}}", resourceVersion: "{{version}}" } }
     cleanup: control_delete

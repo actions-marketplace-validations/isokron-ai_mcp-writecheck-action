@@ -128,6 +128,11 @@ resources:
       - { path: assignee, values: [ann, bob], empty: null }
       - { path: status, values: [in_progress, closed] }
     version: { read: version, arg: expected_version, optional: true, override: force }
+    # Spec R15-4 (Annex E): the arguments of update_ticket the tester may send with a value other than the base call's and then
+    # put back; each change affects only this ticket and is undone through update_ticket. force acts on that call alone (it skips
+    # its version check), so it is put back by sending the base call without it. An MWS-IN-4 counterpart that would send any other
+    # argument is not sent, and its probe is not judged.
+    restorable: [assignee, status, priority, description, { arg: force, call_only: true }]
     delete: { tool: delete_ticket, args: { id: "{{id}}", expected_version: "{{?version}}" } }
     versioned:
       - { tool: set_labels, args: { id: "{{id}}", labels: [x], expected_version: "{{version}}" } }
@@ -211,6 +216,9 @@ resources:
       - { path: assignee, values: [ann, bob], empty: null }
       - { path: status, values: [in_progress, closed] }
     version: { read: version, arg: expected_version }
+    # Spec R15-4: the arguments of replace_ticket the tester may send with a value other than the base call's and then put back
+    # (force acts on that call alone: it skips its version check).
+    restorable: [assignee, status, priority, { arg: force, call_only: true }]
     delete: { tool: delete_ticket, args: { id: "{{id}}", force: true } }
     list: { tool: list_tickets, args: { title_prefix: "{{prefix}}" }, items: tickets, id: id, name: title }
     cleanup: delete

@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: c13707bf95d4f012
+      PLAN_HASH: 01598636844e7c2a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: b7c02d01ce1e0682
+      PLAN_HASH: c40a1496df50a111
       TRACKER_DEFECTS: all
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -399,7 +399,7 @@ jobs:
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-crash.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh c13707bf95d4f012 "$SEEN" crash
+        run: dogfood/check-plan-hash.sh 01598636844e7c2a "$SEEN" crash
       - name: Arm the crash (kills the backend once the run is under way)
         run: |
           nohup dogfood/tiny-tracker/crash-backend.sh mwsc-crash > "$RUNNER_TEMP/crash.log" 2>&1 &
@@ -444,7 +444,7 @@ jobs:
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-setup.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh 36cf5263621d1fa4 "$SEEN" setup
+        run: dogfood/check-plan-hash.sh 78bced717022bc1c "$SEEN" setup
       - id: setup
         name: Full run, every set-up failing
         continue-on-error: true
