@@ -5,7 +5,8 @@
 # Strapi 5.62.0 on SQLite inside the runner, seeds test data and runs the action.
 #
 #   plan  on: the plan and its hash (tools/list only; nothing is written).
-#   full  OFF until the owner decides (see the job's comment).
+#   full  on: the plan, the catalog and the full run (mode full, fail-on must) against the same throwaway
+#         Strapi; the plan hash must match the one pinned below.
 #
 # Security: no pull_request_target; dispatch only (see `on:`). The one secret, MWS_CLI_TOKEN (read-only
 # on the CLI's repository), is used by one checkout step that runs before anything of Strapi is installed
@@ -38,8 +39,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # isokron-ai/strapi-plugin-writesafe main (the public sync).
-  WS_REF: 8bb3bf87c22c64a7824f9f6ae6de45ba55ac3486
+  # isokron-ai/strapi-plugin-writesafe main 7ea3b76 (the public sync of source 9a92151: the self-test fixes and X4).
+  WS_REF: 7ea3b766450c17e20d4a5cf495f35b6888bf33d8
   STRAPI_VERSION: 5.62.0
   STRAPI_TELEMETRY_DISABLED: 'true'
   DO_NOT_TRACK: '1'
@@ -102,11 +103,10 @@ jobs:
         if: always()
         run: dogfood/writesafe/strapi.sh stop
 
-  # OFF: waits for the owner. A full run on the plugin's public main would publish the results of the
-  # plugin's own pre-release test cycle before the fixes for them are merged and synced. Switch it on
-  # (delete the `if: false`) once the owner says so; pin PLAN_HASH from the plan job first.
+  # Full mode against the plugin at WS_REF, whose self-test fixes are merged and synced. Everything it
+  # writes goes to the job's own throwaway Strapi (SQLite in the runner, test data only). PLAN_HASH is the
+  # full job's plan, read before it was pinned.
   full:
-    if: false
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
