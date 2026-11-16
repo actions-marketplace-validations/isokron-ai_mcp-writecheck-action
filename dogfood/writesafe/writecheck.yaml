@@ -79,6 +79,11 @@ resources:
     fields:
       - { path: data.summary, arg: summary, values: [second summary, third summary], empty: "" }
       - { path: data.note, arg: note, values: [second note, third note], empty: "" }
+    # Spec R15-4 (CLI 17851d7): dry_run (validates, then rolls back; nothing is stored) and return (receipt or full: the
+    # shape of the answer) act on the call alone, so they are put back by sending the base call without them. Not listed:
+    # publish (publishes the draft: one-way), agent (a label kept in ws_history for that write), and locale (another
+    # locale's values, or refused on a type without i18n).
+    restorable: [{ arg: dry_run, call_only: true }, { arg: return, call_only: true }]
     version: { read: version, arg: expected_version }
     delete: { tool: ws_delete, args: { uid: "api::page.page", documentId: "{{id}}", expected_version: "{{version}}" } }
     list: { tool: list_page, args: { filters: { title: { $startsWith: "{{prefix}}" } }, pageSize: 100 }, items: results, id: documentId, name: title }
@@ -153,6 +158,11 @@ resources:
     fields:
       - { path: data.code, arg: code, values: [second-code, third-code] }
       - { path: data.level, arg: level, values: [basic, advanced] }
+    # Spec R15-4 (CLI 17851d7): dry_run (validates, then rolls back; nothing is stored) and return (receipt or full: the
+    # shape of the answer) act on the call alone, so they are put back by sending the base call without them. Not listed:
+    # publish (publishes the draft: one-way), agent (a label kept in ws_history for that write), and locale (another
+    # locale's values, or refused on a type without i18n).
+    restorable: [{ arg: dry_run, call_only: true }, { arg: return, call_only: true }]
     version: { read: version, arg: expected_version }
     delete: { tool: ws_delete, args: { uid: "api::article.article", documentId: "{{id}}", locale: en, expected_version: "{{version}}" } }
     list: { tool: list_article, args: { locale: en, filters: { title: { $startsWith: "{{prefix}}" } }, pageSize: 100 }, items: results, id: documentId, name: title }
