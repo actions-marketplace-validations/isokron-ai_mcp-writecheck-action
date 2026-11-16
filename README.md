@@ -157,7 +157,12 @@ The CLI itself connects to the server, to the hosts the manifest names, and to n
 
 ## Skills
 
-Two agent skills, one for building MCP servers whose write tools meet MWS and one for agents that call write tools, will be published here with the MWS launch.
+Two agent skills, in [`skills/`](skills/):
+
+- [`mcp-write-safe-builder`](skills/mcp-write-safe-builder/SKILL.md): for agents that build or change the write tools of an MCP server. It walks the requirements, the result shape and the helper kits ([`@mcp-write-safety/kit`](https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/ts) and [`mcp-write-safety-kit`](https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/py)), and ends with running this Action.
+- [`mcp-write-safe-caller`](skills/mcp-write-safe-caller/SKILL.md): for agents that call write tools. It treats a tool with no annotations as destructive, retries with the same key and the same arguments, and reads back before acting on an unknown outcome.
+
+Each is a single `SKILL.md`; copy its folder into your agent's skills directory.
 
 ## Licence
 
