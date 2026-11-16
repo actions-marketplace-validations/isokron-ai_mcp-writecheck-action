@@ -172,7 +172,7 @@ It lists the two skills and asks which agents to install them for. `--skill '*' 
 
 ### Install as a plugin
 
-The repository is also a plugin, `mcp-write-safety`, and a marketplace, `isokron`, that lists it (both in [`.claude-plugin/`](.claude-plugin/)). The plugin holds the two skills above and nothing else: no hooks, commands, MCP servers or scripts, so installing it runs nothing and sends nothing. From a shell:
+The repository is also a marketplace, `isokron` ([`.claude-plugin/marketplace.json`](.claude-plugin/marketplace.json)), that lists one plugin, `mcp-write-safety`, in [`plugin/`](plugin/). The plugin holds the two skills above (copies kept identical by a test) and nothing else.
 
 ```sh
 claude plugin marketplace add isokron-ai/mcp-writecheck-action
