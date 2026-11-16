@@ -39,8 +39,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # isokron-ai/strapi-plugin-writesafe main 7ea3b76 (the public sync of source 9a92151: the self-test fixes and X4).
-  WS_REF: 7ea3b766450c17e20d4a5cf495f35b6888bf33d8
+  # isokron-ai/strapi-plugin-writesafe main 7120917 (16 Nov: the public sync of source db70c56, which adds #45, #46 and
+  # #48, the schema cache and descriptions, to the self-test fixes and X4).
+  WS_REF: 71209177a83a0114d5cfa55c89221b9ca1ebec63
   STRAPI_VERSION: 5.62.0
   STRAPI_TELEMETRY_DISABLED: 'true'
   DO_NOT_TRACK: '1'
