@@ -60,13 +60,23 @@ review:
   by: the tiny-tracker maintainers (rules written before the run)
   conflict_says_not_applied: "nothing was (written|deleted|changed)"
   rejection_gives_reason: "must|expected|one of|at (most|least)|not allowed|unknown|required|does not match|invalid"
-  conflict_says_reread: "re-read|read it again"
+  conflict_says_reread: "re-read|read it again|before writing again, read"
   stale_writes_disclosed: "not detected|best-effort"
+
+# Spec 7.3, rule 11: tiny-tracker's write tools return the result shape write-result/0.1 (Annex B-9) as
+# structuredContent.mws. Adopted by name and version, its members decide what a result says (the outcome, the repeat it
+# allows, the read it names, what it reports changed or per item, the conflict state, the receipt). The sentence is read
+# on its own by the patterns below (never the serialized JSON block): a forbidden statement in either place gives the
+# verdict, and a true one in the other does not repair it (write_failed and repeat_invited, in the lost-answer trial). The
+# read-back decides what happened.
+results: { shape: write-result/0.1 }
 
 # Spec 7.3, rule 11: how tiny-tracker words what a result says. Where the declaration gives no pattern for a kind, a verdict
 # that turns on reading the text is not tested (the tester's built-in default never decides one on its own).
 patterns:
   outcome_unknown: 'not known whether'
+  write_failed: '\b(update|write|create|delete) failed\b|\bnothing was written\b'
+  repeat_invited: '\bplease (retry|try again)\b|\bsend (it|the call) again\b'
   applied: '(?<!\bnot )(?<!\bnothing was )\b(updated|applied|written|created)\b'
   not_used: '\bnot used\b|\bignored argument'
   no_tools: '\bnames no tools\b|\bno tools? (is |are )?enabled\b'

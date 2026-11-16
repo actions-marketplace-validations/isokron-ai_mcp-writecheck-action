@@ -106,21 +106,18 @@ resources:
       - { name: patch_unknown_field, tool: ws_patch, args: { uid: "api::page.page", documentId: "{{id}}", if_match: { nosuchfield: null }, set: { nosuchfield: x } } }
     # MWS-ATOM-1 / ATOM-2: ws_batch, three items in one all-or-nothing transaction. Row ops need no version, so the
     # call is valid on items the tester created through the control arm (no list rows), whatever their versions.
-    # Off at CLI f573a24: its loader refuses a multi-item call that binds the tester's objects one by one
-    # ({{ids[0]}}, …) instead of as the whole list {{ids}} (NOTES.md, CLI problem 17). ws_batch takes one item per
-    # document, so it cannot take {{ids}} whole. Put the block back by removing the leading "# ".
-    # multi:
-    #   - tool: ws_batch
-    #     args:
-    #       items:
-    #         - { uid: "api::page.page", documentId: "{{ids[0]}}", ops: [ { op: add, field: items, data: { label: batch row } } ] }
-    #         - { uid: "api::page.page", documentId: "{{ids[1]}}", ops: [ { op: add, field: items, data: { label: batch row } } ] }
-    #         - { uid: "api::page.page", documentId: "{{ids[2]}}", ops: [ { op: add, field: items, data: { label: batch row } } ] }
-    #     effect: { path: "data.items[0].label", value: batch row }
-    #     invalid_id: wsstmissingdocumentid000
-    #     # No `report` block: writesafe's answer lists the applied items under `items` only on success; on failure `items`
-    #     # carries every item with its status (rolled_back, failed, not_attempted), which a path to "the applied items"
-    #     # cannot express.
+    multi:
+      - tool: ws_batch
+        args:
+          items:
+            - { uid: "api::page.page", documentId: "{{ids[0]}}", ops: [ { op: add, field: items, data: { label: batch row } } ] }
+            - { uid: "api::page.page", documentId: "{{ids[1]}}", ops: [ { op: add, field: items, data: { label: batch row } } ] }
+            - { uid: "api::page.page", documentId: "{{ids[2]}}", ops: [ { op: add, field: items, data: { label: batch row } } ] }
+        effect: { path: "data.items[0].label", value: batch row }
+        invalid_id: wsstmissingdocumentid000
+        # No `report` block: writesafe's answer lists the applied items under `items` only on success; on failure `items`
+        # carries every item with its status (rolled_back, failed, not_attempted), which a path to "the applied items"
+        # cannot express.
     control:
       base: http://127.0.0.1:4812
       auth: { bearer_env: WS_REST_TOKEN }

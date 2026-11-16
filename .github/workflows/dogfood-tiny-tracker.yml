@@ -61,8 +61,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # tiny-tracker examples/tiny-tracker-resync (PR #7 of isokron-ai/mcp-write-safety).
-  TT_REF: ${{ inputs.tiny-tracker-ref || '2075524560a708007ba9cd24aeb028d9732d826c' }}
+  # tiny-tracker 77c2b17, branch examples/tiny-tracker-candidate of isokron-ai/mcp-write-safety (write-result/0.1).
+  TT_REF: ${{ inputs.tiny-tracker-ref || '77c2b17e0353effebe7c67dc0c4718a40c496aa7' }}
   PLAN_HASHES: ${{ inputs.plan-hashes }}
   TT_MANIFEST: dogfood/tiny-tracker/writecheck.yaml
   # The same backend URL in every step, so that every step arrives at the same plan hash.
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: 04a5ad9aa8f1c882
+      PLAN_HASH: 8db47a7d7bdc1e90
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: e3b145f376af9bb0
+      PLAN_HASH: 5e276e656a09425e
       TRACKER_DEFECTS: all
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -399,7 +399,7 @@ jobs:
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-crash.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh 04a5ad9aa8f1c882 "$SEEN" crash
+        run: dogfood/check-plan-hash.sh 8db47a7d7bdc1e90 "$SEEN" crash
       - name: Arm the crash (kills the backend once the run is under way)
         run: |
           nohup dogfood/tiny-tracker/crash-backend.sh mwsc-crash > "$RUNNER_TEMP/crash.log" 2>&1 &
@@ -444,7 +444,7 @@ jobs:
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-setup.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh 6abad9ce2adf6b92 "$SEEN" setup
+        run: dogfood/check-plan-hash.sh 243841f579cd18cb "$SEEN" setup
       - id: setup
         name: Full run, every set-up failing
         continue-on-error: true

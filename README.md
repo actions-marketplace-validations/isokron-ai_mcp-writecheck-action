@@ -2,7 +2,7 @@
 
 Runs [`mcp-writecheck`](https://github.com/isokron-ai/mcp-write-safety/tree/main/packages/writecheck) in the CI of a repository that holds an MCP server, and reports the result against the MCP Write-Safety Requirements (MWS 0.9) in the job summary.
 
-Status: draft. No release is tagged yet, and it is not listed on the Marketplace. It is pinned to `mcp-writecheck` at commit `f573a24` (the settled head for MWS 0.9, on branches `cli/held-candidate` and `cli/resync-516`) and to the requirement registry of MWS 0.9 at spec commit `ae5d7d7`. A manifest written for the earlier pin `0295ed6` needs the migration in the CLI's CHANGELOG (declared patterns where a verdict turns on wording, `key.class` for a create tool that does not call itself a create); `0295ed6` refuses those keys, so a manifest cannot serve both. Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs).
+Status: draft. No release is tagged yet, and it is not listed on the Marketplace. It is pinned to `mcp-writecheck` at commit `59e3124` (the launch candidate for MWS 0.9, branch `cli/held-candidate`) and to the requirement registry of MWS 0.9 at spec commit `415318f`. A manifest written for the earlier pin `0295ed6` needs the migration in the CLI's CHANGELOG (declared patterns where a verdict turns on wording, `key.class` for a create tool that does not call itself a create); `0295ed6` refuses those keys, so a manifest cannot serve both. Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs).
 
 **Mode `full` makes real writes.** It creates, changes and deletes objects in whatever system the manifest points at. Point it only at a test environment that you are allowed to change. The default mode, `plan`, writes nothing.
 
@@ -53,7 +53,7 @@ The manifest is the file `mcp-writecheck init` drafts and you complete. The CLI'
 | `manifest` | (required) | Path of the manifest, relative to the workspace (the repository root after checkout). |
 | `mode` | `plan` | `plan`, `catalog` or `full`. See [Modes](#modes). |
 | `fail-on` | `must` | `none`, `must` or `any`. See [Job status](#job-status). |
-| `cli-ref` | `f573a240efbb5fe7e0d972182d16676cb332d8b2` | The commit of `mcp-writecheck` to fetch and build: a full 40-character lower-case SHA. A branch, a tag or a short SHA is refused; the fetched commit is checked against it. |
+| `cli-ref` | `59e3124cf8e58c13b11f2a8567db093207b9a049` | The commit of `mcp-writecheck` to fetch and build: a full 40-character lower-case SHA. A branch, a tag or a short SHA is refused; the fetched commit is checked against it. |
 | `confirm-target` | | Mode `full`, required. The manifest's `target.confirm`, typed back. |
 | `plan-hash` | | Mode `full`, required. The hash of the plan a person has read. |
 | `catalog` | | Modes `plan` and `catalog`, optional. A saved `tools/list` answer, a list of tools, or the `catalog.json` of an earlier run. With it, no server is started. |

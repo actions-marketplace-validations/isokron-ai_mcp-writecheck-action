@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      PLAN_HASH: b7ae40478d2cbfcd
+      PLAN_HASH: 016e3f50f32d1d0c
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,7 +136,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      PLAN_HASH: 87d80f7d7a2e875a
+      PLAN_HASH: 8b856d967f620c1b
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

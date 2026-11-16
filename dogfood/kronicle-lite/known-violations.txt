@@ -7,5 +7,4 @@
 # put_document answers a reused idempotency key with changed arguments with the first result.
 MWS-RETRY-2 document:put_document idempotency-replay
 # A failed all-or-nothing apply is answered as a normal result, not as a tool execution error.
-# Not reached at CLI f573a24 (the multi block is off, NOTES.md CLI problem 17); restore with the block:
-# MWS-ATOM-1 document-apply:apply multi-item
+MWS-ATOM-1 document-apply:apply multi-item

@@ -109,18 +109,15 @@ resources:
       replay_marker: replayed
       key_record_survives: { graceful: true, kill: true }
     # MWS-ATOM-1 / ATOM-2: three puts in one all-or-nothing apply, each expecting revision 1.
-    # Off at CLI f573a24: its loader refuses a multi-item call whose arguments bind the tester's objects
-    # one by one ({{ids[0]}}, …) instead of as the whole list {{ids}} (NOTES.md, CLI problem 17). apply
-    # takes one op per slug, so it cannot take {{ids}} whole. Put the block back (remove the leading "# ") when the CLI accepts indexed ids.
-    # multi:
-    #   - tool: apply
-    #     args:
-    #       ops:
-    #         - { op: put, id: m0, slug: "{{ids[0]}}", title: batch title, markdown: "batch\n", expect_version: 1 }
-    #         - { op: put, id: m1, slug: "{{ids[1]}}", title: batch title, markdown: "batch\n", expect_version: 1 }
-    #         - { op: put, id: m2, slug: "{{ids[2]}}", title: batch title, markdown: "batch\n", expect_version: 1 }
-    #     effect: { path: title, value: batch title }
-    #     invalid_id: dogfood-no-such-document
+    multi:
+      - tool: apply
+        args:
+          ops:
+            - { op: put, id: m0, slug: "{{ids[0]}}", title: batch title, markdown: "batch\n", expect_version: 1 }
+            - { op: put, id: m1, slug: "{{ids[1]}}", title: batch title, markdown: "batch\n", expect_version: 1 }
+            - { op: put, id: m2, slug: "{{ids[2]}}", title: batch title, markdown: "batch\n", expect_version: 1 }
+        effect: { path: title, value: batch title }
+        invalid_id: dogfood-no-such-document
     failures:
       - { name: apply_stale_expect_version, tool: apply, args: { ops: [ { op: put, id: f1, slug: "{{id}}", title: "{{prefix}}stale", markdown: "stale\n", expect_version: 99 } ] } }
 

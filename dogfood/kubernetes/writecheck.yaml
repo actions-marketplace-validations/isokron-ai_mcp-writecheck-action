@@ -34,9 +34,8 @@
 # Changes for CLI f573a24 (migration from 0295ed6):
 #  K7 key.class (spec R10-1): resources_create_or_update is an upsert ("Create or update"), so MWS-TGT-3 is not
 #     applicable to it (NF-8); pods_run is a create of a caller-named Pod ("Run a Kubernetes Pod").
-#  K8 the multi-item blocks are off: the CLI's loader refuses a multi-item call that binds the tester's objects one
-#     by one ({{ids[0]}}, …) instead of as the whole list {{ids}} (NOTES.md, CLI problem 17). A multi-document
-#     apply names each object in its own document, so it cannot take {{ids}} whole.
+#  (The multi-item blocks were off at f573a24, whose loader refused {{ids[n]}}; fixed in 59e3124, NOTES.md CLI
+#     problem 17.)
 
 mws: "0.9"
 
@@ -129,18 +128,17 @@ resources:
     missing_id: mwsv-no-such-object
     cleanup: delete
     # A multi-document apply (MWS-ATOM-1, MWS-ATOM-2). The refused item is a name the API rejects.
-    # K8: off at CLI f573a24 (NOTES.md, CLI problem 17); put it back by removing the leading "# ".
-    # multi:
-    #   - tool: resources_create_or_update
-    #     args:
-    #       resource: |
-    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-    #         ---
-    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-    #         ---
-    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-    #     effect: { path: data.touched, value: "yes" }
-    #     invalid_id: Not_A_Valid_Name
+    multi:
+      - tool: resources_create_or_update
+        args:
+          resource: |
+            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+            ---
+            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+            ---
+            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+        effect: { path: data.touched, value: "yes" }
+        invalid_id: Not_A_Valid_Name
     # Control arm: the Kubernetes API through a loopback proxy as the control identity.
     # write = a whole-object PUT carrying the resourceVersion that was read (the version precondition).
     control:
@@ -215,18 +213,17 @@ resources:
     # under `configmap`, with the document separator written "--- # next document". The published
     # findings K8S-06 and K8S-15 are about separators; the CLI has no separator probe of its own, so this
     # entry shows only what its multi-item check says once a declaration happens to use such a separator.
-    # K8: off at CLI f573a24 (NOTES.md, CLI problem 17); put it back by removing the leading "# ".
-    # multi:
-    #   - tool: resources_create_or_update
-    #     args:
-    #       resource: |
-    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-    #         --- # next document
-    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-    #         --- # next document
-    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-    #     effect: { path: data.touched, value: "yes" }
-    #     invalid_id: Not_A_Valid_Name
+    multi:
+      - tool: resources_create_or_update
+        args:
+          resource: |
+            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+            --- # next document
+            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+            --- # next document
+            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+        effect: { path: data.touched, value: "yes" }
+        invalid_id: Not_A_Valid_Name
     control:
       base_env: MWSV_K8S_CONTROL
       read: { http: [GET, "/api/v1/namespaces/{{ns}}/configmaps/{{id}}"] }
