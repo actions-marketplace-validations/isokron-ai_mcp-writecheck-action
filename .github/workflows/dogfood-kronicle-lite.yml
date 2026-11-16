@@ -118,6 +118,8 @@ jobs:
         with:
           node-version: 22
       # Install scripts run: better-sqlite3 installs its prebuilt native module that way.
+      - name: The kronicle-lite commit is on its main (kronicle-lite-ref)
+        run: dogfood/kronicle-lite/check-on-main.sh
       - name: Build kronicle-lite
         working-directory: kl
         run: npm ci --no-audit --no-fund && npm run build
