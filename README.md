@@ -5,6 +5,8 @@
   </picture>
 </p>
 
+<sub>The MWS mark is not covered by this repository's licence; its use is described in the specification's <a href="https://github.com/isokron-ai/mcp-write-safety/blob/main/TRADEMARKS.md">TRADEMARKS.md</a>.</sub>
+
 # mcp-writecheck GitHub Action
 
 Runs [`mcp-writecheck`](https://github.com/isokron-ai/mcp-write-safety/tree/main/packages/writecheck) in the CI of a repository that holds an MCP server, and reports the result against the MCP Write-Safety Requirements (MWS 0.9) in the job summary.
