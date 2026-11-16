@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      PLAN_HASH: cbf9737cd567e697
+      PLAN_HASH: 4836cd9e2f8deff1
       MWSV_KMS_BIN: ${{ github.workspace }}/exp/harness/build/out/research/kubernetes-mcp-server
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

@@ -12,7 +12,7 @@ it (`plan-hashes`, `job=hash` pairs).
 |---|---|
 | `dogfood/<server>/writecheck.yaml` | The manifest for that server, as used in CI |
 | `dogfood/<server>/*.sh` | Set-up for the server's backend in the job |
-| `dogfood/kronicle-lite/candidate-manifest.sh` | Builds the kronicle-lite candidate manifest (a re-put key the pinned CLI refuses) for a dispatch with `candidate-manifest` and `cli-ref` |
+| `dogfood/kronicle-lite/candidate-manifest.sh` | Builds the kronicle-lite candidate manifest (a put_document resource with a re-put key) for a dispatch with `candidate-manifest`; `kronicle-lite-ref` picks another kronicle-lite commit |
 | `dogfood/check-plan-hash.sh` | Compares a plan step's hash with the accepted one |
 | `dogfood/install-pnpm.sh` | pnpm from its npm tarball, checked against a pinned sha512 integrity |
 | `dogfood/kubernetes/vendor-npm/` | The upstream Kubernetes server for the disabled vendor job, installed with `npm ci` from a committed lockfile |

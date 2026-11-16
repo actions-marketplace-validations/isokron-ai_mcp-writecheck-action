@@ -1,6 +1,6 @@
 # Integrations: notes for review
 
-Draft of 14 November 2026, re-targeted on 15 November 2026. Nothing here is pushed or published.
+Draft of 14 November 2026, re-targeted on 15 November 2026 and moved to the settled CLI head `f573a24` the same evening (section "CLI problems: status at `f573a24`").
 
 Written against `mcp-writecheck` at commit `0295ed6` (branch `cli/resync-516`, PR #6) and the spec at commit `e2bb9b0` (`spec/mws.md` on `spec/0.9-review`, MWS 0.9, 37 requirements: 26 MUST, 11 SHOULD). Tested with tiny-tracker at `b9265fe` (branch `examples/tiny-tracker-resync`, PR #7). The 14 November draft was written against CLI `e94270a` and spec `516c4ed`.
 
@@ -76,6 +76,17 @@ Unchanged, apart from the two P-7 lines in the caller skill.
 | The public spec page | `spec-url` default `https://isokron.ai/mws`; `requirementUrl()` in `contract.mjs` assumes the anchor is the ID in lower case. The page answered 404 on 14 November (not re-checked). | Check one link per area on the live page. |
 | The standalone repository's name and first release | `uses:` in README, example and builder skill; the Marketplace listing (`name`, `description`, `branding` in `action.yml`; `branding` is not set yet). | Create the repository, add `branding`, tag a release, replace the placeholder SHA in the example. |
 | The CLI after series A and the R9-1/R10 set | `safety.setup_unresolved` is read where present; the R10 changes (ANN-4 on every non-read-only tool, the TGT-2 operator declaration, the RES-2 retry exceptions) are in the spec but not in `0295ed6`. | Move `CLI_DEFAULT_REF`; re-run the tests with `CLI_DIR` and `MWS_SPEC`; check `results.json` for new fields. |
+
+## CLI problems: status at `f573a24`
+
+The pin moved on 15 November 2026 to `f573a24`, the CLI's settled head for MWS 0.9 (branches `cli/held-candidate` and `cli/resync-516`, PR #6; spec `ae5d7d7`; tiny-tracker `2075524`, PR #7). Changes to the list below:
+
+- **14** (a test environment that fails during the run): *fixed*. The run is `stopped` with exit 4. The dogfood trap backend-crash and `test/local-test.sh` now require it. The clean-up rule of design choice 3 stays as a guard.
+- **15** (unredacted server text in the ledger): *fixed* (the CLI redacts the ledger's free-text fields).
+- **16** (every set-up failed, `complete` with exit 0): *fixed*. The run is `stopped` with exit 4; the dogfood trap setup-fails and `test/local-test.sh` require it. The action's rule (design choice 3, A4) no longer fires at the pin and stays as a guard.
+- The usage text of exit 4 now names its two causes and says that 4 outranks 1; `CLI.exit[4]` quotes it and the contract test checks it.
+- Manifests: the migration in the CLI's CHANGELOG applies to every manifest written for `0295ed6` (declared patterns where a verdict turns on wording, under strict rule 11; `key.class` for a create tool that does not call itself a create, or calls itself an upsert). `0295ed6` refuses those keys, so the dogfood manifests here load only with the new CLI; a `cli-ref` dispatch with `0295ed6` is no longer supported.
+- 17. *New:* **The loader refuses every multi-item call whose arguments bind the tester's objects other than as a bare `{{ids}}`** (read: `src/core/manifest.ts`, the `multi` check, and `multiGate` in `src/checks/multi.ts` test `/\{\{\s*\??\s*ids\s*\}\}/` only). `{{ids[0]}}`, `{{ids[1]}}`, … (one item per object) and `{{json:ids}}` inside a string (a `where` filter) bind exactly the tester's objects and render correctly, but the manifest does not load ("must bind the objects the call acts on"). Four dogfood manifests used these forms (kronicle-lite `apply`, Kubernetes multi-document apply, Payload `updateTasks`, writesafe `ws_batch`); their multi blocks are commented out until the CLI accepts them, so MWS-ATOM-1 and ATOM-2 are not tested there, and the known violations they gave (kronicle-lite `apply` ATOM-1, a MUST; Payload `updateTasks` ATOM-2) are not reached.
 
 ## CLI problems: status at `0295ed6`
 
