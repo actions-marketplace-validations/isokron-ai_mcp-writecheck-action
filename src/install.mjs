@@ -90,7 +90,7 @@ export function obtainCli(o) {
   const fetchEnv = o.token ? gitEnv([[`http.${new URL(CLI_SOURCE.repository).origin}/.extraheader`, authHeaderValue(o.token)]]) : env;
   o.log(`Fetching mcp-writecheck at ${o.ref} from ${CLI_SOURCE.repository}`);
   sh('git', ['init', '--quiet', dir], { env, what: 'fetching the CLI' });
-  sh('git', ['-C', dir, 'fetch', '--quiet', '--depth', '1', CLI_SOURCE.repository, o.ref], { env: fetchEnv, what: `fetching the CLI at ${o.ref} (if the repository is private, the cli-token input must be able to read it)` });
+  sh('git', ['-C', dir, 'fetch', '--quiet', '--depth', '1', CLI_SOURCE.repository, o.ref], { env: fetchEnv, what: `fetching the CLI at ${o.ref} (cli-ref must be a commit of ${CLI_SOURCE.repository}; SHAs from before its publication on 16 Nov 2026 are not)` });
   sh('git', ['-C', dir, 'checkout', '--quiet', '--detach', 'FETCH_HEAD'], { env, what: 'checking out the CLI' });
   const head = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8', env }).stdout.trim();
   if (head !== o.ref) throw new ActionError(`fetched commit ${head}, not the pinned ${o.ref}`);

@@ -18,22 +18,20 @@
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Commit 17851d7 of branch cli/coverage-fields (16 Nov 2026): the launch candidate 3a68072 plus spec R15-4
- * (MWS-IN-4 counterparts that write the object only for arguments listed under `restorable`, put back and read
- * back); 37 requirements, pinned to spec 15f71e5. A full SHA is needed: `git fetch`
- * does not take a short one. Manifests written for the earlier pin 0295ed6 need the migration in the
- * CLI's CHANGELOG (new pattern keys, `key.class`, strict rule 11); 0295ed6 refuses those keys, so the
- * dogfood manifests here no longer load with it.
+ * Commit 7b95215 of the public isokron-ai/mcp-write-safety (16 Nov 2026): MWS 0.9, the public draft,
+ * with mcp-writecheck 0.1.0 (published to npm as @mcp-write-safety/writecheck); 37 requirements. A full
+ * SHA is needed: `git fetch` does not take a short one. SHAs cited elsewhere in this repository from
+ * before 16 Nov 2026 refer to the private pre-publication history and do not resolve publicly.
  */
-export const CLI_DEFAULT_REF = '17851d79a209756c7133d81ca262c9b1210c4da7';
+export const CLI_DEFAULT_REF = '7b952151dddd84260d057cdb506081820003fe56';
 
 /**
  * How the CLI is obtained when the caller gives no `cli-path`.
  *
  * Today: a git fetch of one commit, then a build, because the package is not published
  * (`"private": true`). The npm name is decided (owner, 15 Nov 2026): `@mcp-write-safety/writecheck`,
- * bin `mcp-writecheck`; the npm organization does not exist yet. The repository is private, so the
- * fetch needs the `cli-token` input until the repository is public.
+ * bin `mcp-writecheck`, version 0.1.0 at CLI_DEFAULT_REF. The repository is public, so the fetch needs no
+ * token; the `cli-token` input is kept, optional and unset by default, for workflows that still pass it.
  *
  * After publication, replace this object with the npm form, for example
  *   { kind: 'npm', spec: (version) => `@mcp-write-safety/writecheck@${version}` }
@@ -128,7 +126,7 @@ export const CLI = {
 
 /**
  * The set-up of an object under test, as `run` records it (src/cli/run.ts and src/core/plan.ts, the same
- * at CLI_DEFAULT_REF and at the earlier pin 0295ed6):
+ * at CLI_DEFAULT_REF and at earlier pins):
  *
  *   plan.json plan.resources[].setup  the set-up steps of each resource. Non-empty exactly for a resource
  *                                     with an object under test (an update tool and its two fields) that the
@@ -137,8 +135,8 @@ export const CLI = {
  *   results.json results[].reason     each check of a resource whose set-up failed is recorded `not tested`
  *                                     on that resource, with a reason that starts with `failedReason`.
  *
- * At CLI_DEFAULT_REF (as from e613620 on) the CLI stops a run in which every such set-up failed
- * (`stopped`, exit 4). At the earlier pin 0295ed6 such a run was `complete` with exit status 0, so it
+ * At CLI_DEFAULT_REF the CLI stops a run in which every such set-up failed
+ * (`stopped`, exit 4). At an earlier, pre-publication pin such a run was `complete` with exit status 0, so it
  * passed under every fail-on (Action finding A4); the action's own rule (src/summary.mjs, decide(),
  * rule 3) stays as a guard and no longer fires at CLI_DEFAULT_REF.
  */
@@ -195,17 +193,17 @@ export const VERDICTS = ['violated', 'platform', 'held', 'not observed', 'not te
 // ---------------------------------------------------------------------------------------------
 
 /**
- * MWS 0.9, Annex C, copied from spec/mws.md at the commit below (branch spec/0.9-review): ID, level,
+ * MWS 0.9, Annex C, copied from spec/mws.md at the commit below (public main): ID, level,
  * short form. The short forms are an index only; the requirement is the sentence in section 9.
  *
- * The CLI at CLI_DEFAULT_REF knows the same 37 IDs at the same levels (it is pinned to spec 15f71e5,
- * whose Annex C is this one). Five of its short forms are worded differently
+ * The CLI at CLI_DEFAULT_REF knows the same 37 IDs at the same levels (the CLI and the spec are the
+ * same commit, 7b95215, whose Annex C is this one). Five of its short forms are worded differently
  * (MWS-IN-2, IN-7, CFG-2, CFG-4, ANN-2); the action prints only these. src/summary.mjs still shows any
  * level difference, should one return.
  */
 export const SPEC = {
   version: '0.9',
-  commit: '15f71e5',
+  commit: '7b95215',
   requirements: [
     ['MWS-UPD-1', 'MUST', 'A field patch changes only the named fields'],
     ['MWS-UPD-2', 'MUST', 'A list edit, move or removal lands on the element the caller read at that address, or is refused'],

@@ -1,5 +1,7 @@
 # Integrations: notes for review
 
+> **History note (16 November 2026).** The action is now pinned to commit `7b95215` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
+
 Draft of 14 November 2026, re-targeted on 15 November 2026 and moved to the settled CLI head `f573a24` the same evening (section "CLI problems: status at `f573a24`").
 
 Written against `mcp-writecheck` at commit `0295ed6` (branch `cli/resync-516`, PR #6) and the spec at commit `e2bb9b0` (`spec/mws.md` on `spec/0.9-review`, MWS 0.9, 37 requirements: 26 MUST, 11 SHOULD). Tested with tiny-tracker at `b9265fe` (branch `examples/tiny-tracker-resync`, PR #7). The 14 November draft was written against CLI `e94270a` and spec `516c4ed`.

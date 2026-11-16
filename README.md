@@ -11,13 +11,13 @@
 
 Runs [`mcp-writecheck`](https://github.com/isokron-ai/mcp-write-safety/tree/main/packages/writecheck) in the CI of a repository that holds an MCP server, and reports the result against the MCP Write-Safety Requirements (MWS 0.9) in the job summary.
 
-Status: draft. No release is tagged yet, and it is not listed on the Marketplace. It is pinned to `mcp-writecheck` at commit `17851d7` (branch `cli/coverage-fields`: the launch candidate `3a68072` plus spec R15-4, the `restorable` key) and to the requirement registry of MWS 0.9 at spec commit `15f71e5`. A manifest written for the earlier pin `0295ed6` needs the migration in the CLI's CHANGELOG (declared patterns where a verdict turns on wording, `key.class` for a create tool that does not call itself a create); `0295ed6` refuses those keys, so a manifest cannot serve both. Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs).
+Status: draft. No release is tagged yet, and it is not listed on the Marketplace. It is pinned to commit [`7b95215`](https://github.com/isokron-ai/mcp-write-safety/commit/7b952151dddd84260d057cdb506081820003fe56) of the public [`isokron-ai/mcp-write-safety`](https://github.com/isokron-ai/mcp-write-safety) repository: MWS 0.9 (the public draft, 37 requirements) and `mcp-writecheck` 0.1.0, which is also published to npm as [`@mcp-write-safety/writecheck`](https://www.npmjs.com/package/@mcp-write-safety/writecheck). Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs). Commit SHAs in this repository's notes from before 16 November 2026 refer to the private pre-publication history of the spec and the CLI and do not resolve publicly.
 
 **Mode `full` makes real writes.** It creates, changes and deletes objects in whatever system the manifest points at. Point it only at a test environment that you are allowed to change. The default mode, `plan`, writes nothing.
 
 ## What it does
 
-1. Fetches `mcp-writecheck` at the commit given by `cli-ref` and builds it, in a step of its own: that step is the only one that gets `cli-token`.
+1. Fetches `mcp-writecheck` at the commit given by `cli-ref` from the public repository and builds it, in a step of its own. No token is needed.
 2. Runs it in one of three modes: `plan`, `catalog` or `full`.
 3. Writes the job summary. In modes `catalog` and `full`: first anything the tester's own safety checks saw (objects it did not create that were lost, setup it could not release, objects left behind), then one row per requirement with the verdicts by write path, every `violated` record in full with its attribution (and, where one exists, the helpers of the MCP Write-Safety kits for TypeScript and Python that address it, linked to each kit's table), and a folded table of every record. Each requirement ID links to its anchor on the public spec page.
 4. Uploads the results folder as an artifact.
@@ -62,7 +62,7 @@ The manifest is the file `mcp-writecheck init` drafts and you complete. The CLI'
 | `manifest` | (required) | Path of the manifest, relative to the workspace (the repository root after checkout). |
 | `mode` | `plan` | `plan`, `catalog` or `full`. See [Modes](#modes). |
 | `fail-on` | `must` | `none`, `must` or `any`. See [Job status](#job-status). |
-| `cli-ref` | `17851d79a209756c7133d81ca262c9b1210c4da7` | The commit of `mcp-writecheck` to fetch and build: a full 40-character lower-case SHA. A branch, a tag or a short SHA is refused; the fetched commit is checked against it. |
+| `cli-ref` | `7b952151dddd84260d057cdb506081820003fe56` | The commit of `mcp-writecheck` to fetch and build: a full 40-character lower-case SHA. A branch, a tag or a short SHA is refused; the fetched commit is checked against it. |
 | `confirm-target` | | Mode `full`, required. The manifest's `target.confirm`, typed back. |
 | `plan-hash` | | Mode `full`, required. The hash of the plan a person has read. |
 | `catalog` | | Modes `plan` and `catalog`, optional. A saved `tools/list` answer, a list of tools, or the `catalog.json` of an earlier run. With it, no server is started. |
@@ -70,7 +70,7 @@ The manifest is the file `mcp-writecheck init` drafts and you complete. The CLI'
 | `results-dir` | `mwsc-results` | Folder the results are written to and the artifact is made from, relative to the workspace. |
 | `artifact-name` | `mcp-writecheck-results` | Name of the artifact. Give each job of a matrix its own. |
 | `cli-path` | | Folder of an `mcp-writecheck` package that is already built. When set, nothing is fetched and `cli-ref` is not used. |
-| `cli-token` | | A token that can read the `mcp-writecheck` repository. Needed while that repository is private and the CLI is not on npm. Give it the least scope: a fine-grained token for that one repository, Contents read-only, with a short expiry. Only the step that fetches the CLI gets it; it goes to git as an HTTP header for the fetch alone (never in a URL or on a command line), and it is masked in the log. |
+| `cli-token` | | Not needed: the `mcp-writecheck` repository is public. Kept, optional and unset by default, so that workflows that still pass it keep working; it will be removed in a later version. If given, only the step that fetches the CLI gets it; it goes to git as an HTTP header for the fetch alone (never in a URL or on a command line), and it is masked in the log. |
 
 Outputs: `plan-hash`, `results-path`, `cli-exit-code` (the CLI's own exit status) and `exit-status` (0 or 1, the job status the action decided).
 
@@ -151,9 +151,9 @@ The capture holds what the server returned from the test environment. The ledger
 
 The CLI itself connects to the server, to the hosts the manifest names, and to nothing else.
 
-## Until the CLI is published
+## Where the CLI comes from
 
-The CLI will be published to npm as `@mcp-write-safety/writecheck`. Until then the action fetches it from the `isokron-ai/mcp-write-safety` repository, which is private, so **every workflow that uses this action needs the `cli-token` input**: a token that can read that repository. This holds even though the action's own repository is public. GitHub does not give secrets to workflows run for a pull request from a fork, so on such a pull request the fetch fails until then, and a pull request from a fork cannot run this action at all before the CLI is published. The example workflow skips its jobs for such pull requests until then (`if: github.event.pull_request.head.repo.full_name == github.repository`). Do not switch to `pull_request_target` to get around this (see [Modes](#full-real-writes-test-environment-required)). The input goes away when the CLI is on npm or the repository is public; `contract.mjs` is where the source of the CLI changes.
+`mcp-writecheck` 0.1.0 is published to npm as `@mcp-write-safety/writecheck`, and its source is in the public [`isokron-ai/mcp-write-safety`](https://github.com/isokron-ai/mcp-write-safety/tree/main/packages/writecheck) repository. The action still fetches it from that repository at the commit given by `cli-ref` and builds it, so no secret and no `cli-token` is needed. Still do not run the action on `pull_request_target` (see [Modes](#full-real-writes-test-environment-required)). Moving the source to npm is a later change in `contract.mjs`.
 
 ## Skills
 
