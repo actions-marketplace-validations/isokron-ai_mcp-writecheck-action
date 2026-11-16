@@ -140,12 +140,10 @@ test('the registry equals Annex C and the levels of section 9', { skip: !specFil
 });
 
 /**
- * The skills were written against spec commit 516c4ed and are not changed by this series (the caller skill
- * only gains the two P-7 lines). Between 516c4ed and the registry's commit the IDs and levels are the same;
- * the requirement sentences of MWS-RES-2, MWS-RETRY-2 and MWS-ANN-4 and the applicability of MWS-TGT-3
- * changed (NOTES.md). When the skills are re-derived, move this to SPEC.commit.
+ * The skills name the spec by its version and its public page, not by a commit: a commit named in a published
+ * file stops resolving when the spec's history is squashed for publication. Re-derived against the final 0.9
+ * text (16 Nov 2026).
  */
-const SKILLS_SPEC_COMMIT = '516c4ed';
 
 // The skills sit beside the action in the mcp-write-safety repository (integrations/skills) and inside it in
 // the action's own repository (skills/).
@@ -158,7 +156,11 @@ test('the two skills cite only requirement IDs of the registry, and the builder 
   for (const text of [builder, caller]) for (const m of text.matchAll(/MWS-[A-Z]+-\d+/g)) assert.ok(known.has(m[0]), `${m[0]} is not in the registry`);
   const rules = [...builder.matchAll(/^\*\*(MWS-[A-Z]+-\d+) \((MUST|SHOULD)/gm)].map((m) => `${m[1]} ${m[2]}`);
   assert.deepEqual(rules, SPEC.requirements.map((r) => `${r.id} ${r.level}`));
-  for (const text of [builder, caller]) assert.ok(text.includes(`spec commit \`${SKILLS_SPEC_COMMIT}\``), 'a skill names another spec commit than the one recorded for the skills');
+  for (const text of [builder, caller]) {
+    assert.ok(text.includes(`MCP Write-Safety Requirements, version ${SPEC.version}`), 'a skill names another spec version than the registry');
+    assert.ok(text.includes(SPEC_DEFAULT_URL), 'a skill does not link the public spec page');
+    assert.doesNotMatch(text, /spec commit/, 'a skill names a spec commit');
+  }
 });
 
 test('the pinned CLI writes the leftover reasons LEFT_BY_DECLARATION matches', { skip: !cliDir && 'set CLI_DIR to a built packages/writecheck' }, () => {
