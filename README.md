@@ -162,7 +162,30 @@ Two agent skills, in [`skills/`](skills/):
 - [`mcp-write-safe-builder`](skills/mcp-write-safe-builder/SKILL.md): for agents that build or change the write tools of an MCP server. It walks the requirements, the result shape and the helper kits ([`@mcp-write-safety/kit`](https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/ts) and [`mcp-write-safety-kit`](https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/py)), and ends with running this Action.
 - [`mcp-write-safe-caller`](skills/mcp-write-safe-caller/SKILL.md): for agents that call write tools. It treats a tool with no annotations as destructive, retries with the same key and the same arguments, and reads back before acting on an unknown outcome.
 
-Each is a single `SKILL.md`; copy its folder into your agent's skills directory.
+Each is a single `SKILL.md`. Copy its folder into your agent's skills directory, or install both with the `skills` CLI:
+
+```sh
+npx skills add isokron-ai/mcp-writecheck-action
+```
+
+It lists the two skills and asks which agents to install them for. `--skill '*' --agent claude-code --yes` installs both into `.claude/skills/` without prompts.
+
+### Install as a plugin
+
+The repository is also a plugin, `mcp-write-safety`, and a marketplace, `isokron`, that lists it (both in [`.claude-plugin/`](.claude-plugin/)). The plugin holds the two skills above and nothing else: no hooks, commands, MCP servers or scripts, so installing it runs nothing and sends nothing. From a shell:
+
+```sh
+claude plugin marketplace add isokron-ai/mcp-writecheck-action
+claude plugin install mcp-write-safety@isokron
+```
+
+Or in a session (version 2.1.275 or later), in one step:
+
+```text
+/plugin install mcp-write-safety --marketplace isokron-ai/mcp-writecheck-action
+```
+
+The skills then load as `mcp-write-safety:mcp-write-safe-builder` and `mcp-write-safety:mcp-write-safe-caller`. `claude plugin update mcp-write-safety@isokron` fetches a new version when one is released.
 
 ## Licence
 

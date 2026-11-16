@@ -1,0 +1,26 @@
+{
+  "name": "mcp-write-safety",
+  "displayName": "MCP Write Safety",
+  "version": "0.1.0",
+  "description": "Two agent skills for MCP tools that create, update or delete state: build rules for the authors of MCP servers, and call rules for agents that use write tools. Each rule is tied to a requirement ID in the MCP Write-Safety Requirements (MWS 0.9).",
+  "author": {
+    "name": "IsoKron",
+    "url": "https://isokron.ai/mws?utm_source=claude-plugins&utm_medium=directory&utm_campaign=skills"
+  },
+  "homepage": "https://isokron.ai/mws?utm_source=claude-plugins&utm_medium=directory&utm_campaign=skills",
+  "repository": "https://github.com/isokron-ai/mcp-writecheck-action",
+  "license": "Apache-2.0",
+  "icon": "./assets/mws-mark-512.png",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent-skills",
+    "write-safety",
+    "mcp-server",
+    "idempotency",
+    "concurrency",
+    "retries",
+    "tool-annotations",
+    "mws"
+  ]
+}
