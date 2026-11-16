@@ -1,9 +1,11 @@
 # mcp-writecheck manifest for sea-lite, cut down to one check: MWS-ANN-2 and ANN-5 for sea_claim,
-# called on a scratch ticket. It exists for the workflow's cli-known-bugs job: the CLI at the pinned
-# commit reads the claim the call places on an unclaimed ticket (claim: null -> an object) as data
-# removed or replaced, and reports sea_claim `violated`. The job passes while that false result is
-# the only violation, and fails once it is gone, so that the fix is noticed and sea_claim moves back
-# into writecheck.yaml. Same server, store and guard as writecheck.yaml.
+# called on a scratch ticket, with no idempotency key named. It exists for the workflow's
+# cli-fixed-bugs job, which keeps two former CLI false results from coming back: CLI 0295ed6 read the
+# claim the call places on an unclaimed ticket (claim: null -> an object) as data removed or replaced
+# (C3, sea_claim `violated`), and reported MWS-RETRY-1 `violated` on sea_create, whose input schema
+# offers idempotency_key, because this manifest names no key (C4). Both are fixed in f573a24; the job
+# fails if either returns, or if anything else is violated. Same server, store and guard as
+# writecheck.yaml.
 
 mws: "0.9"
 prefix: mwsdf

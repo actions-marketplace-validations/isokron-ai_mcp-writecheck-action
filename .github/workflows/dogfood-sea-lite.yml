@@ -2,9 +2,9 @@
 #
 #   sea-lite        plan, catalog and a full run of dogfood/sea-lite/writecheck.yaml, fail-on: must.
 #                   Expected green.
-#   cli-known-bugs  a cut-down manifest (writecheck-claim.yaml) on which the CLI at the pinned commit
-#                   gives known false `violated` results. The job passes only while exactly those
-#                   are present; it fails once the CLI is fixed, so the fix is noticed.
+#   cli-fixed-bugs  a cut-down manifest (writecheck-claim.yaml) on which CLI 0295ed6 gave two false
+#                   `violated` results (C3 on sea_claim, C4 on sea_create), fixed in f573a24. Full run
+#                   with fail-on: any: the job fails if either returns or anything else is violated.
 #
 # sea-lite runs over stdio from the checked-out repository, with a store made for this job only in
 # the runner's temp folder (SEA_LITE_DATA_DIR); every ticket in it is disposable.
@@ -58,7 +58,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      PLAN_HASH: cfb016f2e5c0983d
+      PLAN_HASH: b7ae40478d2cbfcd
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -131,12 +131,12 @@ jobs:
           artifact-name: sea-lite-full
           cli-path: ${{ env.MWSC_CLI_PATH }}
 
-  cli-known-bugs:
+  cli-fixed-bugs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     env:
-      PLAN_HASH: f386d848003b654c
+      PLAN_HASH: 87d80f7d7a2e875a
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -184,28 +184,28 @@ jobs:
         with:
           manifest: dogfood/sea-lite/writecheck-claim.yaml
           mode: plan
-          artifact-name: sea-lite-known-bugs-plan
+          artifact-name: sea-lite-fixed-bugs-plan
           cli-path: ${{ env.MWSC_CLI_PATH }}
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh "$PLAN_HASH" "$SEEN" cli-known-bugs
+        run: dogfood/check-plan-hash.sh "$PLAN_HASH" "$SEEN" cli-fixed-bugs
       - id: full
-        name: Full run (known CLI false results expected)
+        name: Full run (no violated record expected)
         continue-on-error: true
         uses: ./
         with:
           manifest: dogfood/sea-lite/writecheck-claim.yaml
           mode: full
-          fail-on: must
+          fail-on: any
           confirm-target: sea-lite-dogfood
           plan-hash: ${{ env.ACCEPTED_PLAN_HASH }}
-          artifact-name: sea-lite-known-bugs-full
+          artifact-name: sea-lite-fixed-bugs-full
           cli-path: ${{ env.MWSC_CLI_PATH }}
-      - name: Only the known CLI false results may be violated
+      - name: The former CLI false results stay fixed, and nothing is violated
         env:
           OUTCOME: ${{ steps.full.outcome }}
           EXIT_STATUS: ${{ steps.full.outputs.exit-status }}
           CLI_EXIT: ${{ steps.full.outputs.cli-exit-code }}
           RESULTS: ${{ steps.full.outputs.results-path }}
-        run: dogfood/sea-lite/expect-known-cli-bugs.sh
+        run: dogfood/sea-lite/expect-fixed-cli-bugs.sh

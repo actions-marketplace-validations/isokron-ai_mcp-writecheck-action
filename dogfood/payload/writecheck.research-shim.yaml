@@ -70,12 +70,15 @@ resources:
     list: { tool: findTasks, args: { where: '{"title":{"contains":"{{prefix}}"}}', limit: 100 }, items: docs, id: id, name: title }
     missing_id: 999999999
     cleanup: delete
-    multi:
-      - tool: updateTasks
-        args: { where: '{"id":{"in":{{json:ids}}}}', status: done, returnDocument: true }
-        effect: { path: status, value: done }
-        invalid_id: 2                      # the seeded archived task: the hook refuses its update
-        report: { applied: docs, id: id }
+    # Off at CLI f573a24: its loader refuses a multi-item call whose arguments bind the tester's objects
+    # through {{json:ids}} inside a string instead of as the whole value {{ids}} (NOTES.md, CLI problem 17).
+    # updateTasks takes them only inside its `where` string. Put the block back by removing the leading "# ".
+    # multi:
+    #   - tool: updateTasks
+    #     args: { where: '{"id":{"in":{{json:ids}}}}', status: done, returnDocument: true }
+    #     effect: { path: status, value: done }
+    #     invalid_id: 2                      # the seeded archived task: the hook refuses its update
+    #     report: { applied: docs, id: id }
     failures:
       - { name: update_archived_task, tool: updateTasks, args: { id: 2, owner: "{{prefix}}x" } }
       - { name: update_missing_task, tool: updateTasks, args: { id: "{{missing_id}}", owner: x } }

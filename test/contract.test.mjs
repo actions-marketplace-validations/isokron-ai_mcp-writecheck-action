@@ -96,7 +96,10 @@ test('the pinned CLI has the commands, flags and exit statuses the contract uses
   for (const f of flagsOf(CLI.runArgs({ manifest: 'm', confirmTarget: 't', planHash: 'h', out: 'o', state: 's' }))) assert.ok(runHelp.includes(f), `run --help does not mention ${f}`);
 
   const usage = cli('help').stdout;
-  assert.match(usage, /Exit status: 0 done; 1 a violated MUST not in the baseline \(or a stale baseline entry\);\n2 usage or manifest error; 3 refused \(target, confirmation, guard, open ledger\); 4 stopped or failed\./);
+  // Since f573a24 the usage text says what exit 4 covers (K8): a target that stopped answering, or a clean-up
+  // that could not finish, and that 4 outranks 1. CLI.exit[4] quotes it.
+  assert.match(usage, /Exit status: 0 done; 1 a violated MUST not in the baseline \(or a stale baseline entry\);\n2 usage or manifest error; 3 refused \(target, confirmation, guard, open ledger\); 4 stopped or failed:\nthe target stopped answering, or clean-up could not finish \(4 takes precedence over 1\); 130 interrupted\./);
+  assert.ok(usage.replace(/\n/g, ' ').includes(`4 ${CLI.exit[4]};`), 'CLI.exit[4] is the usage text of exit 4');
   // There is still no way to skip the confirmation.
   assert.equal(cli('run', '--yes').status, 2);
   // An unknown command is refused, so a renamed command cannot pass silently.
@@ -116,7 +119,7 @@ test('registry differences between the pinned CLI and the spec are the recorded 
   for (const id of cli.keys()) assert.ok(spec.has(id), `the CLI knows ${id}, which the registry does not have`);
   const missing = [...spec.keys()].filter((id) => !cli.has(id));
   const levelDiffers = [...cli].filter(([id, level]) => spec.get(id) !== level).map(([id, level]) => `${id}: CLI ${level}, spec ${spec.get(id)}`);
-  // At 0295ed6 the CLI knows the 37 IDs at the spec's levels. If a difference returns, the summary marks it
+  // At f573a24 (as at 0295ed6) the CLI knows the 37 IDs at the spec's levels. If a difference returns, the summary marks it
   // and the `must` rule counts the stricter level (NOTES.md, design choice 4); record it here and in NOTES.md.
   assert.deepEqual(missing, []);
   assert.deepEqual(levelDiffers, []);

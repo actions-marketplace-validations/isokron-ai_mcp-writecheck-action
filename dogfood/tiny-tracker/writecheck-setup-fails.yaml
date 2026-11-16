@@ -1,7 +1,8 @@
 # TRAP manifest (dogfood): tiny-tracker's manifest with every resource's create.id pointing at a field
 # the create result does not have, so that the set-up of every resource fails ("no id in the create
-# result"). Used by the traps job of dogfood-tiny-tracker.yml to track a known CLI bug: such a run
-# exits 0. Nothing else differs from dogfood/tiny-tracker/writecheck.yaml.
+# result"). Used by the traps job of dogfood-tiny-tracker.yml: the CLI must stop such a run (exit 4;
+# a known bug until f573a24, which reported it complete with exit 0). Nothing else differs from
+# dogfood/tiny-tracker/writecheck.yaml.
 # mcp-writecheck manifest for tiny-tracker, the MWS sample server.
 #
 # It covers every tool tiny-tracker offers: tickets (create, get, list, update, replace, delete,
@@ -70,6 +71,10 @@ patterns:
   not_used: '\bnot used\b|\bignored argument'
   no_tools: '\bnames no tools\b|\bno tools? (is |are )?enabled\b'
   unavailable: '\bcould not be reached\b|\btry again later\b|\brate limit|\btemporarily unavailable\b'
+  refused_value: '\binvalid\b|\bmust be\b|\bis required\b|\bnot allowed\b|\bunknown argument'
+  retry_invited: '(?<!\bnot |\bnever |n.t )\b(try again|please retry|retry the (call|request))\b'
+  version_required: '\bexpected_version\b|\bforce: true\b|changed since'
+  conflict: '\bstatus 412\b|\bchanged since the version you read\b'
 
 # Arguments for the label tools, called on a scratch ticket for the annotation checks.
 calls:
@@ -155,6 +160,9 @@ resources:
     # MWS-IN-5: values valid by update_ticket's schema to try (a title of 150 characters; the schema allows 200).
     try_values:
       - { arg: title, length: 150 }
+    # MWS-IN-5 (spec R10-8): a refusal counts against the schema only where the declaration states the constraint is fixed.
+    fixed_constraints:
+      - { arg: title, pattern: 'must be at most \d+ characters', reason: 'a length limit on the title, the same for every ticket and caller' }
     creates:
       - name: comment
         tool: add_comment

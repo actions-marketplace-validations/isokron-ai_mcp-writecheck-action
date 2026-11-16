@@ -28,8 +28,15 @@
 #     (spec NF-7), so MWS-CONC-1 (which asks for a call with default arguments) is not tested on them.
 #  K5 async_operations: [resources_delete] with patterns.accepted: the research build answers a delete held by a
 #     finalizer or a terminating namespace with "deletion pending" (isError false); spec NF-19.
-#  K6 cleanup: ephemeral for configmap-finalizer and namespace: the finalizer is never removed and a namespace takes
-#     time to terminate; the cluster is deleted with the job.
+#  K6 cleanup: ephemeral for configmap-finalizer: the finalizer is never removed; the cluster is deleted with the job.
+#     Namespaces are deleted again since CLI f573a24 (C10: the clean-up repeats the read-back of a delete listed in
+#     async_operations for up to 30 s, the time a namespace takes to terminate).
+# Changes for CLI f573a24 (migration from 0295ed6):
+#  K7 key.class (spec R10-1): resources_create_or_update is an upsert ("Create or update"), so MWS-TGT-3 is not
+#     applicable to it (NF-8); pods_run is a create of a caller-named Pod ("Run a Kubernetes Pod").
+#  K8 the multi-item blocks are off: the CLI's loader refuses a multi-item call that binds the tester's objects one
+#     by one ({{ids[0]}}, …) instead of as the whole list {{ids}} (NOTES.md, CLI problem 17). A multi-document
+#     apply names each object in its own document, so it cannot take {{ids}} whole.
 
 mws: "0.9"
 
@@ -90,9 +97,9 @@ resources:
       tool: resources_get
       args: { apiVersion: v1, kind: Namespace, name: "{{id}}" }
       ignore: [metadata.resourceVersion, metadata.managedFields, status]
-    key: { arg: resource }
+    key: { arg: resource, class: { as: upsert, quote: create or update } }   # K7
     delete: { tool: resources_delete, args: { apiVersion: v1, kind: Namespace, name: "{{id}}" } }
-    cleanup: ephemeral                   # K6
+    cleanup: delete                      # K6 (C10)
 
   # ── ConfigMap through resources_create_or_update, the object sent back as it was read (version included).
   - name: configmap
@@ -122,17 +129,18 @@ resources:
     missing_id: mwsv-no-such-object
     cleanup: delete
     # A multi-document apply (MWS-ATOM-1, MWS-ATOM-2). The refused item is a name the API rejects.
-    multi:
-      - tool: resources_create_or_update
-        args:
-          resource: |
-            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-            ---
-            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-            ---
-            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-        effect: { path: data.touched, value: "yes" }
-        invalid_id: Not_A_Valid_Name
+    # K8: off at CLI f573a24 (NOTES.md, CLI problem 17); put it back by removing the leading "# ".
+    # multi:
+    #   - tool: resources_create_or_update
+    #     args:
+    #       resource: |
+    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+    #         ---
+    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+    #         ---
+    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+    #     effect: { path: data.touched, value: "yes" }
+    #     invalid_id: Not_A_Valid_Name
     # Control arm: the Kubernetes API through a loopback proxy as the control identity.
     # write = a whole-object PUT carrying the resourceVersion that was read (the version precondition).
     control:
@@ -207,17 +215,18 @@ resources:
     # under `configmap`, with the document separator written "--- # next document". The published
     # findings K8S-06 and K8S-15 are about separators; the CLI has no separator probe of its own, so this
     # entry shows only what its multi-item check says once a declaration happens to use such a separator.
-    multi:
-      - tool: resources_create_or_update
-        args:
-          resource: |
-            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-            --- # next document
-            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-            --- # next document
-            {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
-        effect: { path: data.touched, value: "yes" }
-        invalid_id: Not_A_Valid_Name
+    # K8: off at CLI f573a24 (NOTES.md, CLI problem 17); put it back by removing the leading "# ".
+    # multi:
+    #   - tool: resources_create_or_update
+    #     args:
+    #       resource: |
+    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[0]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+    #         --- # next document
+    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[1]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+    #         --- # next document
+    #         {"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"{{ids[2]}}","namespace":"{{ns}}"},"data":{"touched":"yes"}}
+    #     effect: { path: data.touched, value: "yes" }
+    #     invalid_id: Not_A_Valid_Name
     control:
       base_env: MWSV_K8S_CONTROL
       read: { http: [GET, "/api/v1/namespaces/{{ns}}/configmaps/{{id}}"] }
@@ -258,7 +267,7 @@ resources:
       tool: pods_get
       args: { name: "{{id}}", namespace: "{{ns}}" }
       ignore: [metadata.resourceVersion, metadata.managedFields, metadata.generation, status, spec.nodeName]
-    key: { arg: name, vary: { arg: image, path: "spec.containers[0].image" } }
+    key: { arg: name, vary: { arg: image, path: "spec.containers[0].image" }, class: { as: create, quote: Run a Kubernetes Pod } }   # K7
     delete: { tool: pods_delete, args: { name: "{{id}}", namespace: "{{ns}}" } }
     cleanup: delete
     # The backend refuses part of this call: in mwsv-nosvcdel the server identity may delete the Pod

@@ -26,9 +26,9 @@ concurrency:
 env:
   # The commits the action is tested against: the CLI (contract.mjs CLI_DEFAULT_REF), tiny-tracker
   # (branch examples/tiny-tracker-resync) and the spec (branch spec/0.9-review).
-  CLI_REF: 0295ed6494d99ce5467f0d6e94e91a5c436a18c2
-  TINY_TRACKER_REF: b9265fe3d768a40f316837cf31528e856ff809d8
-  SPEC_REF: e2bb9b05f951bba4424a53e6b9cda27abe9c852c
+  CLI_REF: f573a240efbb5fe7e0d972182d16676cb332d8b2
+  TINY_TRACKER_REF: 2075524560a708007ba9cd24aeb028d9732d826c
+  SPEC_REF: ae5d7d74725be1c9b6f71d20b8d56450e50d2e37
 
 jobs:
   selftest:

@@ -4,7 +4,8 @@
 #
 # The records of known-violations.txt:
 MWS-RETRY-2 document:put_document idempotency-replay
-MWS-ATOM-1 document-apply:apply multi-item
+# Not reached at CLI f573a24 (the multi block is off, NOTES.md CLI problem 17); restore with the block:
+# MWS-ATOM-1 document-apply:apply multi-item
 # A re-put of an existing slug replaces the document's markdown (changed blocks superseded, dropped
 # ones tombstoned), but put_document declares destructiveHint: false (MWS-ANN-2; MWS-ANN-5, a SHOULD,
 # is violated by the same call). kronicle-lite PR #57 declares destructiveHint: true.

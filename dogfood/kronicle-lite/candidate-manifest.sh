@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The candidate manifest, for a dispatch with `candidate-manifest` (and a `cli-ref` whose CLI reads
-# key.class; the pinned one refuses it as an unknown key). It is dogfood/kronicle-lite/writecheck.yaml
+# The candidate manifest, for a dispatch with `candidate-manifest` (the pinned CLI, f573a24, reads
+# key.class; 0295ed6 refused it as an unknown key). It is dogfood/kronicle-lite/writecheck.yaml
 # with one resource added, `document-reput`: documents made by put_document, with a caller-chosen key,
 # so that a second put_document with the same slug (a re-put of an existing document, with other
 # markdown) is sent and read back. That is the call MWS-ANN-2 and MWS-ANN-5 judge a create tool by;

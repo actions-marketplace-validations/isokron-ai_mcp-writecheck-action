@@ -195,12 +195,12 @@ show full-budget-none
 
 echo "== set-ups that fail (create.id names a field the create result does not have; Action finding A4)"
 # Every resource with an object under test (ticket, ticket-replace): no write path of theirs is tested. The pinned CLI
-# reports the run complete with exit 0; a CLI with the fix (e613620 on) stops it with exit 4. The job fails either way.
+# (f573a24; the fix is in from e613620 on) stops the run with exit 4; 0295ed6 reported it complete with exit 0. The job
+# fails either way.
 sed 's/}, id: id, name_path: title }$/}, id: no_such_id, name_path: title }/' "$MANIFEST" > "$OUT/writecheck-setup-fails.yaml"
 run_case plan-setup-fails INPUT_MODE=plan INPUT_MANIFEST="$OUT/writecheck-setup-fails.yaml"
 run_case full-setup-fails-none INPUT_MODE=full INPUT_FAIL_ON=none INPUT_CONFIRM_TARGET=tiny-tracker INPUT_PLAN_HASH="$PLAN_HASH" INPUT_MANIFEST="$OUT/writecheck-setup-fails.yaml"
-case "$CLI_EXIT" in 0|4) want_exit=$CLI_EXIT ;; *) want_exit="0 or 4" ;; esac
-expect "every set-up fails, fail-on none" 1 "$want_exit"
+expect "every set-up fails, fail-on none" 1 4
 show full-setup-fails-none
 # Only ticket-replace's: ticket is tested, so fail-on decides; the failed set-up is listed under Needs attention.
 awk '/^  - name: ticket-replace$/ { r = 1 } r && /}, id: id, name_path: title }$/ { sub(/}, id: id, name_path: title }$/, "}, id: no_such_id, name_path: title }") } { print }' "$MANIFEST" > "$OUT/writecheck-setup-partial.yaml"
@@ -221,8 +221,9 @@ rm -rf "$OUT/full-crashed-none.results"
 KILLER=$!
 run_case full-crashed-none INPUT_MODE=full INPUT_FAIL_ON=none INPUT_CONFIRM_TARGET=tiny-tracker INPUT_PLAN_HASH="$HASH"
 wait "$KILLER" 2>/dev/null || true
-# The CLI reports this run as complete and exits 0 (NOTES.md, CLI problem 14); the unfinished clean-up fails the job.
-expect "full, fail-on none" 1 0
+# The pinned CLI stops this run and exits 4 (NOTES.md, CLI problem 14, fixed from e613620 on; 0295ed6 reported it complete
+# with exit 0, and only the action's clean-up rule failed the job). The job fails either way.
+expect "full, fail-on none" 1 4
 show full-crashed-none
 start_backend
 

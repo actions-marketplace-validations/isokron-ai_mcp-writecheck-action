@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# One known CLI bug, tracked as an expected failure (the known-bug matrix).
+# Two former CLI bugs, now plain expectations (fixed in the CLI from e613620 on; the pin f573a24 has both
+# fixes). Each case must make the CLI stop the run (exit 4, run status `stopped`), and the action must
+# fail the job.
 #   TRAP=<name> CLI_EXIT=<exit> EXIT_STATUS=<action status> RESULTS=<run folder> [CRASH_LOG=<file>] \
 #     dogfood/tiny-tracker/expect-trap.sh
 # backend-crash  the backend is killed during the run (CRASH_LOG must show it happened before the run
-#                ended). Known bug at CLI 0295ed6: the run is reported complete with exit 0. Fixed when
-#                it exits 4 (stopped or failed) or is not complete. The action must fail the job either way.
-# setup-fails    every resource's set-up fails (results.json must show it). Known bug at 0295ed6: exit 0.
-#                Fixed when non-zero. The action must fail the job either way (its own rule since A4).
-# While the bug is present the step passes with a notice; once the CLI is fixed it fails, so that the
-# trap is flipped to a plain expectation. With FIXED=notice (a dispatch with another cli-ref, to see what
-# a candidate CLI does) a fixed bug is a notice instead. A trap that did not happen as designed fails the step.
+#                ended). Until e613620 the run was reported complete with exit 0 (NOTES.md, CLI problem 14).
+# setup-fails    every resource's set-up fails (results.json must show it). Until e613620: exit 0, complete
+#                (Action finding A4).
+# A return of either bug (exit 0, or a run reported complete) fails the step, whatever cli-ref was chosen.
+# A trap that did not happen as designed fails the step too.
 set -euo pipefail
 fail() { echo "::error::$1"; exit 1; }
 [ -n "${CLI_EXIT:-}" ] || fail "trap $TRAP did not run (no CLI exit status)"
@@ -23,23 +23,13 @@ case "$TRAP" in
     [ -n "$crashed" ] || fail "trap backend-crash: the backend was not crashed (see the crash log above); nothing to judge"
     ended=$(node -e 'const t=Date.parse(require(process.argv[1]).run?.ended ?? ""); console.log(Number.isFinite(t) ? t : 0)' "$RESULTS/results.json")
     [ "$ended" -gt "$crashed" ] || fail "trap backend-crash: the backend was killed after the run ended; nothing to judge"
-    [ "${EXIT_STATUS:-}" = 1 ] || fail "the action did not fail the job whose backend crashed"
-    buggy=$([ "$CLI_EXIT" = 0 ] && [ "$status" = complete ] && echo yes || echo no)
     ;;
   setup-fails)
     n=$(node -e 'const d=require(process.argv[1]); console.log(d.results.filter((r) => /^setup failed:/.test(r.reason ?? "")).length)' "$RESULTS/results.json")
     [ "$n" -gt 0 ] || fail "trap setup-fails: no record says the set-up failed; the trap did not happen as designed"
-    [ "${EXIT_STATUS:-}" = 1 ] || fail "the action did not fail the job in which every set-up failed"
-    buggy=$([ "$CLI_EXIT" = 0 ] && echo yes || echo no)
     ;;
   *) fail "unknown trap $TRAP" ;;
 esac
-if [ "$buggy" = yes ]; then
-  echo "::notice::known CLI bug still present ($TRAP): expected failure"
-  exit 0
-fi
-if [ "${FIXED:-}" = notice ]; then
-  echo "::notice::this CLI does not show the known bug ($TRAP): CLI exit $CLI_EXIT, run status $status"
-  exit 0
-fi
-fail "the CLI no longer shows the known bug ($TRAP): flip this trap to an expectation in the workflow"
+[ "${EXIT_STATUS:-}" = 1 ] || fail "the action did not fail the job ($TRAP)"
+[ "$CLI_EXIT" = 4 ] && [ "$status" = stopped ] || fail "the CLI did not stop the run ($TRAP): exit $CLI_EXIT, run status $status; expected exit 4 and stopped (the former CLI bug is back)"
+echo "trap $TRAP: the CLI stopped the run (exit 4) and the action failed the job, as required"

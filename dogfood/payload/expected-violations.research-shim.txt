@@ -28,12 +28,12 @@ MWS-IN-7 SHOULD post-items:updatePosts
 # array sent without row ids gets new row ids on every call.
 MWS-ANN-3 MUST post-items:updatePosts
 
-# Server, by design: the research bulk update is best-effort (nothing is rolled back).
-MWS-ATOM-2 SHOULD task:updateTasks
+# Server, by design: the research bulk update is best-effort (nothing is rolled back). Not reached
+# at CLI f573a24: the multi block is off (NOTES.md, CLI problem 17); restore the line with the block.
+# MWS-ATOM-2 SHOULD task:updateTasks
 
-# Tool (mcp-writecheck): the MWS-UPD-1 nested_subfield probe reads the object-typed `data`
-# argument as a document field. A false violated record.
-MWS-UPD-1 MUST listing:updateListings
+# The false MWS-UPD-1 record on listing:updateListings (the nested_subfield probe read the object-typed
+# `data` argument as a document field; CLI problem N2/C11) is gone since CLI f573a24.
 
 # Server, by design: createTasks takes no idempotency key, and Payload offers none (the shim's
 # list reads make this record possible).

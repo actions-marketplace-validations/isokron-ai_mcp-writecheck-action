@@ -59,13 +59,13 @@ patterns:
   not_applied: '\bnothing was written\b'
   repeat_refused: '\breused with a different request\b'
 
-# Tools the annotation checks call on a scratch ticket. sea_claim is left out here: the CLI at the
-# pinned commit reads a claim placed on an unclaimed ticket (claim: null -> an object) as data
-# removed or replaced, a false MWS-ANN-2 violation. It runs in writecheck-claim.yaml, in the
-# workflow's cli-known-bugs job, until the CLI is fixed; then move it back here.
+# Tools the annotation checks call on a scratch ticket. sea_claim is back here since CLI f573a24 (C3: a
+# claim placed on an unclaimed ticket, claim: null -> an object, is an addition, no longer read as data
+# replaced); writecheck-claim.yaml keeps it alone, in the workflow's cli-fixed-bugs job.
 calls:
   sea_scope_check: { resource: ticket, args: { paths: ["{{prefix}}/scope-check"] } }
   sea_history: { resource: ticket, args: { ticket_id: "{{id}}", limit: 20 } }
+  sea_claim: { resource: ticket, args: { ticket_ids: ["{{id}}"], lease_seconds: 60 } }
 
 resources:
   - name: ticket
@@ -101,9 +101,9 @@ resources:
       vary: title
       key_record_survives: { graceful: true, kill: true }
     # MWS-RES-2: writes the server must refuse: a token that does not fence the ticket. With no
-    # update block there is no object under test, and the CLI at the pinned commit then sends these
-    # with {{id}} as null and records them `not tested`; they become real checks when it creates a
-    # scratch object for them.
+    # update block there is no object under test: since CLI f573a24 (C6) the ones that name {{id}} are
+    # not sent, and their records say why (CLI 0295ed6 sent them with {{id}} as null); they become real
+    # checks when the CLI creates a scratch object for them.
     failures:
       - { name: update_with_foreign_token, tool: sea_update, args: { ticket_id: "{{id}}", claim_token: "{{prefix}}notatoken", title: "{{prefix}}x" } }
       - { name: transition_with_foreign_token, tool: sea_transition, args: { ticket_id: "{{id}}", claim_token: "{{prefix}}notatoken", to: dropped, confirm: true } }
