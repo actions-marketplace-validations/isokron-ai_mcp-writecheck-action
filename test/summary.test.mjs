@@ -6,8 +6,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
-import { SPEC } from '../contract.mjs';
-import { code, decide, fence, levelOf, md, renderNoResults, renderPlan, renderRun, safetyFacts } from '../src/summary.mjs';
+import { KIT_HELPERS, KITS, SPEC } from '../contract.mjs';
+import { code, decide, fence, kitHelpersText, levelOf, md, renderNoResults, renderPlan, renderRun, safetyFacts } from '../src/summary.mjs';
 
 const rec = (requirement, level, verdict, o = {}) => ({
   requirement,
@@ -302,4 +302,36 @@ test('a failed delete whose reason repeats a declared text word for word is not 
   const out = renderRun({ doc: d, specUrl: 'https://example.test/mws', failOn: 'must', cliExit: 0, decision: decide({ failOn: 'must', cliExit: 0, doc: d }), cliVersion: 'x', artifactName: 'a' });
   assert.doesNotMatch(out, /clean-up policy says so/);
   assert.match(out, /### Needs attention/);
+});
+
+test('a violated record links to the kit helpers that address it; one no helper covers gets none', () => {
+  const conc2 = rec('MWS-CONC-2', 'MUST', 'violated', { tool: 'replace_ticket' });
+  const tgt2 = rec('MWS-TGT-2', 'MUST', 'violated', { tool: 'delete_tickets' });
+  const heldIn4 = rec('MWS-IN-4', 'MUST', 'held');
+  const d = doc([conc2, tgt2, heldIn4]);
+  const text = renderRun({ doc: d, specUrl: 'https://example.test/mws', failOn: 'must', cliExit: 1, decision: decide({ failOn: 'must', cliExit: 1, doc: d }), cliVersion: 'v', artifactName: 'a' });
+  const lines = text.split('\n');
+  const after = (id) => lines[lines.findIndex((l) => l.startsWith(`- [${id}]`)) + 1] ?? '';
+  // A nested item right under the violated record, so that the record's own reason stays as it was.
+  assert.equal(after('MWS-CONC-2'), `  - Kit helpers that address it: TypeScript kit: \`compareAndSet\` ([which to use](${KITS.ts.table})); Python kit: \`VersionGuard\` ([which to use](${KITS.py.table})). Using one does not settle the record; run the test again.`);
+  assert.ok(lines.some((l) => l.startsWith('- [MWS-TGT-2]')));
+  assert.doesNotMatch(after('MWS-TGT-2'), /Kit helpers/);
+  // Only violated records get the line: none in the per-requirement table or for a held record.
+  assert.equal(text.split('Kit helpers that address it').length - 1, 1);
+  // The summary still makes no claim of conformance.
+  assert.doesNotMatch(text, /\bcompliant\b|\bconformant\b|\bcertified\b/i);
+});
+
+test('the kit helper map names only requirements of the registry, and both kits for each', () => {
+  const ids = new Set(SPEC.requirements.map((r) => r.id));
+  for (const [id, h] of Object.entries(KIT_HELPERS)) {
+    assert.ok(ids.has(id), `${id} is not in the registry`);
+    for (const k of ['ts', 'py']) {
+      assert.ok(Array.isArray(h[k]) && h[k].length > 0, `${id} has no ${k} helper`);
+      for (const n of h[k]) assert.match(n, /^[A-Za-z_][A-Za-z0-9_]*$/, `${id} ${k}: ${n}`);
+    }
+  }
+  // No helper exists for these; a link would promise a fix the kits do not have.
+  for (const id of ['MWS-UPD-1', 'MWS-UPD-2', 'MWS-TGT-1', 'MWS-TGT-2', 'MWS-TGT-3', 'MWS-CFG-1', 'MWS-CFG-2', 'MWS-CFG-3', 'MWS-CFG-4', 'MWS-SEC-1', 'MWS-RETRY-3', 'MWS-ATOM-2', 'MWS-CONC-5', 'MWS-IN-5']) assert.equal(kitHelpersText(id), '', id);
+  for (const k of Object.values(KITS)) assert.match(k.table, /^https:\/\/github\.com\/isokron-ai\/mcp-write-safety-kits\/tree\/main\/(ts|py)#[a-z0-9-]+$/);
 });

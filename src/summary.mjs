@@ -14,7 +14,7 @@
  * that were lost (the bystander inventory), setup that was not released, objects left behind.
  */
 
-import { CLI, LEFT_BY_DECLARATION, RESULTS_FIELDS, requirementUrl, REQUIREMENT_ID, SETUP, SPEC, VERDICTS } from '../contract.mjs';
+import { CLI, KIT_HELPERS, KITS, LEFT_BY_DECLARATION, RESULTS_FIELDS, requirementUrl, REQUIREMENT_ID, SETUP, SPEC, VERDICTS } from '../contract.mjs';
 
 const REGISTRY = new Map(SPEC.requirements.map((r) => [r.id, r]));
 
@@ -48,6 +48,18 @@ export function fence(text) {
 const writePath = (r) => `${r.write_path?.resource ?? '?'}:${r.write_path?.tool ?? '?'}`;
 const link = (id, base) => (REQUIREMENT_ID.test(id) ? `[${id}](${requirementUrl(base, id)})` : code(id));
 const uniq = (a) => [...new Set(a)];
+
+/**
+ * The kit helpers that address a violated record of `id`, as one sentence, or '' where no helper
+ * covers the requirement (contract.mjs, KIT_HELPERS). The names and links come from contract.mjs,
+ * never from results.json.
+ */
+export function kitHelpersText(id) {
+  const h = Object.hasOwn(KIT_HELPERS, id) ? KIT_HELPERS[id] : null;
+  if (!h) return '';
+  const part = (k) => (h[k]?.length ? `${KITS[k].name}: ${h[k].map(code).join(', ')} ([which to use](${KITS[k].table}))` : '');
+  return `Kit helpers that address it: ${[part('ts'), part('py')].filter(Boolean).join('; ')}. Using one does not settle the record; run the test again.`;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Levels. The CLI at the pinned commit and the spec at the pinned commit agree on all 37; the
@@ -332,7 +344,9 @@ export function renderRun(o) {
     L.push('### Violated records');
     L.push('');
     for (const r of violated) {
+      const kit = REQUIREMENT_ID.test(r.requirement) ? kitHelpersText(r.requirement) : '';
       L.push(`- ${link(r.requirement, specUrl)} on ${code(writePath(r))}, scenario ${code(`${r.scenario?.id} v${r.scenario?.version}`)}: **violated (${levelText(r)})**${r.attribution ? `, ${attributionText(r)}` : ''}. ${md(r.reason)}${r.notes?.length ? ` _${md(r.notes.join(' '))}_` : ''}`);
+      if (kit) L.push(`  - ${kit}`);
     }
   }
 
