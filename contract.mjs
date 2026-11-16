@@ -18,14 +18,14 @@
 // ---------------------------------------------------------------------------------------------
 
 /**
- * Commit 59e3124 of branch cli/held-candidate, the launch candidate for MWS 0.9 (16 Nov 2026): the settled
- * head f573a24 plus the result-shape support (write-result/0.1, rule 11 point 13) and the Action CI fixes
- * SH-1 to SH-5; 37 requirements, pinned to spec 415318f. A full SHA is needed: `git fetch`
+ * Commit 3a68072 of branch cli/held-candidate, the launch candidate for MWS 0.9 (16 Nov 2026): the settled
+ * head f573a24 plus the result-shape support (write-result/0.1, rule 11 point 13), the Action CI fixes
+ * SH-1 to SH-8 and BL-5, and patterns.applied_all (R15-3); 37 requirements, pinned to spec 163858d. A full SHA is needed: `git fetch`
  * does not take a short one. Manifests written for the earlier pin 0295ed6 need the migration in the
  * CLI's CHANGELOG (new pattern keys, `key.class`, strict rule 11); 0295ed6 refuses those keys, so the
  * dogfood manifests here no longer load with it.
  */
-export const CLI_DEFAULT_REF = '59e3124cf8e58c13b11f2a8567db093207b9a049';
+export const CLI_DEFAULT_REF = '3a68072584211b73e0447183d2c88c3f5f245c79';
 
 /**
  * How the CLI is obtained when the caller gives no `cli-path`.
@@ -198,14 +198,14 @@ export const VERDICTS = ['violated', 'platform', 'held', 'not observed', 'not te
  * MWS 0.9, Annex C, copied from spec/mws.md at the commit below (branch spec/0.9-review): ID, level,
  * short form. The short forms are an index only; the requirement is the sentence in section 9.
  *
- * The CLI at CLI_DEFAULT_REF knows the same 37 IDs at the same levels (it is pinned to spec 415318f,
+ * The CLI at CLI_DEFAULT_REF knows the same 37 IDs at the same levels (it is pinned to spec 163858d,
  * whose Annex C is this one). Five of its short forms are worded differently
  * (MWS-IN-2, IN-7, CFG-2, CFG-4, ANN-2); the action prints only these. src/summary.mjs still shows any
  * level difference, should one return.
  */
 export const SPEC = {
   version: '0.9',
-  commit: '415318f',
+  commit: '163858d',
   requirements: [
     ['MWS-UPD-1', 'MUST', 'A field patch changes only the named fields'],
     ['MWS-UPD-2', 'MUST', 'A list edit, move or removal lands on the element the caller read at that address, or is refused'],

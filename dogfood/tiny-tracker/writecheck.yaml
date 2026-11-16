@@ -80,6 +80,9 @@ patterns:
   retry_invited: '(?<!\bnot |\bnever |n.t )\b(try again|please retry|retry the (call|request))\b'
   version_required: '\bexpected_version\b|\bforce: true\b|changed since'
   conflict: '\bstatus 412\b|\bchanged since the version you read\b'
+  # Spec R15-3 (MWS-ATOM-1): a statement that the whole write took effect, with every ticket applied. It does not match a
+  # sentence that says only some were ("Partly applied: ..."), names one that failed, or repeats the call's arguments.
+  applied_all: '\ball \d+ tickets? (were )?saved\b'
 
 # Arguments for the label tools, called on a scratch ticket for the annotation checks.
 calls:

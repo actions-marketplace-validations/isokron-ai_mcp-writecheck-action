@@ -61,8 +61,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # tiny-tracker 77c2b17, branch examples/tiny-tracker-candidate of isokron-ai/mcp-write-safety (write-result/0.1).
-  TT_REF: ${{ inputs.tiny-tracker-ref || '77c2b17e0353effebe7c67dc0c4718a40c496aa7' }}
+  # tiny-tracker 9e7c1ba, branch examples/tiny-tracker-r15 of isokron-ai/mcp-write-safety (write-result/0.1, R15-3).
+  TT_REF: ${{ inputs.tiny-tracker-ref || '9e7c1bafaaf48a3cb25cf6675bf77c74c175d486' }}
   PLAN_HASHES: ${{ inputs.plan-hashes }}
   TT_MANIFEST: dogfood/tiny-tracker/writecheck.yaml
   # The same backend URL in every step, so that every step arrives at the same plan hash.
@@ -74,7 +74,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: 8db47a7d7bdc1e90
+      PLAN_HASH: c13707bf95d4f012
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -175,7 +175,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: 5e276e656a09425e
+      PLAN_HASH: b7c02d01ce1e0682
       TRACKER_DEFECTS: all
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -399,7 +399,7 @@ jobs:
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-crash.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh 8db47a7d7bdc1e90 "$SEEN" crash
+        run: dogfood/check-plan-hash.sh c13707bf95d4f012 "$SEEN" crash
       - name: Arm the crash (kills the backend once the run is under way)
         run: |
           nohup dogfood/tiny-tracker/crash-backend.sh mwsc-crash > "$RUNNER_TEMP/crash.log" 2>&1 &
@@ -444,7 +444,7 @@ jobs:
       - name: Compare the plan hash with the accepted one
         env:
           SEEN: ${{ steps.plan-setup.outputs.plan-hash }}
-        run: dogfood/check-plan-hash.sh 243841f579cd18cb "$SEEN" setup
+        run: dogfood/check-plan-hash.sh 36cf5263621d1fa4 "$SEEN" setup
       - id: setup
         name: Full run, every set-up failing
         continue-on-error: true

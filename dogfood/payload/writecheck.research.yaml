@@ -169,12 +169,7 @@ resources:
     # No list block: a list answer is one fenced json block per document, and only the first is read.
     # list: { tool: findPosts, args: { where: '{"slug":{"contains":"{{prefix}}"}}', limit: 100 }, items: docs, id: id, name: slug }
     missing_id: 999999999
-    # control_delete since CLI 59e3124: MWS-IN-4's counterpart control (R14-6) sends updatePosts with draft: true,
-    # which leaves a draft newer than the published document. findPosts shows the published one, and the
-    # research build's deletePosts compares the session's last read with the newest version, so it refuses
-    # every delete of that post as stale ("re-read it with findPosts" cannot help). The REST delete of the
-    # control identity (the same user) removes it.
-    cleanup: control_delete
+    cleanup: delete
     failures:
       - { name: reading_minutes_below_min, tool: updatePosts, args: { id: "{{id}}", readingMinutes: -1 } }
     control:
@@ -207,12 +202,11 @@ resources:
       - { path: "items[0].url", values: ["https://example.test/a0", "https://example.test/a1"] }
       - { path: author, values: [ann, bob] }
     delete: { tool: deletePosts, args: { id: "{{id}}" } }
-    cleanup: control_delete               # as for post, above
+    cleanup: delete
     control:
       base: http://127.0.0.1:4960
       auth: { header: authorization, env: MWSV_JWT_A, prefix: "JWT " }
       read: { http: [GET, "/api/posts/{{id}}"] }
-      delete: { http: [DELETE, "/api/posts/{{id}}"] }
       # A REST patch of one scalar (the second writer's change to author). REST cannot patch one
       # array row without sending the array, so this template is valid for `author` only.
       patch: { http: [PATCH, "/api/posts/{{id}}"], body: { "{{field}}": "{{value}}" } }
