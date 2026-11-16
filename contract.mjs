@@ -265,3 +265,50 @@ export const SPEC_DEFAULT_URL = 'https://isokron.ai/mws';
 export function requirementUrl(baseUrl, id) {
   return `${String(baseUrl).replace(/#.*$/, '')}#${id.toLowerCase()}`;
 }
+
+// ---------------------------------------------------------------------------------------------
+// 5. The kit helpers a violated record points to
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * IsoKron's MCP Write-Safety kits (isokron-ai/mcp-write-safety-kits, Apache-2.0): helper libraries for
+ * the write tools of an MCP server, in TypeScript (`@mcp-write-safety/kit`) and Python (`mws_kit`).
+ * Each kit's README has a table from a requirement that `mcp-writecheck` reports violated to the
+ * helper that addresses it; `table` is the link to that table.
+ */
+export const KITS = {
+  ts: { name: 'TypeScript kit', table: 'https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/ts#when-the-action-says-a-requirement-was-violated' },
+  py: { name: 'Python kit', table: 'https://github.com/isokron-ai/mcp-write-safety-kits/tree/main/py#mcp-writecheck-says-x-violated-use-helper-y' },
+};
+
+/**
+ * Per requirement, the kit helpers that address a violated record, copied from the two README tables
+ * (kits at 71fc90d, 16 Nov 2026). Only helpers both READMEs name and the kits export; a requirement
+ * no helper covers (MWS-UPD-*, TGT-*, CFG-*, SEC-1, RETRY-3, ATOM-2, CONC-5, IN-5) has no entry, and
+ * its violated record gets no kit line. Using a helper does not settle a record: the test decides.
+ */
+export const KIT_HELPERS = {
+  'MWS-CONC-1': { ts: ['compareAndSet'], py: ['VersionGuard'] },
+  'MWS-CONC-2': { ts: ['compareAndSet'], py: ['VersionGuard'] },
+  'MWS-CONC-3': { ts: ['compareAndSet'], py: ['VersionGuard'] },
+  'MWS-CONC-4': { ts: ['compareAndSet', 'conflict'], py: ['VersionGuard', 'conflict'] },
+  'MWS-CONC-6': { ts: ['conflict'], py: ['conflict', 'conflict_info'] },
+  'MWS-RES-1': { ts: ['applied'], py: ['applied'] },
+  'MWS-RES-2': { ts: ['notApplied', 'itemsResult', 'unknownOutcome', 'guardWrite'], py: ['not_applied', 'partial', 'unknown_outcome', 'guard_write'] },
+  'MWS-RES-3': { ts: ['applied', 'itemsResult'], py: ['applied', 'item'] },
+  'MWS-RES-4': { ts: ['applied'], py: ['applied', 'VersionGuard'] },
+  'MWS-ATOM-1': { ts: ['itemsResult'], py: ['partial', 'not_applied', 'item'] },
+  'MWS-RETRY-1': { ts: ['idempotencyKeyProperty', 'withIdempotency'], py: ['Idempotency'] },
+  'MWS-RETRY-2': { ts: ['withIdempotency'], py: ['Idempotency'] },
+  'MWS-IN-1': { ts: ['strictInput', 'defineTool'], py: ['WriteSafety'] },
+  'MWS-IN-2': { ts: ['strictInput', 'defineTool'], py: ['WriteSafety', 'strict_schema'] },
+  'MWS-IN-3': { ts: ['strictInput', 'defineTool'], py: ['WriteSafety'] },
+  'MWS-IN-4': { ts: ['strictInput', 'inputError'], py: ['refuse_arguments', 'WriteSafety'] },
+  'MWS-IN-6': { ts: ['strictInput', 'defineTool'], py: ['WriteSafety'] },
+  'MWS-IN-7': { ts: ['strictInput', 'defineTool'], py: ['WriteSafety', 'strict_schema'] },
+  'MWS-ANN-1': { ts: ['writeHints', 'readOnlyHints'], py: ['write_tool', 'read_tool'] },
+  'MWS-ANN-2': { ts: ['writeHints', 'readOnlyHints'], py: ['write_tool', 'read_tool'] },
+  'MWS-ANN-3': { ts: ['writeHints', 'readOnlyHints'], py: ['write_tool', 'read_tool'] },
+  'MWS-ANN-4': { ts: ['writeHints', 'readOnlyHints', 'annotationProblems'], py: ['write_tool', 'read_tool', 'missing_hints'] },
+  'MWS-ANN-5': { ts: ['writeHints', 'readOnlyHints'], py: ['write_tool', 'read_tool'] },
+};

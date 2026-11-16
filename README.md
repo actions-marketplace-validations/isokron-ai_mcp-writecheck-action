@@ -17,7 +17,7 @@ Status: draft. No release is tagged yet, and it is not listed on the Marketplace
 
 1. Fetches `mcp-writecheck` at the commit given by `cli-ref` and builds it, in a step of its own: that step is the only one that gets `cli-token`.
 2. Runs it in one of three modes: `plan`, `catalog` or `full`.
-3. Writes the job summary. In modes `catalog` and `full`: first anything the tester's own safety checks saw (objects it did not create that were lost, setup it could not release, objects left behind), then one row per requirement with the verdicts by write path, every `violated` record in full with its attribution, and a folded table of every record. Each requirement ID links to its anchor on the public spec page.
+3. Writes the job summary. In modes `catalog` and `full`: first anything the tester's own safety checks saw (objects it did not create that were lost, setup it could not release, objects left behind), then one row per requirement with the verdicts by write path, every `violated` record in full with its attribution (and, where one exists, the helpers of the MCP Write-Safety kits for TypeScript and Python that address it, linked to each kit's table), and a folded table of every record. Each requirement ID links to its anchor on the public spec page.
 4. Uploads the results folder as an artifact.
 5. Sets the job status.
 
