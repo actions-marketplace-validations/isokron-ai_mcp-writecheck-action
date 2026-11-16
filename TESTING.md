@@ -225,3 +225,12 @@ None of these has run on a GitHub runner. Each needs a real workflow run before 
 - **The spec links.** `https://isokron.ai/mws` answered 404 on the day of the test, so no link in a summary was followed.
 - **Other platforms.** macOS and Windows runners, and Node versions other than 22.23.
 - **A bystander loss from a published server.** The case above uses the CLI's own regression server; tiny-tracker has no defect that loses a bystander (NOTES.md, CLI problem 13).
+
+## Re-run at the settled CLI head `f573a24` (15 November 2026)
+
+`test/local-test.sh` ran on macOS 26.5 (arm64), Node v26.13.1, against `mcp-writecheck` `f573a24`, tiny-tracker `2075524` and spec `ae5d7d7`, each built from `git archive` of its commit. Every case was as expected, and the unit tests passed (36, one skipped: no skills folder). Two expectations changed with the pin:
+
+- The crashed test environment: the CLI now stops the run with exit 4. Under `0295ed6` it was `complete` with exit 0 (NOTES.md, CLI problem 14). The job fails either way.
+- Every set-up fails: exit 4 only. Under `0295ed6` it was 0 (problem 16).
+
+`0295ed6` is no longer a supported `cli-ref` for the dogfood workflows. Their manifests use keys it refuses.
