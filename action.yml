@@ -33,7 +33,7 @@ inputs:
       The commit of mcp-writecheck to fetch and build. Use a full 40-character SHA. The default
       is the commit this version of the action was written and tested against.
     required: false
-    default: 17851d79a209756c7133d81ca262c9b1210c4da7
+    default: 7b952151dddd84260d057cdb506081820003fe56
   confirm-target:
     description: Mode full only, required there. The manifest's target.confirm, typed back.
     required: false
@@ -70,9 +70,9 @@ inputs:
     default: ''
   cli-token:
     description: >-
-      Optional. A token that can read the mcp-writecheck repository, needed only while that
-      repository is private: fine-grained, that one repository, Contents read-only, short expiry.
-      Only the step that fetches the CLI gets it, and only its git fetch uses it.
+      Optional and not needed: isokron-ai/mcp-write-safety is public, so the fetch needs no token.
+      Kept so that workflows that still pass it keep working; leave it unset. If given, only the
+      step that fetches the CLI gets it, and only its git fetch uses it.
     required: false
     default: ''
 
@@ -94,7 +94,7 @@ runs:
   using: composite
   steps:
     # Inputs reach the script as environment variables, never by interpolation into a command.
-    # This is the only step that gets cli-token; the run step below cannot read it.
+    # This is the only step that gets cli-token (optional, unset by default); the run step below cannot read it.
     - name: Obtain mcp-writecheck
       id: cli
       shell: bash

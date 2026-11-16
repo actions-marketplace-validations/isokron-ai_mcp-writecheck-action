@@ -13,10 +13,9 @@
 # a plan job's output). When the fork commit, the manifest, Grafana or the CLI pin changes, the hash
 # check fails: read the new plan in the plan step's summary and update PLAN_HASH.
 #
-# Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`), so
-# a fork never gets MWS_CLI_TOKEN (read-only on isokron-ai/mcp-write-safety), which only the
-# "Check out mcp-writecheck" step uses, before any server code is installed or started; the action
-# gets the built CLI through cli-path. Third-party actions are pinned by full SHA.
+# Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`).
+# No secret is used: isokron-ai/mcp-write-safety is public, so the "Check out mcp-writecheck" step
+# needs no token; the action gets the built CLI through cli-path. Third-party actions are pinned by full SHA.
 # The Grafana admin password and the service-account token are made in the job, checked and masked.
 
 name: "dogfood: grafana"
@@ -61,12 +60,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      PLAN_HASH: '95762ae969268144'
+      PLAN_HASH: 'a5334ce86dd65834'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CLI first, before any server or third-party code runs in this job: the only step with the token.
+      # The CLI first, before any server or third-party code runs in this job (public repository, no token).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -80,7 +79,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false
@@ -174,7 +172,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CLI first, before any server or third-party code runs in this job: the only step with the token.
+      # The CLI first, before any server or third-party code runs in this job (public repository, no token).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -188,7 +186,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false

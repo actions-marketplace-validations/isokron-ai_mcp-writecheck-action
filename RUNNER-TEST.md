@@ -1,5 +1,7 @@
 # The first run on a GitHub runner: plan
 
+> **History note (16 November 2026).** The action is now pinned to commit `7b95215` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
+
 Not run. Nothing here has been created: no repository, no secret, no push. This file says what Joshua or the coordinator sets up, and what the run must show.
 
 The local test (`TESTING.md`) runs the action's script outside GitHub. What only a runner can show is listed under "What has not been tested" in `TESTING.md`; every item there is covered by a step below.

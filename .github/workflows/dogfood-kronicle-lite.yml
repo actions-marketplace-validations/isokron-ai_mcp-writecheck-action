@@ -17,10 +17,9 @@
 # longer needs `cli-ref`. A dispatch with `kronicle-lite-ref` builds another kronicle-lite commit (its
 # plans differ: pass their hashes in `plan-hashes`). Scheduled, pull-request and push runs are unchanged.
 #
-# Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`), so
-# a fork never gets MWS_CLI_TOKEN (read-only on isokron-ai/mcp-write-safety), which only the
-# "Check out mcp-writecheck" step uses, before any server code is installed or started; the action
-# gets the built CLI through cli-path. Third-party actions are pinned by full SHA.
+# Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`).
+# No secret is used: isokron-ai/mcp-write-safety is public, so the "Check out mcp-writecheck" step
+# needs no token; the action gets the built CLI through cli-path. Third-party actions are pinned by full SHA.
 # kronicle-lite is public and checked out without a token.
 
 name: "dogfood: kronicle-lite"
@@ -74,12 +73,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     env:
-      PLAN_HASH: 012fe9e99371ce52
+      PLAN_HASH: ddf41337c24a60ea
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CLI first, before any server or third-party code runs in this job: the only step with the token.
+      # The CLI first, before any server or third-party code runs in this job (public repository, no token).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -101,7 +100,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false
