@@ -8,9 +8,13 @@
   "plugins": [
     {
       "name": "mcp-write-safety",
-      "source": "./",
+      "source": "./plugin",
       "category": "development",
-      "tags": ["mcp", "agent-skills", "write-safety"]
+      "tags": [
+        "mcp",
+        "agent-skills",
+        "write-safety"
+      ]
     }
   ]
 }
