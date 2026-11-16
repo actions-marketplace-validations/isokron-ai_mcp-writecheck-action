@@ -8,18 +8,18 @@
 #   full  on: the plan, the catalog and the full run (mode full, fail-on must) against the same throwaway
 #         Strapi; the plan hash must match the one pinned below.
 #
-# Security: no pull_request_target; dispatch only (see `on:`). The one secret, MWS_CLI_TOKEN (read-only
-# on the CLI's repository), is used by one checkout step that runs before anything of Strapi is installed
-# or started; the action gets the built CLI through cli-path, never the token. Every Strapi credential is generated in the job and masked.
+# Security: no pull_request_target; dispatch only (see `on:`). No secret is used: isokron-ai/mcp-write-safety
+# is public, so the checkout of the CLI needs no token; the action gets the built CLI through cli-path.
+# Every Strapi credential is generated in the job and masked.
 # Third-party actions are pinned by full SHA. Strapi listens on 127.0.0.1 only.
 
 name: "dogfood: writesafe"
 
 on:
-  # Dispatch only, for now: the test app installs Strapi's whole npm tree (unlocked, fixed by date), and
-  # while the CLI's repository is private this job needs MWS_CLI_TOKEN. When the CLI is on npm or its
-  # repository is public, drop the secret and add back: schedule (cron '29 3 * * *'), and pull_request
-  # and push to main on the paths of this workflow, with the same-repository `if:` on the jobs.
+  # Dispatch only, for now: the test app installs Strapi's whole npm tree (unlocked, fixed by date). The
+  # CLI's repository is public and the secret is gone from this workflow, so schedule (cron '29 3 * * *'),
+  # and pull_request and push to main on the paths of this workflow (with the same-repository `if:` on
+  # the jobs) can be added back; that is the owner's call, not part of the re-pin.
   workflow_dispatch:
     inputs:
       cli-ref:
@@ -60,7 +60,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      # The CLI first, before any third-party code runs in this job: the only step with the token.
+      # The CLI first, before any third-party code runs in this job (public repository, no token).
       - id: cliref
         name: Choose the CLI commit
         env:
@@ -71,7 +71,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false
@@ -119,7 +118,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
-      # The CLI first, before any third-party code runs in this job: the only step with the token.
+      # The CLI first, before any third-party code runs in this job (public repository, no token).
       - id: cliref
         name: Choose the CLI commit
         env:
@@ -130,7 +129,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false

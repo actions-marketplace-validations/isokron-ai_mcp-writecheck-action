@@ -12,14 +12,9 @@
 # REPLACE 3: confirm-target, the manifest's own target.confirm.
 # REPLACE 4: plan-hash, copied from the plan job's summary after reading the plan.
 #
-# Until mcp-writecheck is on npm (@mcp-write-safety/writecheck), the action fetches it from the
-# private isokron-ai/mcp-write-safety repository, so every step that uses the action needs
-# cli-token: a fine-grained token with read access to the contents of that repository, stored
-# as the secret MWS_CLI_TOKEN. Remove the cli-token lines when the CLI is published.
-#
-# A pull request from a fork gets no secrets, so the plan job skips it until then (the second
-# half of its `if:`; remove it when the CLI is published). Never use pull_request_target or
-# workflow_run here: every mode starts the server under test inside the job.
+# The action fetches mcp-writecheck from the public isokron-ai/mcp-write-safety repository and
+# builds it, so it needs no secret of its own. Never use pull_request_target or workflow_run
+# here: every mode starts the server under test inside the job.
 
 name: mcp-writecheck
 
@@ -39,7 +34,7 @@ env:
 
 jobs:
   plan:
-    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -56,14 +51,12 @@ jobs:
           manifest: writecheck.yaml
           mode: plan
           artifact-name: mcp-writecheck-plan
-          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
       - uses: isokron-ai/mcp-writecheck-action@0000000000000000000000000000000000000000 # REPLACE 1
         with:
           manifest: writecheck.yaml
           mode: catalog
           fail-on: any
           artifact-name: mcp-writecheck-catalog
-          cli-token: ${{ secrets.MWS_CLI_TOKEN }}
 
   full:
     if: github.event_name != 'pull_request'
@@ -94,4 +87,3 @@ jobs:
           fail-on: must
           confirm-target: staging-tracker.internal # REPLACE 3
           plan-hash: 0123456789abcdef # REPLACE 4
-          cli-token: ${{ secrets.MWS_CLI_TOKEN }}

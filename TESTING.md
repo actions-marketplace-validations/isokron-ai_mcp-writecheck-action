@@ -1,5 +1,7 @@
 # Testing
 
+> **History note (16 November 2026).** The action is now pinned to commit `7b95215` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
+
 This file records the local test of the action's script logic and says what has not been tested. The action has not run on a GitHub runner; `RUNNER-TEST.md` is the plan for that.
 
 ## What was run

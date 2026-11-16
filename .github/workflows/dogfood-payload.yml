@@ -20,9 +20,9 @@
 # experiment commit, the manifest or the CLI pin changes, the hash check fails: read the new plan in
 # the plan step's summary and update PLAN_HASH.
 #
-# Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`), so
-# a fork never gets MWS_CLI_TOKEN (read-only on isokron-ai/mcp-write-safety), which only the
-# "Check out mcp-writecheck" step uses, before anything else is installed or started. Every
+# Security: no pull_request_target. A pull request from a fork runs nothing here (each job's `if:`).
+# No secret is used: isokron-ai/mcp-write-safety is public, so the "Check out mcp-writecheck" step
+# needs no token. Every
 # credential of the app and of Postgres is generated in the job and masked. Third-party actions are pinned by full SHA.
 
 name: "dogfood: payload"
@@ -66,12 +66,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      PLAN_HASH: b45bf2428f7e9c70
+      PLAN_HASH: 51bc52f039e475ee
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CLI first, before any server or third-party code runs in this job: the only step with the token.
+      # The CLI first, before any server or third-party code runs in this job (public repository, no token).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -85,7 +85,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false
@@ -163,12 +162,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     env:
-      PLAN_HASH: be27fdc8fcf8ed9d
+      PLAN_HASH: 1b8d0329639626e9
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CLI first, before any server or third-party code runs in this job: the only step with the token.
+      # The CLI first, before any server or third-party code runs in this job (public repository, no token).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -182,7 +181,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false
@@ -270,7 +268,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # The CLI first, before any server or third-party code runs in this job: the only step with the token.
+      # The CLI first, before any server or third-party code runs in this job (public repository, no token).
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -284,7 +282,6 @@ jobs:
         with:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
           path: mws-cli
           sparse-checkout: packages/writecheck
           persist-credentials: false
