@@ -14,6 +14,7 @@
  * that were lost (the bystander inventory), setup that was not released, objects left behind.
  */
 
+import { memoryAttention, memoryCell } from './memory.mjs';
 import { CLI, KIT_HELPERS, KITS, LEFT_BY_DECLARATION, RESULTS_FIELDS, requirementUrl, REQUIREMENT_ID, SETUP, SPEC, VERDICTS } from '../contract.mjs';
 
 const REGISTRY = new Map(SPEC.requirements.map((r) => [r.id, r]));
@@ -149,11 +150,35 @@ export function setupFacts(doc, plan) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// The CLI's ending
+// ---------------------------------------------------------------------------------------------
+
+/** Only a signal name from the platform's list is printed; anything else is "a signal". */
+const signalName = (sig) => (typeof sig === 'string' && /^SIG[A-Z0-9]{1,10}$/.test(sig) ? sig : 'a signal');
+
+/**
+ * How the CLI ended, for a sentence: "exited with status 4 (…)" or, for a process ended by a signal (no exit
+ * status of its own), "was ended by SIGKILL and has no exit status (…)".
+ */
+export function cliEndText(cliExit, cliSignal = null) {
+  if (typeof cliExit === 'number') return `exited with status ${cliExit} (${CLI.exit[cliExit] ?? 'not a status it documents'})`;
+  if (cliSignal) return `was ended by ${signalName(cliSignal)} and has no exit status${cliSignal === 'SIGKILL' ? ' (most often the system\'s out-of-memory killer, or the runner killing the job)' : ''}`;
+  return 'ended without an exit status';
+}
+
+/** The "CLI exit status" table cell. */
+export function cliExitCell(cliExit, cliSignal = null) {
+  if (typeof cliExit === 'number') return `${cliExit} (${md(CLI.exit[cliExit] ?? 'not documented')})`;
+  return cliSignal ? `none: ended by ${signalName(cliSignal)}` : 'none';
+}
+
+// ---------------------------------------------------------------------------------------------
 // The job status
 // ---------------------------------------------------------------------------------------------
 
 /**
- * @param {{ failOn: 'none'|'must'|'any', cliExit: number|null, doc: object|null, plan?: object|null }} o
+ * @param {{ failOn: 'none'|'must'|'any', cliExit: number|null, cliSignal?: string|null, doc: object|null, plan?: object|null }} o
+ *   cliSignal: the signal that ended the CLI, when it has no exit status (cliExit null)
  *   plan: the run's plan.json, where there is one (mode full)
  * @returns {{ fail: boolean, reasons: string[], failing: object[] }}
  *
@@ -168,7 +193,7 @@ export function setupFacts(doc, plan) {
  *    some set-ups failed, the others were tested; the summary lists the failed ones, and fail-on decides.
  * 4. Otherwise fail-on decides, from the `violated` records alone. No other verdict fails a job.
  */
-export function decide({ failOn, cliExit, doc, plan = null }) {
+export function decide({ failOn, cliExit, cliSignal = null, doc, plan = null }) {
   const reasons = [];
   const facts = safetyFacts(doc);
   // why: these come first. They hold whether or not the run completed, and they are about the test
@@ -179,7 +204,7 @@ export function decide({ failOn, cliExit, doc, plan = null }) {
   // reports as complete with exit 0, every later check `not tested`; the unfinished clean-up is the signal.
   if (facts.cleanupFailed.length || facts.cleanupUnknown.length || facts.cleanupStopped) reasons.push(`The clean-up did not finish${facts.cleanupStopped ? ` (${md(facts.cleanupStopped)})` : ''}: objects of this run may still be in the test environment, and the next run against it is refused until \`mcp-writecheck cleanup\` has run. This fails the job whatever \`fail-on\` says.`);
   if (!CLI.exitRanToCompletion.includes(cliExit)) {
-    reasons.push(`mcp-writecheck exited with status ${cliExit} (${CLI.exit[cliExit] ?? 'not a status it documents'}). A run that did not complete fails the job whatever \`fail-on\` says.`);
+    reasons.push(`mcp-writecheck ${cliEndText(cliExit, cliSignal)}. A run that did not complete fails the job whatever \`fail-on\` says.`);
   }
   if (!doc) {
     if (!reasons.length) reasons.push('mcp-writecheck exited normally but wrote no results that this action could read.');
@@ -260,7 +285,7 @@ function statusLines(decision, failOn) {
 }
 
 /** The lines of the sections that come before the verdicts: what the tester's seat belts saw. */
-function safetySections(doc, facts) {
+function safetySections(doc, facts, extraWarn = []) {
   const L = [];
   if (facts.lost.length) {
     L.push('');
@@ -291,6 +316,7 @@ function safetySections(doc, facts) {
   for (const c of facts.canariesChanged) warn.push(`Untouched-state canary ${code(c.name)} changed during the run${c.note ? ` (${md(c.note)})` : ''}.`);
   for (const f of facts.fixturesNotRestored) warn.push(`Fixture ${code(f.resource)} was not put back to its original values${f.note ? ` (${md(f.note)})` : ''}.`);
   for (const f of setupFacts(doc, null).failed) warn.push(`The set-up of the object under test of ${code(f.resource)} failed, so its checks are \`not tested\`: ${md(f.reason)}.`);
+  warn.push(...extraWarn);
   if (facts.leftByDeclaration.length) {
     const policies = uniq(facts.leftByDeclaration.map((x) => x.reason)).map(md).join('; ');
     L.push('');
@@ -306,7 +332,55 @@ function safetySections(doc, facts) {
 }
 
 /**
- * @param {{ doc: object, specUrl: string, failOn: string, cliExit: number, decision: object, cliVersion: string, artifactName: string, mode?: 'full'|'catalog', maxBytes?: number }} o
+ * Server processes that ended by SIGKILL the tester did not send, from the run's capture (CLI.captureFile).
+ * The supervisor reports a server killed by a signal as 128 + its number, so SIGKILL is 137; a supervisor
+ * killed itself shows the signal. Only events with `stop_sent: false` count: a CLI that does not record
+ * the field gives nothing, never a guess. Lines that do not parse are skipped.
+ * @param {string} text the capture file
+ * @returns {{ label: string, exit_code: number|null, signal: string|null }[]}
+ */
+export function unexpectedKills(text) {
+  const out = [];
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.includes('"stop_sent":false')) continue;
+    let e;
+    try {
+      e = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (e?.channel !== 'process' || e.event !== 'exit' || e.stop_sent !== false) continue;
+    if (e.exit_code === 137 || e.signal === 'SIGKILL') out.push({ label: String(e.label ?? '?'), exit_code: typeof e.exit_code === 'number' ? e.exit_code : null, signal: typeof e.signal === 'string' ? e.signal : null });
+  }
+  return out;
+}
+
+/** The "Needs attention" line for unexpectedKills(), or null. Never a reason to fail the job. */
+export function killsAttention(kills) {
+  if (!kills?.length) return null;
+  const labels = uniq(kills.map((k) => k.label));
+  return `${kills.length === 1 ? 'A server process' : `${kills.length} server processes`} (${labels.map(code).join(', ')}) ended by SIGKILL that the tester did not send. Most often that is the system's out-of-memory killer. Records from calls around that point may describe the kill rather than the server; check the runner's memory (the peak above, and "Time and memory" in the action's README). The job status does not depend on this.`;
+}
+
+/** The table row for the sampled peak memory (src/memory.mjs), when the caller measured it. */
+function memoryRow(o) {
+  return o.memory === undefined ? [] : [`| Peak memory | ${memoryCell(o.memory)} |`];
+}
+
+/** "Needs attention" lines from the memory measurement. They never enter decide(). */
+function memoryWarn(o) {
+  return [memoryAttention(o.memory, o.ceilingMb ?? null), killsAttention(o.kills)].filter(Boolean);
+}
+
+function attentionSection(warn) {
+  if (!warn.length) return [];
+  return ['', '### Needs attention', '', ...warn.map((w) => `- ${w}`)];
+}
+
+/**
+ * @param {{ doc: object, specUrl: string, failOn: string, cliExit: number, decision: object, cliVersion: string, artifactName: string, mode?: 'full'|'catalog', maxBytes?: number, memory?: object|null, ceilingMb?: number|null, kills?: object[] }} o
+ *   memory: the sampled peak (src/memory.mjs), shown as a row; ceilingMb: `max-rss-mb`; kills: unexpectedKills() of the
+ *   run's capture. None of them affects the job status.
  */
 export function renderRun(o) {
   const { doc, specUrl } = o;
@@ -326,7 +400,8 @@ export function renderRun(o) {
   if (doc.manifest?.sha256) L.push(`| Manifest | sha256 ${code(doc.manifest.sha256)} |`);
   if (doc.target?.catalog_fingerprint) L.push(`| Catalog | ${code(doc.target.catalog_fingerprint)} |`);
   L.push(`| Mode, fail-on | ${mode}, ${md(o.failOn)} |`);
-  L.push(`| CLI exit status | ${o.cliExit} (${md(CLI.exit[o.cliExit] ?? 'not documented')}) |`);
+  L.push(`| CLI exit status | ${cliExitCell(o.cliExit, o.cliSignal)} |`);
+  L.push(...memoryRow(o));
   L.push('');
   L.push(...statusLines(o.decision, o.failOn));
   if (mode === 'catalog') {
@@ -335,7 +410,7 @@ export function renderRun(o) {
   }
 
   // Things a person must not miss, whatever the verdicts are.
-  L.push(...safetySections(doc, facts));
+  L.push(...safetySections(doc, facts, memoryWarn(o)));
 
   // Violated records, in full.
   const violated = results.filter((r) => r.verdict === 'violated');
@@ -452,10 +527,12 @@ export function renderPlan(o) {
   L.push(`| Tester | ${md(o.cliVersion)} |`);
   L.push(`| Manifest | ${code(o.manifest)} |`);
   L.push(`| Plan hash | ${o.planHash ? code(o.planHash) : 'not printed'} |`);
-  L.push(`| CLI exit status | ${o.cliExit} (${md(CLI.exit[o.cliExit] ?? 'not documented')}) |`);
+  L.push(`| CLI exit status | ${cliExitCell(o.cliExit, o.cliSignal)} |`);
+  L.push(...memoryRow(o));
   L.push('');
   if (o.decision.fail) L.push(`**Job status: failed.** ${o.decision.reasons.join(' ')}`);
   else L.push('**Job status: not failed.** The plan was built. This says nothing about the server\'s behavior: no write path was exercised.');
+  L.push(...attentionSection(memoryWarn(o)));
   if (o.planHash) {
     L.push('');
     L.push('The hash covers the manifest, the catalog, the suite version, the limits and every host named by a URL in the server\'s environment. A full run has the same hash only if all of these are the same there.');
@@ -481,6 +558,11 @@ export function renderNoResults(o) {
   L.push('## mcp-writecheck: no results');
   L.push('');
   L.push(`**Job status: failed.** ${o.decision.reasons.join(' ')}`);
+  if (o.memory !== undefined) {
+    L.push('');
+    L.push(`Peak memory: ${memoryCell(o.memory)}.`);
+  }
+  L.push(...attentionSection(memoryWarn(o)));
   if (o.planHashSeen && o.planHashGiven && o.planHashSeen !== o.planHashGiven) {
     L.push('');
     L.push(`The \`plan-hash\` input is ${code(o.planHashGiven)}; today's plan has the hash ${code(o.planHashSeen)}. The manifest, the catalog, the limits, the suite or the hosts changed since the hash was written into the workflow. Read the plan (run this action with \`mode: plan\`, or \`mcp-writecheck plan\`), and only then update the input. The action does not do this for you: the hash is the confirmation that a person has seen what the run will write.`);

@@ -27,7 +27,8 @@ import { join, resolve } from 'node:path';
 
 import { CLI, CLI_DEFAULT_REF, SPEC_DEFAULT_URL } from '../contract.mjs';
 import { ActionError, authHeaderValue, checkNode, obtainCli } from './install.mjs';
-import { decide, levelText, md, renderNoResults, renderPlan, renderRun, safetyFacts } from './summary.mjs';
+import { memoryAttention, parseCeilingMb, startSampler } from './memory.mjs';
+import { cliEndText, decide, killsAttention, levelText, md, renderNoResults, renderPlan, renderRun, safetyFacts, unexpectedKills } from './summary.mjs';
 
 const env = process.env;
 const inActions = env.GITHUB_ACTIONS === 'true';
@@ -59,10 +60,18 @@ function readInputs() {
     artifactName: input('artifact-name', 'mcp-writecheck-results'),
     cliPath: input('cli-path'),
     cliToken: input('cli-token'),
+    maxRssMb: input('max-rss-mb'),
   };
   if (!i.manifest) throw new ActionError('The `manifest` input is required: the path of the mcp-writecheck manifest in this repository.');
   if (!existsSync(i.manifest)) throw new ActionError(`manifest: ${i.manifest} does not exist (the path is relative to the workspace).`);
   if (!['plan', 'catalog', 'full'].includes(i.mode)) throw new ActionError(`mode: ${JSON.stringify(i.mode)} is not one of plan, catalog, full.`);
+  try {
+    i.maxRssMb = parseCeilingMb(i.maxRssMb);
+  } catch (e) {
+    // why: memory never changes the job status (owner, 16 Nov), so a bad ceiling is a warning and the run goes on without one.
+    annotate('warning', `${e.message} The run goes on without a memory ceiling.`);
+    i.maxRssMb = null;
+  }
   if (!['none', 'must', 'any'].includes(i.failOn)) throw new ActionError(`fail-on: ${JSON.stringify(i.failOn)} is not one of none, must, any.`);
   let url;
   try {
@@ -83,8 +92,12 @@ function readInputs() {
   return i;
 }
 
-/** Run the CLI. Its output goes to the job log as it comes, and is kept for the two lines the action reads. */
-function runCli(entry, args) {
+/**
+ * Run the CLI. Its output goes to the job log as it comes, and is kept for the two lines the action reads.
+ * With `sample`, the memory of the CLI's process tree is sampled while it runs (src/memory.mjs); the
+ * result is `memory`. Sampling never changes the outcome: any error there gives `not measured`.
+ */
+function runCli(entry, args, { sample = false } = {}) {
   return new Promise((resolveRun) => {
     // why: the CLI's output can quote text that the server under test produced. Workflow commands are
     // switched off while it prints, so that such text cannot issue one.
@@ -94,6 +107,14 @@ function runCli(entry, args) {
     // group then reaches it once, through `forward`, not twice; a second signal makes the CLI exit at
     // once without its clean-up.
     const child = spawn(process.execPath, [entry, ...args], { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+    let sampler = null;
+    if (sample) {
+      try {
+        sampler = startSampler({ root: child.pid });
+      } catch (e) {
+        sampler = { stop: async () => ({ method: 'not measured', peakKib: null, samples: 0, intervalMs: 0, note: 'sampling could not start' }) };
+      }
+    }
     let out = '';
     const keep = (chunk, stream) => {
       out += chunk;
@@ -114,11 +135,21 @@ function runCli(entry, args) {
     };
     process.on('SIGINT', forward);
     process.on('SIGTERM', forward);
+    let finished = false;
     const done = (code, signal, error) => {
+      if (finished) return;
+      finished = true;
       process.off('SIGINT', forward);
       process.off('SIGTERM', forward);
       if (inActions) log(`\n::${stop}::\n::endgroup::`);
-      resolveRun({ code: error ? null : code ?? (signal === 'SIGINT' || signal === 'SIGTERM' ? 130 : null), out, error });
+      const exit = error ? null : code ?? (signal === 'SIGINT' || signal === 'SIGTERM' ? 130 : null);
+      // why: a CLI ended by any other signal (SIGKILL from the out-of-memory killer or the runner) has no exit status; the summary names the signal.
+      const result = { code: exit, signal: exit === null && !error ? signal ?? null : null, out, error, memory: null };
+      if (!sampler) return resolveRun(result);
+      sampler
+        .stop()
+        .catch(() => ({ method: 'not measured', peakKib: null, samples: 0, intervalMs: 0, note: 'sampling failed' }))
+        .then((memory) => resolveRun({ ...result, memory }));
     };
     child.on('error', (e) => done(null, null, e));
     child.on('close', (code, signal) => done(code, signal, null));
@@ -164,6 +195,22 @@ function readPlan(runDir) {
   }
 }
 
+/**
+ * Server processes killed by a SIGKILL the tester did not send, from the run's capture. Any problem reading
+ * it (no capture, over 64 MiB, unreadable) gives none: this is a "Needs attention" line, never a job status.
+ */
+function readKills(runDir) {
+  if (!runDir) return [];
+  try {
+    const file = join(runDir, CLI.captureFile);
+    // why: the whole file is read into memory; on a runner already short of memory a large capture must not be what kills the action.
+    if (!existsSync(file) || statSync(file).size > 64 * 1024 * 1024) return [];
+    return unexpectedKills(readFileSync(file, 'utf8'));
+  } catch {
+    return [];
+  }
+}
+
 /** Error and warning lines for the job's annotations, from the decision and the safety facts. */
 function annotateRun(decision, doc) {
   if (decision.fail) for (const why of decision.reasons) annotate('error', plain(why));
@@ -174,6 +221,12 @@ function annotateRun(decision, doc) {
   if (facts.setupUnresolved.length) annotate('error', 'setup made through the platform API was not released; the job summary says what to do');
   if (facts.leftovers.length) annotate('warning', `mcp-writecheck left objects behind in the test environment; search it for the prefix ${doc.run?.prefix}.`);
   if (facts.cleanupUnknown.length || facts.cleanupFailed.length) annotate('warning', 'clean-up did not finish; run mcp-writecheck cleanup with the state folder from the artifact.');
+}
+
+/** A warning annotation when the sampled peak reached `max-rss-mb`. Never an error: the job status does not depend on it. */
+function annotateMemory(memory, ceilingMb) {
+  const line = memoryAttention(memory, ceilingMb);
+  if (line) annotate('warning', plain(line));
 }
 
 function cliVersion(entry) {
@@ -239,17 +292,18 @@ async function main() {
   log(version);
 
   if (i.mode === 'plan') {
-    const r = await runCli(entry, CLI.planArgs({ manifest: i.manifest, catalog: i.catalog || null }));
+    const r = await runCli(entry, CLI.planArgs({ manifest: i.manifest, catalog: i.catalog || null }), { sample: true });
     if (r.error) throw new ActionError(`could not start mcp-writecheck: ${r.error.message}`);
     const hash = lastMatch(CLI.planHashLine, r.out)?.[1] ?? null;
     const reasons = [];
-    if (r.code !== 0) reasons.push(`mcp-writecheck plan exited with status ${r.code} (${CLI.exit[r.code] ?? 'not a status it documents'}).${i.catalog ? '' : ' Without the `catalog` input, plan starts the server for one `tools/list` request, so the server must be able to start in this job.'}`);
+    if (r.code !== 0) reasons.push(`mcp-writecheck plan ${cliEndText(r.code, r.signal)}.${i.catalog ? '' : ' Without the `catalog` input, plan starts the server for one `tools/list` request, so the server must be able to start in this job.'}`);
     else if (!hash) reasons.push('mcp-writecheck plan printed no plan hash that this action could read.');
     const decision = { fail: reasons.length > 0, reasons, failing: [] };
     const planDir = join(resultsRoot, 'plan');
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, 'plan.txt'), r.out);
-    writeSummary(renderPlan({ manifest: i.manifest, catalog: i.catalog || null, cliExit: r.code, planHash: hash, planText: r.code === 0 ? r.out : lastLines(r.out, 40), cliVersion: version, decision }));
+    writeSummary(renderPlan({ manifest: i.manifest, catalog: i.catalog || null, cliExit: r.code, cliSignal: r.signal, planHash: hash, planText: r.code === 0 ? r.out : lastLines(r.out, 40), cliVersion: version, decision, memory: r.memory, ceilingMb: i.maxRssMb }));
+    annotateMemory(r.memory, i.maxRssMb);
     for (const why of reasons) annotate('error', why);
     setOutputs({ mode: 'plan', 'plan-hash': hash ?? '', 'results-path': planDir, 'cli-exit-code': r.code ?? '', 'exit-status': decision.fail ? 1 : 0 });
     return;
@@ -257,15 +311,16 @@ async function main() {
 
   if (i.mode === 'catalog') {
     const before = new Set(readdirSync(resultsRoot));
-    const r = await runCli(entry, CLI.catalogArgs({ manifest: i.manifest, catalog: i.catalog || null, out: resultsRoot }));
+    const r = await runCli(entry, CLI.catalogArgs({ manifest: i.manifest, catalog: i.catalog || null, out: resultsRoot }), { sample: true });
     if (r.error) throw new ActionError(`could not start mcp-writecheck: ${r.error.message}`);
     const runDir = findResultsDir(resultsRoot, before, r.out);
     const { doc, unreadable } = readResults(runDir);
-    const decision = decide({ failOn: i.failOn, cliExit: r.code, doc });
+    const decision = decide({ failOn: i.failOn, cliExit: r.code, cliSignal: r.signal, doc });
     if (unreadable) decision.reasons.push(unreadable);
-    if (doc) writeSummary(renderRun({ doc, specUrl: i.specUrl, failOn: i.failOn, cliExit: r.code, decision, cliVersion: version, artifactName: i.artifactName, mode: 'catalog' }));
-    else writeSummary(renderNoResults({ cliExit: r.code, decision, lastLines: lastLines(r.out, 15), planHashGiven: '', planHashSeen: null, cliVersion: version }));
+    if (doc) writeSummary(renderRun({ doc, specUrl: i.specUrl, failOn: i.failOn, cliExit: r.code, cliSignal: r.signal, decision, cliVersion: version, artifactName: i.artifactName, mode: 'catalog', memory: r.memory, ceilingMb: i.maxRssMb }));
+    else writeSummary(renderNoResults({ cliExit: r.code, cliSignal: r.signal, decision, lastLines: lastLines(r.out, 15), planHashGiven: '', planHashSeen: null, cliVersion: version, memory: r.memory, ceilingMb: i.maxRssMb }));
     annotateRun(decision, doc);
+    annotateMemory(r.memory, i.maxRssMb);
     setOutputs({ mode: 'catalog', 'plan-hash': '', 'results-path': runDir ?? '', 'cli-exit-code': r.code ?? '', 'exit-status': decision.fail ? 1 : 0 });
     return;
   }
@@ -275,17 +330,21 @@ async function main() {
   // why: the ledger of an interrupted run is what `mcp-writecheck cleanup` needs; keeping the state
   // folder beside the results puts it in the artifact.
   const state = join(resultsRoot, 'state');
-  const r = await runCli(entry, CLI.runArgs({ manifest: i.manifest, confirmTarget: i.confirmTarget, planHash: i.planHash, out: resultsRoot, state }));
+  const r = await runCli(entry, CLI.runArgs({ manifest: i.manifest, confirmTarget: i.confirmTarget, planHash: i.planHash, out: resultsRoot, state }), { sample: true });
   if (r.error) throw new ActionError(`could not start mcp-writecheck: ${r.error.message}`);
 
   const runDir = findResultsDir(resultsRoot, before, r.out);
   const { doc, unreadable } = readResults(runDir);
-  const decision = decide({ failOn: i.failOn, cliExit: r.code, doc, plan: readPlan(runDir) });
+  const decision = decide({ failOn: i.failOn, cliExit: r.code, cliSignal: r.signal, doc, plan: readPlan(runDir) });
   if (unreadable) decision.reasons.push(unreadable);
   const planHashSeen = doc?.plan?.hash ?? lastMatch(CLI.runPlanLine, r.out)?.[1] ?? '';
-  if (doc) writeSummary(renderRun({ doc, specUrl: i.specUrl, failOn: i.failOn, cliExit: r.code, decision, cliVersion: version, artifactName: i.artifactName, mode: 'full' }));
-  else writeSummary(renderNoResults({ cliExit: r.code, decision, lastLines: lastLines(r.out, 15), planHashGiven: i.planHash, planHashSeen: planHashSeen || null, cliVersion: version }));
+  const kills = readKills(runDir);
+  if (doc) writeSummary(renderRun({ doc, specUrl: i.specUrl, failOn: i.failOn, cliExit: r.code, cliSignal: r.signal, decision, cliVersion: version, artifactName: i.artifactName, mode: 'full', memory: r.memory, ceilingMb: i.maxRssMb, kills }));
+  else writeSummary(renderNoResults({ cliExit: r.code, cliSignal: r.signal, decision, lastLines: lastLines(r.out, 15), planHashGiven: i.planHash, planHashSeen: planHashSeen || null, cliVersion: version, memory: r.memory, ceilingMb: i.maxRssMb }));
   annotateRun(decision, doc);
+  annotateMemory(r.memory, i.maxRssMb);
+  const killed = killsAttention(kills);
+  if (killed) annotate('warning', plain(killed));
   setOutputs({ mode: 'full', 'plan-hash': planHashSeen, 'results-path': runDir ?? '', 'cli-exit-code': r.code ?? '', 'exit-status': decision.fail ? 1 : 0 });
 }
 
