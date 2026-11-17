@@ -31,7 +31,8 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   files and folders only, under a size cap. Our helper containers carry the target's label and a
   time limit, so one stuck on something the target planted is removed with it.
 - Output is bounded: each command's log keeps 64 MiB, captured output 16 MiB, and a `results.json`
-  over 32 MiB is recorded by sha256 and size only. Of a `results.json` the driver keeps only
+  over 4 MiB is recorded by sha256 and size only (parsing tens of MiB of nested JSON costs about a
+  gigabyte of heap). Of a `results.json` the driver keeps only
   `run.status` (a string of 64 characters at most) and `run.writes` (a finite number), and records at
   most 200 results folders per target. One target's output never stops the shard, and
   every target gets its `meta.json`.
@@ -60,7 +61,12 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
 - With `full.repeats` above 1, our helper copies `/work` (as the sandbox user, no network, links and
   special files as entries, never followed) into a volume of its own after install, and restores it
   before each later repeat. That volume is mounted only by that helper; the driver refuses to mount it
-  in any container that runs target code.
+  in any container that runs target code. The copy and the restore run under bash with `pipefail`, and
+  their success is the helper's exit status: no status file is written anywhere a target could plant a
+  forged one or block it with a fifo.
+- Every volume the driver uses must be new: one that exists already (`docker volume inspect`) is
+  refused, since `docker volume create` would hand it back. Our helpers are bounded like the sandboxes
+  (`--memory 2g`, `--pids-limit 256`, the same CPUs) and each has a time limit.
 - Three more of our helpers run inside the target's own sandbox container, never on the host, and
   only for the encrypted record: a version probe (`node -v`, `python3 -V`) and `sandbox/config-source.mjs`
   (reads the installed package and copies a selection into `/work/out/config-source/`), both after
@@ -115,7 +121,9 @@ capabilities instead of none.
 
 Every entry is checked when the list is loaded. An entry that fails is recorded as a harness error
 (`refused at load: ...`, exit 125) and nothing of it runs; the other targets run. A target id that is
-not `[a-z0-9][a-z0-9-]{0,31}` refuses the whole list.
+not `[a-z0-9][a-z0-9-]{0,31}`, or that would name one of the driver's own Docker objects (`cli`, `tools`,
+`uvsrc`, `shard`, or one ending in `-clean`, `-evidence`, `-egress`, `-run`, `-b<N>`, `-h<N>` or
+`-<N>`), refuses the whole list.
 
 ## The run record (`meta.json`, `isokron-corpus-run/3`)
 

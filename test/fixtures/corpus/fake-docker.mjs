@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+
 const argv = process.argv.slice(2);
 const root = process.env.FAKE_DOCKER_ROOT;
 const NAME = 'zz-secret-target-name';
@@ -50,6 +51,11 @@ if (cmd === 'version') done(0, rest.join(' ').includes('Server.Os') ? 'linux/amd
 if (cmd === 'info') done(0, '4\n');
 if (cmd === 'pull') done(0);
 if (cmd === 'image') done(0, 'sha256:fake\n');
+// `volume inspect` finds only a volume named in FAKE root `volume-exists` (one name suffix per line).
+if (cmd === 'volume' && rest[0] === 'inspect') {
+  const ends = existsSync(join(root, 'volume-exists')) ? readFileSync(join(root, 'volume-exists'), 'utf8').trim().split('\n') : [];
+  done(ends.some((e) => e && rest.at(-1).endsWith(e)) ? 0 : 1, '');
+}
 if (cmd === 'volume') done(0, rest[0] === 'create' ? `${rest.at(-1)}\n` : '');
 if (cmd === 'network') {
   if (rest[0] === 'create') {
@@ -86,7 +92,8 @@ const c = rest.slice(imgAt + 1);
 const work = opts.map((a, i) => (opts[i - 1] === '--mount' ? a : null)).filter(Boolean).map((m) => /src=([^,]+),dst=\/work/.exec(m)).find(Boolean)?.[1];
 const vol = work ? join(root, 'vols', work) : null;
 const inVol = (p) => join(vol, p.replace(/^\/work\/?/, ''));
-const script = c[0] === 'sh' && c[1] === '-c' ? c[2] : '';
+const script = (c[0] === 'sh' || c[0] === 'bash') && c[1] === '-c' ? c[2] : '';
+const volAt = (dst) => opts.map((a, i) => (opts[i - 1] === '--mount' ? a : null)).filter(Boolean).map((m) => new RegExp(`src=([^,]+),dst=${dst}(,|$)`).exec(m)).find(Boolean)?.[1];
 
 if (opts.includes('-d')) done(0, 'fakecontainerid\n');
 if (opts.includes('--interactive')) {
@@ -97,8 +104,9 @@ if (opts.includes('--interactive')) {
   }
   done(0);
 }
-if (script.includes('cd /work/out')) {
-  const out = inVol('/work/out');
+if (script.includes('find . -mindepth 1')) {
+  // copy-out: the folder given (`/work/out`, or the evidence volume's root mounted at /work).
+  const out = inVol(c[4]);
   if (!existsSync(out)) done(0);
   const t = spawn('tar', ['-C', out, '-cf', '-', '.'], { stdio: ['ignore', 'inherit', 'inherit'] });
   t.on('close', (code) => process.exit(code));
@@ -107,7 +115,7 @@ if (script.includes('cd /work/out')) {
   const sha = existsSync(join(root, 'fetch-sha')) ? readFileSync(join(root, 'fetch-sha'), 'utf8').trim() : c[3];
   const code = existsSync(join(root, 'fetch-exit')) ? Number(readFileSync(join(root, 'fetch-exit'), 'utf8')) : 0;
   done(code, code === 0 ? `sha256 ${sha} bytes 10\n` : '');
-} else if (script.includes('/clean/.create-status')) {
+} else if (script.includes('--exclude=./out')) {
   // The clean copy of /work (FAKE root `clean-fail`: it fails).
   done(existsSync(join(root, 'clean-fail')) ? 1 : 0);
 } else if (script.includes('node -v')) {
@@ -147,6 +155,14 @@ if (script.includes('cd /work/out')) {
     const r = inVol(join(c[c.indexOf('--out') + 1], `run-${n}`));
     mkdirSync(r, { recursive: true });
     writeFileSync(join(r, 'results.json'), JSON.stringify({ format: 'mws-results/1', run: { status: 'complete', writes: 10 + n }, results: [] }));
+    const st = inVol(c[c.indexOf('--state') + 1]);
+    mkdirSync(st, { recursive: true });
+    writeFileSync(join(st, 'ledger.jsonl'), `{"run":${n}}\n`);
+    // FAKE root `plant-after-move`: a later repeat's target code plants a forged earlier result.
+    if (n > 1 && existsSync(join(root, 'plant-after-move'))) {
+      mkdirSync(inVol('/work/out/results/full-1/run-1'), { recursive: true });
+      writeFileSync(inVol('/work/out/results/full-1/run-1/results.json'), JSON.stringify({ run: { status: 'complete', writes: 999 } }));
+    }
     done(Number(nth('run-exits', n) ?? 0));
   }
   if (sub === 'catalog') {

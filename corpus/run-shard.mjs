@@ -101,7 +101,7 @@ const COPY_OUT_MS = 600_000;
 const LOG_CAP = Number(process.env.CORPUS_LOG_CAP || 64 * 1024 * 1024);
 const BUF_CAP = Number(process.env.CORPUS_BUF_CAP || 16 * 1024 * 1024);
 /** results.json larger than this is recorded by size only, never read into memory. */
-const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 32 * 1024 * 1024);
+const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 4 * 1024 * 1024);
 /** results.json folders recorded per target at most (the folder names are target-writable). */
 const RESULTS_MAX = 200;
 /** Size cap of one set-up `fetch` tarball. */
@@ -242,9 +242,17 @@ export function checkPinned(ref, what) {
   return ref;
 }
 
+/**
+ * Ids that would name one of the driver's own Docker objects: the shard's volumes and containers
+ * (corpus-<run>-cli, -tools, -uvsrc) or another target's (corpus-<run>-<id>-clean, -evidence, -egress,
+ * -run, -b<N>, -h<N>, -<N>). A list with one is refused at load.
+ */
+export const RESERVED_ID = /^(cli|tools|uvsrc|shard)$|-(clean|evidence|egress|run|b\d+|h\d+|\d+)$/;
+
 /** A target id is used in container, volume and network names. */
 export function checkId(id) {
   if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(id)) throw new HarnessError('target id must match [a-z0-9][a-z0-9-]{0,31}');
+  if (RESERVED_ID.test(id)) throw new HarnessError(`target id ${id} is reserved (it would name one of the driver's own volumes, networks or containers)`);
   return id;
 }
 
@@ -458,17 +466,18 @@ export function imageParts(ref) {
 }
 
 /**
- * D5 fresh state, run by our helper as the sandbox user with no network. CLEAN_COPY: /work (read-only)
- * into /clean, without /work/out, after install and before any set-up. RESTORE_WORK: everything in
- * /work but out/ removed, then /clean copied back. tar keeps symlinks and special files as entries
- * (never follows or opens them); a failed create is caught through its status file.
+ * D5 fresh state, run by our helper with bash as the sandbox user, no network. CLEAN_COPY: /work
+ * (read-only) into /clean, without /work/out, after install and before any set-up. RESTORE_WORK:
+ * everything in /work but out/ removed, then /clean copied back. tar keeps symlinks and special files as
+ * entries (never follows or opens them). Success is the helper's exit status (pipefail: either tar
+ * failing fails it); no status file is written anywhere a target could plant or block one.
  */
-export const CLEAN_COPY = '{ tar -C /work --sparse --exclude=./out -cf - . ; echo $? > /clean/.create-status; } | tar -C /clean -xpf - '
-  + '&& [ "$(cat /clean/.create-status)" = 0 ] && rm -f /clean/.create-status';
-export const RESTORE_WORK = 'chmod -R u+rwX /work 2>/dev/null; '
+export const CLEAN_COPY = 'set -o pipefail; tar -C /work --sparse --exclude=./out -cf - . | tar -C /clean -xpf -';
+export const RESTORE_WORK = 'set -o pipefail; chmod -R u+rwX /work 2>/dev/null; '
   + 'for e in /work/* /work/.[!.]* /work/..?*; do { [ -e "$e" ] || [ -L "$e" ]; } || continue; [ "$e" = /work/out ] && continue; rm -rf "$e" || exit 1; done; '
-  + '{ tar -C /clean --sparse -cf - . ; echo $? > /work/out/.restore-status; } | tar -C /work -xpf - '
-  + '&& [ "$(cat /work/out/.restore-status)" = 0 ] && rm -f /work/out/.restore-status';
+  + 'tar -C /clean --sparse -cf - . | tar -C /work -xpf -';
+/** Time limit of one clean copy, restore or evidence move. */
+const CLEAN_MS = 600_000;
 
 /** The version probe: what `node` and `python3` the server under test would get (the same PATH). */
 export const VERSION_PROBE = 'v=$(node -v 2>/dev/null) && echo "node $v" || echo "node -"; '
@@ -999,6 +1008,8 @@ class Docker {
       '--user', user, '--cap-drop', 'ALL', ...(chown ? ['--cap-add', 'CHOWN'] : []),
       // Only the set-up fetch helper (ours, no target code running) is given the install network.
       '--security-opt', 'no-new-privileges', '--read-only', '--network', network,
+      // Bounded like the sandboxes: our helpers read target-made trees (copy-out, clean copy, evidence).
+      '--pids-limit', '256', '--memory', '2g', '--memory-swap', '2g', '--cpus', String(this.ctx.cpus ?? 1),
       ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
       ...mounts.flatMap((m) => ['--mount', volumeMount(m)]),
       ...(stdin ? ['--interactive'] : []),
@@ -1020,7 +1031,14 @@ class Docker {
     return id.stdout.trim();
   }
 
+  /**
+   * A new, empty volume. `docker volume create` hands back an existing volume of the same name, so
+   * one that exists already is refused: a target's /work must never be the CLI's, the tools' or
+   * another target's volume.
+   */
   async volume(name, log) {
+    const seen = await this.d(['volume', 'inspect', '--format', '{{.Name}}', name], { log, keepStdout: true });
+    if (seen.exit === 0) throw new HarnessError(`volume ${name} exists already`);
     await must(this.d(['volume', 'create', ...Object.entries(this.labels()).flatMap(([k, v]) => ['--label', `${k}=${v}`]), name], { log }), 'volume');
     return name;
   }
@@ -1068,14 +1086,14 @@ export function keepRegular(dir) {
  * Bring /work/out back to the host: a helper (no network, read-only volume) tars regular files and
  * folders only; the host extracts with no owner and no modes, under COPY_OUT_CAP bytes.
  */
-function copyOut(dk, vol, dest, log, target) {
+function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
   mkdirSync(dest, { recursive: true });
   const name = `corpus-${dk.ctx.runId}-${target}-h${++dk.n}`;
   const argv = dk.helperArgs({
     name, target,
     user: SANDBOX_USER,
     mounts: [{ src: vol, dst: P.work, ro: true }],
-    cmd: ['sh', '-c', 'cd /work/out 2>/dev/null || exit 0; find . -mindepth 1 \\( -type f -o -type d \\) -print0 | tar --null --no-recursion -cf - -T -'],
+    cmd: ['sh', '-c', 'cd "$1" 2>/dev/null || exit 0; find . -mindepth 1 \\( -type f -o -type d \\) -print0 | tar --null --no-recursion -cf - -T -', 'sh', srcDir],
   });
   return new Promise((done) => {
     const lg = createWriteStream(log, { flags: 'a' });
@@ -1296,7 +1314,7 @@ async function runTarget(t, o, ctx, dk) {
         const cv = await dk.volume(`corpus-${tag}-clean`, L('fresh-state'));
         cleanVol = cv;
         await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: cv, dst: P.clean }], cmd: ['sh', '-c', 'chmod 700 /clean && chown 10001:10001 /clean'] }, { log: L('fresh-state'), deadline: small() }), 'clean copy set-up');
-        await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work, ro: true }, { src: cv, dst: P.clean }], cmd: ['sh', '-c', CLEAN_COPY] }, { log: L('fresh-state'), deadline: Math.min(deadline, Date.now() + 600_000) }), 'clean copy');
+        await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work, ro: true }, { src: cv, dst: P.clean }], cmd: ['bash', '-c', CLEAN_COPY] }, { log: L('fresh-state'), deadline: Math.min(deadline, Date.now() + CLEAN_MS) }), 'clean copy');
         clean = cv;
       } catch (e) {
         if (e.timeout) throw e;
@@ -1506,7 +1524,7 @@ async function runTarget(t, o, ctx, dk) {
             // list's set-up run again, the manifest written again. A step that fails stops the target
             // (harness error) and is named in this repeat's `why`.
             try {
-              if (clean) await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: clean, dst: P.clean, ro: true }], cmd: ['sh', '-c', RESTORE_WORK] }, { log: L('fresh-state'), deadline: rd }), `restore /work for repeat ${i}`);
+              if (clean) await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: clean, dst: P.clean, ro: true }], cmd: ['bash', '-c', RESTORE_WORK] }, { log: L('fresh-state'), deadline: Math.min(rd, Date.now() + CLEAN_MS) }), `restore /work for repeat ${i}`);
               if (t.backends?.length) {
                 const changed = await resetBackends(rd);
                 if (changed.length) {

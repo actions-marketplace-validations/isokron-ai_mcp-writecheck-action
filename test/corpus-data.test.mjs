@@ -17,7 +17,7 @@ import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
   boundAnnotations, checkDropped, checkFull, checkShardBudget, checkSnapshot, CLEAN_COPY, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
-  validateTarget, VERSION_PROBE,
+  validateTarget, VERSION_PROBE, checkId, RESERVED_ID,
 } from '../corpus/run-shard.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
@@ -337,6 +337,9 @@ test('D1 / D5: results.json: only run.status (a short string) and run.writes (a 
   assert.ok(bad.writes_why);
   assert.equal(readRunFields(f('c', JSON.stringify({ run: { status: 's'.repeat(65), writes: 1 } }))).status, null);
   assert.equal(readRunFields(f('d', 'not json')).why, 'no run object (not JSON, or no run)');
+  // The default read cap is 4 MiB (parsing 32 MiB of nested arrays costs about 1 GB of heap).
+  assert.equal(readRunFields(f('big', `{"run":{"status":"complete"},"pad":"${'x'.repeat(4 * 1024 * 1024)}"}`)).too_large, true);
+  assert.equal(readRunFields(f('fits', `{"run":{"status":"complete"},"pad":"${'x'.repeat(4 * 1024 * 1024 - 64)}"}`)).status, 'complete');
   const big = readRunFields(f('e', JSON.stringify({ run: { status: 'complete' }, pad: 'x'.repeat(2000) })), 1000);
   assert.deepEqual(big, { too_large: true, status: null, writes: null, why: 'over 1000 bytes: not read' });
 });
@@ -353,6 +356,11 @@ test('D8: the shard\'s planned time must fit one job; the error names the target
 test('D5: the clean copy of /work is for our helpers only; its scripts keep links and special files as entries', () => {
   assert.throws(() => sandboxRunArgs({ name: 'n', image: IMG, network: 'none', mounts: [{ src: 'corpus-x-clean', dst: '/clean' }], cmd: ['true'] }), /never mounts the clean copy/);
   assert.match(CLEAN_COPY, /--exclude=\.\/out/);
+  // Success is the helper's exit status (bash pipefail), never a status file a target could plant or block.
+  for (const sc of [CLEAN_COPY, RESTORE_WORK]) {
+    assert.ok(sc.startsWith('set -o pipefail; '), sc);
+    assert.doesNotMatch(sc, /status|echo \$\?|>(?!\/dev\/null)/, 'no file written but /dev/null');
+  }
   assert.match(RESTORE_WORK, /\[ "\$e" = \/work\/out \] && continue/);
   // tar without -h / --dereference stores a symlink as a link entry; nothing it points to is read.
   for (const sc of [CLEAN_COPY, RESTORE_WORK]) for (const cmd of sc.match(/tar [^|;&]*/g)) assert.ok(!/(^| )(-[a-zA-Z]*h[a-zA-Z]*|--dereference)( |$)/.test(cmd), cmd);
@@ -523,7 +531,11 @@ test('D3 / D5: three repeats against fresh backends; results/full-<i>/; snapshot
   assert.equal(calls.filter((a) => a[0] === 'run' && sh(a) === CLEAN_COPY).length, 1);
   const restores = calls.filter((a) => a[0] === 'run' && sh(a) === RESTORE_WORK);
   assert.equal(restores.length, 2);
+  assert.equal(calls.find((a) => a[0] === 'run' && sh(a) === CLEAN_COPY).at(-3), 'bash');
   for (const a of restores) {
+    assert.equal(a.at(-3), 'bash');
+    assert.equal(a[a.indexOf('--memory') + 1], '2g');
+    assert.equal(a[a.indexOf('--pids-limit') + 1], '256');
     assert.equal(a[a.indexOf('--user') + 1], '10001:10001');
     assert.equal(a[a.indexOf('--network') + 1], 'none');
     assert.ok(a.some((x) => /dst=\/clean,readonly$/.test(x)), a.join(' '));
@@ -692,4 +704,29 @@ test('D4: config source: nothing is read through a symlink anywhere on its path;
   assert.equal(noLinks(w3, join(site, 'p', 'config.py')), false);
   assert.equal(noLinks(w3, join(site, 'p-1.0.dist-info', 'METADATA')), true);
   assert.equal(noLinks(w3, '/etc/hosts'), false);
+});
+
+test('D7: ids that would name the driver\'s own Docker objects are reserved; the list is refused at load', () => {
+  for (const id of ['cli', 'tools', 'uvsrc', 'shard', 't01-clean', 't01-evidence', 't01-egress', 't01-run', 't01-b0', 't01-h12', 't01-3']) {
+    assert.throws(() => checkId(id), /is reserved/, id);
+  }
+  for (const id of ['t01', 't999', 'clean', 'tools-x', 'run-t01', 'b0']) assert.doesNotThrow(() => checkId(id), id);
+  assert.ok(RESERVED_ID.test('cli'));
+  const d = stand([{ id: 't01' }, { id: 't01-clean' }]);
+  const { r } = drive(d);
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 125\n`);
+  assert.match(readFileSync(join(d, 'out', '_shard', 'harness-error.txt'), 'utf8'), /target id t01-clean is reserved/);
+});
+
+test('D5: a volume that exists already is never used as a fresh one (the CLI\'s, the tools\' or a target\'s)', () => {
+  const d = stand([{ id: 't01' }, { id: 't02' }]);
+  const { r, calls, meta } = drive(d, { fake: { 'volume-exists': '-t01\n' } });
+  assert.deepEqual(r.stdout.split('\n').slice(1).filter(Boolean).sort(), ['run finished, exit 0', 'run finished, exit 125']);
+  assert.match(meta('t01').harness_error, /volume corpus-\w+-t01 exists already/);
+  assert.equal(meta('t02').status, 'completed', meta('t02').harness_error);
+  assert.ok(!calls.some((a) => a[0] === 'volume' && a[1] === 'create' && a.at(-1).endsWith('-t01')), 'never created (reused)');
+  const d2 = stand([{ id: 't01' }]);
+  const r2 = drive(d2, { fake: { 'volume-exists': '-cli\n' } });
+  assert.equal(r2.r.stdout, `${LABEL}\nrun finished, exit 125\n`);
+  assert.match(readFileSync(join(d2, 'out', '_shard', 'harness-error.txt'), 'utf8'), /volume corpus-\w+-cli exists already/);
 });

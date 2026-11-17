@@ -46,6 +46,8 @@ srv.stdout.on('data', (c) => { buf += c; if (buf.split('\\n').some((l) => { try 
   if (cmd === 'plan') console.log('plan hash: 0123456789abcdef');
   if (cmd === 'catalog') { const r = path.join(a[a.indexOf('--out') + 1], 'catalog-smoke'); fs.mkdirSync(r, { recursive: true });
     fs.writeFileSync(path.join(r, 'results.json'), JSON.stringify({ run: { status: 'complete' }, tools: buf })); }
+  if (cmd === 'run') { const r = path.join(a[a.indexOf('--out') + 1], 'run-smoke'); fs.mkdirSync(r, { recursive: true });
+    fs.writeFileSync(path.join(r, 'results.json'), JSON.stringify({ run: { status: 'complete', writes: 2 } })); }
   srv.kill(); process.exit(0); } });
 srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'smoke', version: '0' } } }) + '\\n');
 srv.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list' }) + '\\n');
@@ -374,6 +376,33 @@ test('D smoke: surface, versions, config source, snapshots and repeats in the re
   assert.equal(readFileSync(join(out, 'd01', 'backend-0-before.txt'), 'utf8'), 'seeded\n');
   assert.equal(readFileSync(join(out, 'd01', 'backend-0-after.txt'), 'utf8'), 'seeded\n');
   assert.equal(m.backend_state[0].repeats.length, 2);
+  for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
+    assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
+  }
+});
+
+// A file the sandbox user cannot read makes the real clean copy fail (tar's status, through pipefail,
+// is the helper's exit status): repeat 2 still runs and is recorded as fresh_state: false.
+test('D smoke: a clean copy that fails is reported by its exit status, never taken for complete', { skip, timeout: 300_000 }, () => {
+  const d = mkdtempSync(join(tmpdir(), 'corpus-smoke-d2-'));
+  mkdirSync(join(d, 's'));
+  writeFileSync(join(d, 's', 'srv'), `#!/usr/bin/env node\n${readFileSync(join(root, 'test', 'fixtures', 'corpus', 'fake-mcp.mjs'), 'utf8').replace(/^#!.*\n/, '')}`, { mode: 0o755 });
+  const art = join(d, 's.tgz');
+  // A tar entry with mode 000 (the host's tar could not read such a file to archive it).
+  const mk = 'import sys, tarfile, io\nwith tarfile.open(sys.argv[1], "w:gz") as t:\n'
+    + '  t.add(sys.argv[2], arcname="srv")\n  i = tarfile.TarInfo("locked"); i.size = 1; i.mode = 0\n  t.addfile(i, io.BytesIO(b"x"))\n';
+  assert.equal(spawnSync('python3', ['-I', '-c', mk, art, join(d, 's', 'srv')]).status, 0);
+  const a = { url: pathToFileURL(art).href, file: 's.tgz', sha256: createHash('sha256').update(readFileSync(art)).digest('hex') };
+  const t = { id: 'd02', lane: 'ci', ecosystem: 'binary', package: 'x', version: '1', init: false, artifact: { 'linux-x64': a, 'linux-arm64': a },
+    server: { command: ['{{bin}}/srv'] }, full: { manifest: 'mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\n', confirm: 'mwsv-d02', plan_hash: '0123456789abcdef', repeats: 2, timeout_s: 120 } };
+  writeFileSync(join(d, 'targets.json'), JSON.stringify({ format: 'isokron-corpus-targets/2', targets: [t] }));
+  const out = join(d, 'out');
+  const r = spawnSync(process.execPath, [join(root, 'corpus', 'run-shard.mjs'), '--targets', join(d, 'targets.json'), '--cli', standInCli(d), '--cli-commit', 'f'.repeat(40), '--out', out], { encoding: 'utf8' });
+  const m = JSON.parse(readFileSync(join(out, 'd02', 'meta.json'), 'utf8'));
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`, m.harness_error);
+  assert.deepEqual(m.full_runs.map((f) => [f.status, f.fresh_state]), [['completed', true], ['completed', false]]);
+  assert.match(m.full_runs[1].fresh_state_why, /no clean copy of \/work: clean copy: exit [12]/);
+  assert.match(readFileSync(join(out, 'd02', 'logs', 'fresh-state.log'), 'utf8'), /locked: Cannot open: Permission denied/);
   for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
     assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
   }
