@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Third-party corpus driver: runs mcp-writecheck against one shard of the corpus target list.
- * The same script runs in the public nightly workflow (lane `ci`) and on IsoKron's own machine for
+ * The same script runs in the public corpus workflow (dispatched in batches) (lane `ci`) and on IsoKron's own machine for
  * the long tail (lane `mac`), and writes the same record format in both places.
  *
  *   node corpus/run-shard.mjs --targets T.json --cli DIR --out DIR [--work DIR] [--lane ci|mac]

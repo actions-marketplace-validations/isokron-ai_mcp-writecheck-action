@@ -1,7 +1,7 @@
-# Corpus: nightly runs against third-party MCP servers
+# Corpus: batch runs against third-party MCP servers
 
-`.github/workflows/corpus.yml` runs `mcp-writecheck` every night against a pinned list of open-source
-MCP servers that IsoKron did not write. Its purpose is to test this action and the CLI on servers
+`.github/workflows/corpus.yml` runs `mcp-writecheck`, dispatched by hand in batches of 3 to 5, against a pinned
+list of open-source MCP servers that IsoKron did not write. Its purpose is to test this action and the CLI on servers
 built by other people: crashes, time limits, harness errors and false positives are what it is
 looking for. It is not a findings channel, and it publishes no verdicts.
 
@@ -123,7 +123,7 @@ A shard fails only when some target's `N` is not 0. A server's verdicts never fa
 - Open-source licences that permit running the software, only.
 - Standard GitHub-hosted runners and a few dozen targets at most; the long tail runs on IsoKron's own
   hardware with the same driver, the same containers and the same record format.
-- Schedule and manual dispatch only, from `main`. No `pull_request` or `pull_request_target` trigger.
+- Manual dispatch only, from `main`, in batches of 3 to 5 targets named in the `only` input (`t13,t09,t08`). There is no schedule (17 Nov 2026), so enabling the workflow starts nothing. An ID that is not in the list matches nothing: that shard runs nothing and still goes green, so check the IDs against the list before dispatching. No `pull_request` or `pull_request_target` trigger.
 - Catalog and plan modes for every target. A full run happens only for a target whose hand-written
   manifest and plan hash a person has read and accepted, and only against its in-job backend.
 

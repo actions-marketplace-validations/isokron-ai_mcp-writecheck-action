@@ -8,7 +8,7 @@ c="$RUNNER_TEMP/corpus"
 mkdir -p "$c/out/_shard"
 # The driver's own stderr (a Node warning, a crash) goes to the encrypted bundle, never to the log.
 node corpus/run-shard.mjs --targets "$c/targets.json" --consume-targets --cli "${MWSC_CLI_PATH:?}" --cli-commit "${CLI_REF:?}" \
-  --out "$c/out" --work "$c/work" --lane ci --shard "${SHARD:?}" --shards "${CORPUS_SHARDS:?}" \
+  --out "$c/out" --work "$c/work" --lane ci --shard "${SHARD:?}" --shards "${CORPUS_SHARDS:?}" ${CORPUS_ONLY:+--only "$CORPUS_ONLY"} \
   2>>"$c/out/_shard/driver-stderr.log" | tee "$c/public.txt"
 rc=${PIPESTATUS[0]}
 rm -f "$c/targets.json"
