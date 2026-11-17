@@ -30,6 +30,13 @@ const tcp = (host, port, ms = 3000) => new Promise((done) => {
     write_root: tryWrite('/corpus-x'), write_etc: tryWrite('/etc/corpus-x'), write_cli: tryWrite('/opt/mwsc/corpus-x'),
     write_tools: fs.existsSync('/opt/tools') ? tryWrite('/opt/tools/corpus-x') : 'absent',
     write_work: tryWrite('/work/corpus-x'),
+    // CORPUS_INSTALL_CA_FILE: the CA lives on the read-only CLI volume; a target must not be able to replace it.
+    ca: (() => {
+      const p = process.env.SSL_CERT_FILE || '/opt/mwsc/_corpus-ca/install-ca.pem';
+      if (!fs.existsSync(p)) return null;
+      const unlink = (() => { try { fs.unlinkSync(p); return true; } catch (e) { return e.code; } })();
+      return { path: p, write: tryWrite(p), unlink, old_home_copy: fs.existsSync('/work/home/install-ca.pem') };
+    })(),
     docker_sock: ['/var/run/docker.sock', '/run/docker.sock'].filter((p) => fs.existsSync(p)),
     host_paths_seen: hostPaths.filter((p) => fs.existsSync(p)),
     sudo: spawnSync('sh', ['-c', 'command -v sudo || true'], { encoding: 'utf8' }).stdout.trim(),

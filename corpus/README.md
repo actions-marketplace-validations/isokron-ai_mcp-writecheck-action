@@ -55,6 +55,14 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   (`sandbox/server-stderr/`, listed with sizes and sha256s in `meta.json`); nothing of it is printed.
   Init and the generic catalog manifest are wrapped; a hand-written full manifest is run as written,
   because its plan hash was accepted as written.
+- Our in-container helpers (`sandbox/*.mjs`) come from the checked-out commit of this repository.
+  `meta.json` records the sha256 of each (`sandbox_tools_sha256`); the hashes are recorded for the
+  archive, not pinned or checked against a fixed value.
+- With `CORPUS_INSTALL_CA_FILE` (a machine behind a TLS-inspecting proxy; never set on CI), the CA is
+  written once at shard set-up into the CLI volume (`/opt/mwsc/_corpus-ca/install-ca.pem`), which
+  every target container mounts read-only, and is given to install and set-up fetch only
+  (`SSL_CERT_FILE`, `NODE_EXTRA_CA_CERTS`). Target code cannot replace or remove it; its sha256 is
+  recorded as `install_ca` in `meta.json`.
 - Containers get a fixed environment: no GitHub file commands (`GITHUB_ENV`, `GITHUB_STEP_SUMMARY`
   and the rest), no `ACTIONS_*` or `RUNNER_*`, no token, and a `HOME` and caches inside the target's
   own volume.
