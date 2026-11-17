@@ -830,4 +830,3 @@ test('evidence before the repeats: config source, init draft and catalog results
   assert.deepEqual(m3.evidence.map((e) => e.step), ['config-source', 'init', 'catalog']);
   assert.deepEqual(m3.evidence[1].missing, ['init-draft.yaml']);
 });
-
