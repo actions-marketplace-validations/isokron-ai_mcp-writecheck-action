@@ -37,7 +37,11 @@ export function checkFetchUrl(raw, hosts = FETCH_HOSTS) {
 /** The first URL as listed; a GitHub one must be pinned to a commit. */
 export function checkListedUrl(raw, hosts = FETCH_HOSTS) {
   const u = checkFetchUrl(raw, hosts);
-  if (GITHUB.has(u.hostname) && !/\/[0-9a-f]{40}(\.tar\.gz|\.tgz)?$/.test(u.pathname)) throw new Error('fetch: a GitHub archive must name a 40-hex commit');
+  // why: the whole path is anchored, so a commit-looking last segment under another ref (…/archive/main/<sha>) is refused.
+  const pinned = u.hostname === 'github.com'
+    ? /^\/[^/]+\/[^/]+\/archive\/[0-9a-f]{40}\.(tar\.gz|tgz)$/.test(u.pathname)
+    : /^\/[^/]+\/[^/]+\/tar\.gz\/[0-9a-f]{40}$/.test(u.pathname);
+  if (GITHUB.has(u.hostname) && !pinned) throw new Error('fetch: a GitHub archive must name a 40-hex commit');
   return u;
 }
 
@@ -47,6 +51,8 @@ export function checkListedUrl(raw, hosts = FETCH_HOSTS) {
  */
 export async function fetchVerified({ url, sha256, out, cap, fetchImpl = fetch, hosts = FETCH_HOSTS }) {
   if (!/^[0-9a-f]{64}$/.test(sha256 ?? '')) throw new Error('fetch: sha256 must be 64 lower-case hex');
+  // why: a cap that is not a positive whole number (NaN from a bad CORPUS_FETCH_CAP) would never trip.
+  if (!(Number.isSafeInteger(cap) && cap > 0)) throw new Error('fetch: the size cap must be a positive whole number of bytes');
   let u = checkListedUrl(url, hosts);
   let res;
   for (let hop = 0; ; hop++) {

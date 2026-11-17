@@ -39,6 +39,8 @@ export function main(argv) {
   }
   let kept = 0;
   let dropped = 0;
+  // why: if the reader of our stderr goes away, a write error must not end the tee (and break the server's pipe).
+  process.stderr.on('error', () => {});
   const child = spawn(cmd, args, { stdio: ['inherit', 'inherit', 'pipe'] });
   child.stderr.on('data', (c) => {
     try { process.stderr.write(c); } catch {}
@@ -58,7 +60,10 @@ export function main(argv) {
     if (fd !== null) { try { writeSync(fd, `\n# could not start: ${e.code ?? e.message}\n`); closeSync(fd); } catch {} }
     process.exit(127);
   });
-  child.on('close', (code, signal) => {
+  let finished = false;
+  const finish = (code, signal) => {
+    if (finished) return;
+    finished = true;
     if (fd !== null) {
       try {
         writeSync(fd, `${dropped ? `\n# ${dropped} bytes of stderr dropped (cap ${cap})` : ''}\n# server exit ${code} signal ${signal}\n`);
@@ -72,7 +77,10 @@ export function main(argv) {
       return;
     }
     process.exit(code ?? 1);
-  });
+  };
+  child.on('close', finish);
+  // why: a background process the server started can hold stderr open after the server exits; wait at most 2 s for it.
+  child.on('exit', (code, signal) => setTimeout(() => finish(code, signal), 2000).unref());
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) main(process.argv.slice(2));

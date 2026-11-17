@@ -98,6 +98,7 @@ const BUF_CAP = Number(process.env.CORPUS_BUF_CAP || 16 * 1024 * 1024);
 const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 64 * 1024 * 1024);
 /** Size cap of one set-up `fetch` tarball. */
 const FETCH_CAP = Number(process.env.CORPUS_FETCH_CAP || 256 * 1024 * 1024);
+if (!(Number.isSafeInteger(FETCH_CAP) && FETCH_CAP > 0)) throw new Error('CORPUS_FETCH_CAP must be a positive whole number of bytes');
 /** Top-level names in /work that a set-up `fetch` may not unpack into (ours, or the install's). */
 const RESERVED_DEST = new Set(['out', 'home', 'dl', 'pkg', 'venv', 'bin', 'python', 'lock.txt', 'writecheck.yaml', '.fetch']);
 /** CPUs per sandbox or backend container (lowered to what the Docker server has). */
