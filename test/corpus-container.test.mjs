@@ -86,11 +86,15 @@ test('C1 smoke: a hostile target stays inside its container', { skip, timeout: 6
   };
   const targets = join(runnerTemp, 'corpus', 'targets.json');
   writeFileSync(targets, JSON.stringify({ format: 'isokron-corpus-targets/2', targets: [t] }));
+  // CORPUS_INSTALL_CA_FILE: a throwaway CA. It must reach install read-only, out of the target's reach.
+  const caFile = join(d, 'install-ca.pem');
+  const ca = spawnSync('openssl', ['req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-keyout', join(d, 'ca.key'), '-out', caFile, '-days', '1', '-subj', '/CN=corpus-smoke-ca'], { encoding: 'utf8' });
+  assert.equal(ca.status, 0, ca.stderr);
   const cli = process.env.CORPUS_SMOKE_CLI || standInCli(d);
   const out = join(runnerTemp, 'corpus', 'out');
   const r = spawnSync(process.execPath, [join(root, 'corpus', 'run-shard.mjs'), '--targets', targets, '--consume-targets', '--cli', cli, '--cli-commit', 'f'.repeat(40), '--out', out, '--lane', 'ci'], {
     encoding: 'utf8',
-    env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_STEP_SUMMARY: summary, GITHUB_ENV: join(d, 'genv'), GITHUB_ACTIONS: 'true', MWS_CLI_TOKEN: 'tok-should-not-leak', CORPUS_TARGETS_KEY: 'AGE-SECRET-KEY-1FAKE' },
+    env: { ...process.env, RUNNER_TEMP: runnerTemp, GITHUB_STEP_SUMMARY: summary, GITHUB_ENV: join(d, 'genv'), GITHUB_ACTIONS: 'true', MWS_CLI_TOKEN: 'tok-should-not-leak', CORPUS_TARGETS_KEY: 'AGE-SECRET-KEY-1FAKE', CORPUS_INSTALL_CA_FILE: caFile },
   });
   const meta = JSON.parse(readFileSync(join(out, 't01', 'meta.json'), 'utf8'));
   assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`, JSON.stringify(meta.harness_error));
@@ -124,6 +128,16 @@ test('C1 smoke: a hostile target stays inside its container', { skip, timeout: 6
     }
   }
   const install = JSON.parse(readFileSync(join(sb, 'probe-install.json'), 'utf8'));
+  // The install CA is on the read-only CLI volume: install code sees it and cannot replace or remove it; /work has no copy.
+  assert.equal(meta.install_ca, createHash('sha256').update(readFileSync(caFile)).digest('hex'));
+  for (const phase of ['install', 'run']) {
+    const p = JSON.parse(readFileSync(join(sb, `probe-${phase}.json`), 'utf8'));
+    assert.ok(p.ca, `${phase}: the CA is visible`);
+    assert.equal(p.ca.path, '/opt/mwsc/_corpus-ca/install-ca.pem', phase);
+    assert.equal(p.ca.write, 'EROFS', `${phase}: the CA is not writable`);
+    assert.equal(p.ca.unlink, 'EROFS', `${phase}: the CA cannot be removed`);
+    assert.equal(p.ca.old_home_copy, false, `${phase}: no CA in /work/home`);
+  }
   if (process.env.CORPUS_NET_GUARD === '1') {
     // corpus/net-guard.sh is in place: even the install network cannot reach the host or metadata.
     assert.equal(install.gateway.ok, false, 'install: no host service');

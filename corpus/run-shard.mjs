@@ -71,6 +71,11 @@ export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/o
 export const CLI_MAIN = `${P.cli}/dist/src/cli/main.js`;
 /** Our own in-container helpers (corpus/sandbox/), read-only beside the CLI. Never target code. */
 export const SANDBOX_TOOLS = `${P.cli}/_corpus`;
+/**
+ * CORPUS_INSTALL_CA_FILE (a machine behind a TLS-inspecting proxy; never set on CI): the CA, written once at shard set-up
+ * into the CLI volume, which every target container mounts read-only, so no target code can alter it.
+ */
+export const INSTALL_CA = `${P.cli}/_corpus-ca/install-ca.pem`;
 /** Where the server's stderr is kept (inside /work/out: copied out into the encrypted bundle only). */
 export const STDERR_DIR = `${P.out}/server-stderr`;
 /** Bytes of the server's stderr kept per server process (at most 16 processes per target). */
@@ -827,11 +832,11 @@ async function runTarget(t, o, ctx, dk) {
     // 3. Install, in sandbox containers. Only the `egress` steps have a network that leaves the host.
     for (const f of plan.files) await put(f.path, f.artifact ? dl.buf : Buffer.from(f.text), L('install'));
     const envInstall = sandboxEnv(plan.bin);
-    if (process.env.CORPUS_INSTALL_CA_FILE) {
-      // A machine behind a TLS-inspecting proxy (not GitHub's runners): its CA, for install only.
-      await put(`${P.home}/install-ca.pem`, readFileSync(process.env.CORPUS_INSTALL_CA_FILE), L('install'));
-      Object.assign(envInstall, { SSL_CERT_FILE: `${P.home}/install-ca.pem`, NODE_EXTRA_CA_CERTS: `${P.home}/install-ca.pem` });
-      meta.install_ca = sha256File(process.env.CORPUS_INSTALL_CA_FILE);
+    if (ctx.installCa) {
+      // A machine behind a TLS-inspecting proxy (not GitHub's runners): its CA, for install and fetch only. It lives on the
+      // read-only CLI volume (written at shard set-up), not in /work, so target install code cannot alter it.
+      Object.assign(envInstall, { SSL_CERT_FILE: INSTALL_CA, NODE_EXTRA_CA_CERTS: INSTALL_CA });
+      meta.install_ca = ctx.installCa;
     }
     for (const s of plan.steps) {
       const net = s.net === 'egress' ? egress.name : 'none';
@@ -1121,6 +1126,13 @@ async function prepareDocker(ctx, dk) {
   const tools = await sandboxToolsTar();
   ctx.sandboxTools = tools.sha256;
   await must(dk.helper({ mounts: [{ src: ctx.cliVol, dst: P.cli }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$1" && tar -x -f - --no-same-owner -C "$1"', 'sh', SANDBOX_TOOLS] }, { log, input: tools.buf }), 'sandbox tools');
+  ctx.installCa = null;
+  if (process.env.CORPUS_INSTALL_CA_FILE) {
+    // The CA goes on the CLI volume (read-only in every target container), readable by the sandbox user, before any target runs.
+    const ca = readFileSync(process.env.CORPUS_INSTALL_CA_FILE);
+    await must(dk.helper({ mounts: [{ src: ctx.cliVol, dst: P.cli }], stdin: true, cmd: ['sh', '-c', 'd=$(dirname "$1") && mkdir -p "$d" && cat > "$1" && chmod 0755 "$d" && chmod 0444 "$1"', 'sh', INSTALL_CA] }, { log, input: ca }), 'install CA');
+    ctx.installCa = sha256Text(ca);
+  }
   ctx.toolsVol = null;
   let toolsReady = null;
   ctx.ensureTools = () => {
