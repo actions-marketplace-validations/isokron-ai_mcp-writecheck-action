@@ -30,6 +30,12 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   Docker socket. Files go in through stdin; results come out through a helper that copies regular
   files and folders only, under a size cap. Our helper containers carry the target's label and a
   time limit, so one stuck on something the target planted is removed with it.
+- Command lines are redacted where they are logged, never where they run: in every logged `docker run`
+  or `docker exec` line, the values of volatile captures, the values of `--env NAME=VALUE` whose NAME
+  looks like a secret (TOKEN, SECRET, PASSWORD, PASSWD, PWD, KEY, CREDENTIAL, AUTH, COOKIE, SESSION, DSN,
+  DATABASE_URL, CONNECTION_STRING, `*_URL`, `*_URI`; for a URL-like name given as a plain URL, only its
+  `user:password@`) and the password of any `scheme://user:password@` URL become `<redacted:NAME>`.
+  Docker gets the real values. `meta.env_names` keeps the server env's names.
 - Output is bounded: each command's log keeps 64 MiB, captured output 16 MiB, and a `results.json`
   over 4 MiB is recorded by sha256 and size only (parsing tens of MiB of nested JSON costs about a
   gigabyte of heap). Of a `results.json` the driver keeps only
@@ -151,6 +157,7 @@ name.
 | `full_runs` | `[{ i, results_dir, cli_exit, writes, status, plan_hash, fresh_state, ... }]`, one per full repeat: `results_dir` is `sandbox/results/full-<i>`, `writes` and `run_status` come from its `results.json`, `status` classifies the CLI step like `status` does. Fresh state before each repeat after the first: `/work` is restored from a clean copy taken after install and before any set-up (kept by our helper in a volume of its own that no target container mounts; `/work/out` is left as it is), every backend is removed with its volumes, started again from its pinned image and seeded again by its `setup`, the list's own `setup` runs again, and the manifest is written again (`reset` says what was done). A seed capture whose value changes refuses that repeat, since the manifest was filled with the first value. `fresh_state` is true when all of that held, false with `fresh_state_why` otherwise (no clean copy could be made: the repeat still runs, on the state the last one left plus the reset backends and set-up). Each later repeat is planned again first and refused (`not_started`, `plan_drift_repeat`) unless its plan hash is the accepted one; no later repeat runs. Evidence: `results_sha256` is the combined hash of the listing our helper made when it moved the repeat's results and state out of `/work` (per file in `full-<i>-files.json`; null with a reason if the move failed); `results_tampered` says whether the bundle still matches it; `planted_after_move` marks a `results/full-<i>` or `state/full-<i>` that a later repeat recreated in `/work/out` (removed, the moved copy is kept). The CLI steps are `full`, `plan-2`, `full-2`, ... in `steps` |
 | `timeout_s`, `time_limits` | `timeout_s` is now the whole target's limit; `time_limits` is `{ base_s, full_s, repeats, total_s }` |
 | `canary` | As given in the list, or null |
+| `env_names` | The names of the server env (`server.env` in the list), sorted; never the values |
 | `evidence` | `[{ step, paths, moved, files, file_count, sha256, moved_paths, tampered, planted_after_move? }]`, one per step whose output was moved before the full repeats (`config-source`, `init`, `catalog`): `sha256` is the combined hash of the listing made when it was moved (per file in `evidence-<step>-files.json`), `tampered` whether the bundle still matches it, `planted_after_move` that something was found again at a moved path (or, for the catalog, any `results/catalog-*` folder) in `/work/out` at the end: removed, the moved copy is kept. `moved: false` with `sha256_why` when the move failed (the output then comes back from `/work/out` as before) |
 
 `surface.json`, `backend-N-*.txt` and `config-source/` are written only into the target's folder of

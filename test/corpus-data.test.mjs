@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -17,7 +17,7 @@ import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
   boundAnnotations, checkDropped, checkFull, checkShardBudget, checkSnapshot, CLEAN_COPY, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
-  validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures,
+  validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME,
 } from '../corpus/run-shard.mjs';
 import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
@@ -880,4 +880,61 @@ test('volatile: a token minted again on every reset refreshes the server env; 3 
   const m2 = drive(d2, { fake: { 'capture-values': 'a\nb\n' } }).meta('t23');
   assert.deepEqual(m2.full_runs.map((f) => f.status), ['completed', 'not_started']);
   assert.match(m2.full_runs[1].why, /set-up capture changed after the reset \(tok\)/);
+});
+
+// ------------------------------------------------------------------------------------------------
+// Logged command lines: secrets redacted, the real argv unchanged
+// ------------------------------------------------------------------------------------------------
+
+test('redactArgv: volatile values, secret-like env names, URL user info; the argv itself is not changed', () => {
+  const argv = ['run', '--env', 'GIT_TOKEN=tok-AAA1', '--env', 'DATABASE_URL=postgres://mwsc:pw-123@b0:5432/db', '--env', 'REDIS_URL=redis://b0:6379/0',
+    '--env', 'API_URL=https://h/x?key=k1', '--env', 'PG_DSN=host=b0 password=pw', '--env', 'POSTGRES_PASSWORD=pw', '--env', 'HOME=/work/home', '--env', 'PATH=/usr/bin',
+    '--env', 'SHORTV=ab', IMG, 'sh', '-c', 'git clone https://u:sekret@h/r && echo tok-AAA1 && curl http://h/no-userinfo'];
+  const before = [...argv];
+  const out = redactArgv(argv, new Map([['tok', new Set(['tok-AAA1'])], ['shortv', new Set(['ab'])]]));
+  assert.deepEqual(argv, before, 'the argv given to Docker is unchanged');
+  const env = (n) => out[out.findIndex((x) => x.startsWith(`${n}=`))];
+  assert.equal(env('GIT_TOKEN'), 'GIT_TOKEN=<redacted:GIT_TOKEN>');
+  assert.equal(env('DATABASE_URL'), 'DATABASE_URL=postgres://<redacted:DATABASE_URL>@b0:5432/db', 'a plain URL: only its user info');
+  assert.equal(env('REDIS_URL'), 'REDIS_URL=redis://b0:6379/0', 'no user info: nothing to hide');
+  assert.equal(env('API_URL'), 'API_URL=<redacted:API_URL>', 'a URL with a query: the whole value');
+  assert.equal(env('PG_DSN'), 'PG_DSN=<redacted:PG_DSN>');
+  assert.equal(env('POSTGRES_PASSWORD'), 'POSTGRES_PASSWORD=<redacted:POSTGRES_PASSWORD>');
+  assert.equal(env('HOME'), 'HOME=/work/home');
+  assert.equal(env('PATH'), 'PATH=/usr/bin');
+  assert.equal(env('SHORTV'), 'SHORTV=<redacted:shortv>', 'a short volatile value: where it is the whole value');
+  assert.equal(out.at(-1), 'git clone https://u:<redacted:password>@h/r && echo <redacted:tok> && curl http://h/no-userinfo');
+  assert.equal(out[out.indexOf(IMG)], IMG);
+  for (const n of ['GITHUB_TOKEN', 'aws_secret_key', 'SESSION_ID', 'X_AUTH', 'MONGO_URI', 'PGPASSWD']) assert.ok(SECRET_ENV_NAME.test(n), n);
+  for (const n of ['HOME', 'PATH', 'TMPDIR', 'NO_COLOR', 'UV_CACHE_DIR', 'TDIR']) assert.ok(!SECRET_ENV_NAME.test(n), n);
+});
+
+test('logs: a volatile token, a URL password and secret-like env values never reach a log file; Docker gets them as given', () => {
+  const d = stand([{ id: 't23', backends: [pg({ setup: [{ exec: ['seed'] }, mint()] })],
+    setup: ['git clone https://u:sekret-777@h/r {{tdir}}/src || true'],
+    server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}', DATABASE_URL: 'postgres://mwsc:pw-999888@b0:5432/db', LOG_LEVEL: 'debug' } },
+    full: fullOf({ repeats: 3 }) }]);
+  const { calls, meta } = drive(d, { fake: { 'capture-values': 'tok-AAA1\ntok-BBB2\ntok-CCC3\n' } });
+  const m = meta('t23');
+  assert.equal(m.status, 'completed', m.harness_error);
+  assert.deepEqual(m.env_names, ['DATABASE_URL', 'GIT_TOKEN', 'LOG_LEVEL']);
+  const secrets = ['tok-AAA1', 'tok-BBB2', 'tok-CCC3', 'pw-999888', 'sekret-777'];
+  // Every log the driver wrote (the target's and the shard's), and meta.json.
+  const walk = (p) => readdirSync(p, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(p, e.name)) : [join(p, e.name)]));
+  const logs = walk(join(d, 'out')).filter((f) => f.endsWith('.log') || f.endsWith('meta.json'));
+  assert.ok(logs.some((f) => f.endsWith('full-3.log')));
+  for (const f of logs) {
+    const text = readFileSync(f, 'utf8');
+    for (const v of secrets) assert.ok(!text.includes(v), `${v} in ${f}`);
+  }
+  // The logged lines say what was hidden.
+  const full2 = readFileSync(join(d, 'out', 't23', 'logs', 'full-2.log'), 'utf8');
+  assert.match(full2, /--env GIT_TOKEN=<redacted:GIT_TOKEN>/);
+  assert.match(full2, /--env DATABASE_URL=postgres:\/\/<redacted:DATABASE_URL>@b0:5432\/db/);
+  assert.match(full2, /--env LOG_LEVEL=debug/);
+  assert.match(readFileSync(join(d, 'out', 't23', 'logs', 'setup.log'), 'utf8'), /https:\/\/u:<redacted:password>@h\/r/);
+  // Docker itself got the real values: the stand-in recorded the argv it was called with.
+  const flat = calls.map((a) => a.join(' ')).join('\n');
+  for (const v of secrets) assert.ok(flat.includes(v), v);
+  assert.ok(calls.some((a) => a.includes('GIT_TOKEN=tok-BBB2') && a.includes('--plan-hash')));
 });

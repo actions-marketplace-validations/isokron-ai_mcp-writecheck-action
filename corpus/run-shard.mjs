@@ -893,17 +893,57 @@ export function readRunFields(f, cap = JSON_CAP) {
 const sha256Text = (s) => createHash('sha256').update(s).digest('hex');
 const now = () => new Date().toISOString();
 
+/** Env names whose values are not written to the logs (b). */
+export const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|PWD|KEY|CREDENTIAL|AUTH|COOKIE|SESSION|DSN|DATABASE_URL|CONNECTION_STRING|_URL$|_URI$)/i;
+const URL_ENV_NAME = /(DATABASE_URL|CONNECTION_STRING|_URL$|_URI$)/i;
+/** `scheme://user:password@`: the password part (c). */
+const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*):[^\s/@]*@/gi;
+
+/**
+ * The argv of a command as it is written to a log (never as it runs): (a) every value of a volatile
+ * capture (`secrets`: name -> values) is replaced by <redacted:NAME>; (b) in `--env NAME=VALUE` with a
+ * NAME like SECRET_ENV_NAME, the value is replaced, except that for a URL-like NAME (DATABASE_URL,
+ * *_URL, *_URI, CONNECTION_STRING) given as a plain scheme:// URL without a query only its user info is;
+ * (c) in every element, the password of a scheme://user:password@ URL is replaced. Pure; unit-tested.
+ */
+export function redactArgv(argv, secrets = null) {
+  const pairs = [];
+  for (const [name, values] of secrets ?? []) for (const v of values) pairs.push([name, v]);
+  pairs.sort((a, b) => b[1].length - a[1].length);
+  return argv.map((x, i) => {
+    let s = String(x);
+    for (const [name, v] of pairs) {
+      // A value shorter than 4 characters is replaced only where it is a whole value (below), not inside text.
+      if (v.length >= 4 && s.includes(v)) s = s.split(v).join(`<redacted:${name}>`);
+    }
+    if (argv[i - 1] === '--env') {
+      const eq = s.indexOf('=');
+      const name = eq > 0 ? s.slice(0, eq) : '';
+      const value = eq > 0 ? s.slice(eq + 1) : '';
+      const whole = pairs.find(([, v]) => v === value);
+      if (whole) return `${name}=<redacted:${whole[0]}>`;
+      if (name && SECRET_ENV_NAME.test(name)) {
+        const plainUrl = /^[a-z][a-z0-9+.-]*:\/\/[^\s?#]*$/i.test(value);
+        if (URL_ENV_NAME.test(name) && plainUrl) return `${name}=${value.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*@/i, `$1<redacted:${name}>@`)}`;
+        if (value) return `${name}=<redacted:${name}>`;
+      }
+    }
+    return s.replace(URL_USERINFO, '$1:<redacted:password>@');
+  });
+}
+
 /**
  * Run a command with all output to a log file, in its own process group, bounded by `deadline`
  * (ms since epoch). Never throws; returns { exit, signal, timed_out, spawn_error, ms, stdout }.
  * `onTimeout` runs once when the deadline passes (a container is removed there: killing the docker
  * client alone would leave the container running). `keepStdout: 'buffer'` keeps raw bytes.
  */
-function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false }) {
+function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false, secrets = null }) {
   return new Promise((done) => {
     const t0 = Date.now();
     const out = createWriteStream(log, { flags: 'a' });
-    out.write(`\n$ ${[cmd, ...argv].join(' ')}\n# at ${now()}\n`);
+    // Only the logged line is redacted (redactArgv); the command runs with `argv` as given.
+    out.write(`\n$ ${[cmd, ...redactArgv(argv, secrets)].join(' ')}\n# at ${now()}\n`);
     const chunks = [];
     let logged = 0;
     let buffered = 0;
@@ -992,6 +1032,15 @@ class Docker {
     this.env = dockerEnvFrom(process.env);
     this.log = log;
     this.n = 0;
+    /** Volatile capture values seen so far (name -> values), redacted from every logged command line. */
+    this.secrets = new Map();
+  }
+
+  /** A volatile capture's value: from now on redacted from the logged command lines. */
+  secret(name, value) {
+    if (typeof value !== 'string' || !value) return;
+    if (!this.secrets.has(name)) this.secrets.set(name, new Set());
+    this.secrets.get(name).add(value);
   }
 
   labels(extra = {}) {
@@ -999,7 +1048,7 @@ class Docker {
   }
 
   d(argv, opts = {}) {
-    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false });
+    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false, secrets: this.secrets });
   }
 
   /** Remove a container now, without waiting (at a time limit: killing the client leaves it running). */
@@ -1024,7 +1073,7 @@ class Docker {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
     const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd });
     const r = await run('docker', argv, {
-      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input, logStdout,
+      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input, logStdout, secrets: this.secrets,
       onTimeout: () => this.kill(name),
     });
     if (r.timed_out) await this.d(['rm', '-f', name], { log });
@@ -1128,7 +1177,7 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
   });
   return new Promise((done) => {
     const lg = createWriteStream(log, { flags: 'a' });
-    lg.write(`\n$ docker ${argv.join(' ')} | tar -x\n`);
+    lg.write(`\n$ docker ${redactArgv(argv, dk.secrets).join(' ')} | tar -x\n`);
     const src = spawn('docker', argv, { env: dk.env, stdio: ['ignore', 'pipe', 'pipe'] });
     const tar = spawn('tar', ['-x', '-f', '-', '--no-same-owner', '--no-same-permissions', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
     let bytes = 0;
@@ -1246,6 +1295,8 @@ async function runTarget(t, o, ctx, dk) {
     copy_out: null,
     results: [],
     canary: t.canary ?? null,
+    // The server env's names (never its values), so the record keeps which settings were set.
+    env_names: t.server?.env && typeof t.server.env === 'object' && !Array.isArray(t.server.env) ? Object.keys(t.server.env).sort() : [],
     env: {
       node_version: null, node_version_why: notYet('probed'),
       python_version: null, python_version_why: notYet('probed'),
@@ -1440,6 +1491,7 @@ async function runTarget(t, o, ctx, dk) {
         if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
         if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
         if (s.capture) v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
+        if (s.capture && s.volatile === true) dk.secret(s.capture, v[s.capture]);
       }
       bm.ready = true;
       return captured;
