@@ -158,6 +158,7 @@ name.
 | `timeout_s`, `time_limits` | `timeout_s` is now the whole target's limit; `time_limits` is `{ base_s, full_s, repeats, total_s }` |
 | `canary` | As given in the list, or null |
 | `env_names` | The names of the server env (`server.env` in the list), sorted; never the values |
+| `install_retries` | Present only if an `npm ci` install failed (not by time limit) and was tried once more: `[{ step, first_exit, first_signal, first_ms }]` |
 | `evidence` | `[{ step, paths, moved, files, file_count, sha256, moved_paths, tampered, planted_after_move? }]`, one per step whose output was moved before the full repeats (`config-source`, `init`, `catalog`): `sha256` is the combined hash of the listing made when it was moved (per file in `evidence-<step>-files.json`), `tampered` whether the bundle still matches it, `planted_after_move` that something was found again at a moved path (or, for the catalog, any `results/catalog-*` folder) in `/work/out` at the end: removed, the moved copy is kept. `moved: false` with `sha256_why` when the move failed (the output then comes back from `/work/out` as before) |
 
 `surface.json`, `backend-N-*.txt` and `config-source/` are written only into the target's folder of

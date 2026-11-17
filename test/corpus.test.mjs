@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkFetch, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
-  CLI_TEMPLATE_NAMES, dockerEnvFrom, fill, fillManifest, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
+  CLI_TEMPLATE_NAMES, dockerEnvFrom, fill, fillManifest, installPlan, keepRegular, withRetry, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
 } from '../corpus/run-shard.mjs';
 import { checkListedUrl, FETCH_HOSTS, fetchVerified } from '../corpus/sandbox/fetch.mjs';
 import { MAX_FILES } from '../corpus/sandbox/stderr-tee.mjs';
@@ -186,6 +186,7 @@ test('M4: npm targets install with npm ci from the pinned lockfile; install scri
   const ci = p.steps.find((s) => s.cmd[0] === 'npm' && s.cmd[1] === 'ci');
   assert.ok(ci.cmd.includes('--ignore-scripts'));
   assert.equal(ci.net, 'egress');
+  assert.equal(ci.retry, 1, 'npm ci is tried once more if npm itself fails');
   assert.ok(!p.steps.some((s) => s.cmd.includes('install') && s.cmd[0] === 'npm'), 'never npm install');
   assert.ok(!installPlan({ ...t, install_scripts: true }, 'linux-x64').steps[0].cmd.includes('--ignore-scripts'));
   assert.deepEqual(p.files.map((f) => f.path), ['/work/pkg/artifact.tgz', '/work/pkg/package.json', '/work/pkg/package-lock.json']);
@@ -833,4 +834,26 @@ test('B: a fetch entry outside the rules is refused at load; nothing of it is fe
   assert.equal(r.stdout, `${LABEL}\nrun finished, exit 125\n`);
   assert.match(meta('t14').harness_error, /^refused at load: set-up 0: fetch: host example\.com is not allowlisted/);
   assert.ok(!calls.some((c) => c.argv[0] === 'run' && c.argv.includes('isokron.corpus.target=t14')));
+});
+
+test('TB-4: withRetry tries a failed install once more, and never after a time limit, a spawn error or the deadline', async () => {
+  const seq = (...rs) => { const q = [...rs]; return async () => q.shift(); };
+  const s = { name: 'install', retry: 1 };
+  let meta = {};
+  assert.equal((await withRetry(seq({ exit: 1, signal: null, ms: 369000 }, { exit: 0 }), s, meta, Infinity)).exit, 0);
+  assert.deepEqual(meta.install_retries, [{ step: 'install', first_exit: 1, first_signal: null, first_ms: 369000 }]);
+  meta = {};
+  assert.equal((await withRetry(seq({ exit: 1 }, { exit: 1 }), s, meta, Infinity)).exit, 1);
+  assert.equal(meta.install_retries.length, 1, 'only one retry');
+  for (const first of [{ exit: null, timed_out: true }, { exit: null, spawn_error: 'x' }]) {
+    meta = {};
+    assert.deepEqual(await withRetry(seq(first, { exit: 0 }), s, meta, Infinity), first);
+    assert.equal(meta.install_retries, undefined);
+  }
+  meta = {};
+  assert.equal((await withRetry(seq({ exit: 1 }, { exit: 0 }), s, meta, 0, () => 1)).exit, 1, 'past the deadline: no retry');
+  meta = {};
+  assert.equal((await withRetry(seq({ exit: 1 }, { exit: 0 }), { name: 'install' }, meta, Infinity)).exit, 1, 'no retry unless asked');
+  assert.equal((await withRetry(seq({ exit: 0 }), s, meta, Infinity)).exit, 0);
+  assert.equal(meta.install_retries, undefined);
 });
