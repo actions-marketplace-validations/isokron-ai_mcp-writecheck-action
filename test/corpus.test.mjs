@@ -18,7 +18,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkFetch, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
-  dockerEnvFrom, fill, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
+  CLI_TEMPLATE_NAMES, dockerEnvFrom, fill, fillManifest, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
 } from '../corpus/run-shard.mjs';
 import { checkListedUrl, FETCH_HOSTS, fetchVerified } from '../corpus/sandbox/fetch.mjs';
 import { MAX_FILES } from '../corpus/sandbox/stderr-tee.mjs';
@@ -55,6 +55,37 @@ test('templates: unknown names are a harness error', () => {
   assert.deepEqual(fill(['{{a}}/x', { k: '{{a}}' }], { a: 'v' }), ['v/x', { k: 'v' }]);
   assert.throws(() => fill('{{nope}}', {}));
   assert.match(catalogManifest(['srv', 'a b'], ['E'], 'c'), /stdio: \["srv", "a b"\]/);
+});
+
+test('fillManifest: a hand manifest keeps the CLI\'s own templates and gets only the driver\'s names', () => {
+  const vars = { tdir: '/work', bin: '/work/bin', host: 'b0', host0: 'b0', port0: '27017', seed_check: '1', id: '{{id}}' };
+  const manifest = [
+    'server:',
+    '  stdio: ["{{bin}}/srv", "--dir", "{{tdir}}"]',
+    '  env: { URL: "mongodb://{{host0}}:{{port0}}/mwsc" }',
+    'resources:',
+    '  - name: item',
+    '    read: { tool: find, args: { filter: { _id: "{{id}}" } } }',
+    '    update: { tool: update-many, args: { filter: { _id: "{{id}}", version: "{{version}}" }, update: { $set: { "{{field}}": "{{value}}" } } } }',
+    '    other: ["{{json:object}}", "{{object.x}}", "{{?scope}}", "{{ id }}", "{{read.obj.version}}", "{{my_var}}", "{{REP}}"]',
+  ].join('\n');
+  const out = fillManifest(manifest, vars);
+  const want = manifest.replace('{{bin}}', '/work/bin').replace('{{tdir}}', '/work').replace('{{host0}}', 'b0').replace('{{port0}}', '27017');
+  assert.equal(out, want);
+  // every CLI template name passes through unchanged, even when a capture has the same name
+  for (const k of CLI_TEMPLATE_NAMES) assert.equal(fillManifest(`a: "{{${k}}}"`, { ...vars, [k]: 'CLOBBERED' }), `a: "{{${k}}}"`);
+  assert.equal(fillManifest('{{seed_check}}', vars), '1');
+  // a driver name the target does not set is still the harness's error
+  for (const k of ['host1', 'port1', 'pkgdir']) assert.throws(() => fillManifest(`x: "{{${k}}}"`, vars), /template variable .* is not set/);
+  // outside the manifest text, unknown names still throw
+  assert.throws(() => fill(['{{id}}'], { tdir: '/work' }), /template variable id is not set/);
+});
+
+test('fillManifest: the CLI template names match the CLI\'s RESERVED_VARS', { skip: !process.env.MWS_CLI_SRC && 'set MWS_CLI_SRC to the CLI checkout to compare' }, () => {
+  const src = readFileSync(join(process.env.MWS_CLI_SRC, 'packages/writecheck/src/core/manifest.ts'), 'utf8');
+  const m = /export const RESERVED_VARS = (\[[^\]]*\])/.exec(src);
+  assert.ok(m, 'RESERVED_VARS not found');
+  assert.deepEqual([...CLI_TEMPLATE_NAMES], JSON.parse(m[1].replace(/'/g, '"')));
 });
 
 // ------------------------------------------------------------------------------------------------
@@ -638,7 +669,7 @@ test('C1: init and the catalog manifest start the server through the stderr-tee;
   const list = JSON.parse(readFileSync(join(d, 'targets.json'), 'utf8'));
   const t01 = list.targets.find((t) => t.id === 't01');
   list.targets.push({ ...t01, id: 't12', init: true });
-  list.targets.push({ ...t01, id: 't13', full: { manifest: 'mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\n', confirm: 'x', plan_hash: 'ffffffffffffffff' } }); // drift: plan and catalog only
+  list.targets.push({ ...t01, id: 't13', full: { manifest: 'mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\nresources:\n  - read: { args: { id: "{{id}}", v: "{{version}}", o: "{{json:object}}", m: "{{my_var}}" } }\n', confirm: 'x', plan_hash: 'ffffffffffffffff' } }); // drift: plan and catalog only
   writeFileSync(join(d, 'targets.json'), JSON.stringify(list));
   const { r, calls, meta } = drive(d, { only: 't12,t13' });
   assert.equal(r.status, 0, r.stdout);
@@ -646,7 +677,7 @@ test('C1: init and the catalog manifest start the server through the stderr-tee;
   const init = cliRuns(calls).find((a) => a.includes('init') && a.includes('isokron.corpus.target=t12'));
   assert.deepEqual(init.slice(init.indexOf('--') + 1), ['node', '/opt/mwsc/_corpus/stderr-tee.mjs', STDERR_DIR, String(4 * 1024 * 1024), '--', '/work/bin/srv']);
   assert.match(readFileSync(join(d, 'out', 't12', 'writecheck.yaml'), 'utf8'), /stdio: \["node", "\/opt\/mwsc\/_corpus\/stderr-tee\.mjs", "\/work\/out\/server-stderr", "\d+", "--", "\/work\/bin\/srv"\]/);
-  assert.equal(readFileSync(join(d, 'out', 't13', 'writecheck.yaml'), 'utf8'), 'mws: "0.9"\nserver:\n  stdio: ["/work/bin/srv"]\n');
+  assert.equal(readFileSync(join(d, 'out', 't13', 'writecheck.yaml'), 'utf8'), 'mws: "0.9"\nserver:\n  stdio: ["/work/bin/srv"]\nresources:\n  - read: { args: { id: "{{id}}", v: "{{version}}", o: "{{json:object}}", m: "{{my_var}}" } }\n'); // the CLI's templates pass through
   // The kept stderr came back with the rest of /work/out, under sandbox/ (encrypted bundle), and is listed in meta.
   const m = meta('t12');
   assert.equal(m.server_stderr.length, 1);
