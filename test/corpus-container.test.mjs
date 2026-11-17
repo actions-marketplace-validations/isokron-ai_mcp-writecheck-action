@@ -371,6 +371,10 @@ test('D smoke: surface, versions, config source, snapshots and repeats in the re
   assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.plan_hash]), [[1, 'completed', '0123456789abcdef'], [2, 'completed', '0123456789abcdef']]);
   assert.equal(m.backends[0].resets, 1);
   assert.deepEqual(m.full_runs.map((f) => f.fresh_state), [true, true]);
+  // The config-source copy and the catalog's results were moved out of /work right after their steps.
+  assert.deepEqual(m.evidence.map((e) => [e.step, e.moved, e.tampered]), [['config-source', true, false], ['catalog', true, false]]);
+  assert.deepEqual(m.evidence[1].moved_paths, ['results/catalog-smoke']);
+  assert.ok(m.results.some((x) => x.folder === 'sandbox/results/catalog-smoke'));
   // Each finished repeat was moved into the evidence volume, hashed, and checked again at copy-out.
   for (const fr of m.full_runs) {
     assert.equal(fr.evidence?.moved, true, fr.results_sha256_why);

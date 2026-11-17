@@ -1233,6 +1233,7 @@ async function runTarget(t, o, ctx, dk) {
     config_source_why: notYet('collected'),
     backend_state: [],
     full_runs: [],
+    evidence: [],
   };
   const tag = `${ctx.runId}-${t.id}`;
   const backendName = (i) => `corpus-${tag}-b${i}`;
@@ -1268,6 +1269,53 @@ async function runTarget(t, o, ctx, dk) {
     meta.networks = { install: { internal: egress.internal }, run: { internal: internal.internal } };
     const mounts = [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }, ...(ctx.toolsVol ? [{ src: ctx.toolsVol, dst: P.tools, ro: true }] : [])];
     const put = (path, buf, log, d = deadline) => must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', path] }, { log, input: buf, deadline: d }), `write ${path.split('/').pop()}`);
+
+    /**
+     * Evidence: once the step that wrote them has exited (no target process runs), our helper moves
+     * outputs out of /work into a volume only our helpers mount, so later target code cannot touch them,
+     * and lists every file with its sha256. Used for the config-source copy, the init draft, the
+     * catalog's results and each full repeat's results and state. Returns the helper's listing, or
+     * { moved: false, why }. The listing goes to a side file; the copy-out is checked against it.
+     */
+    const moveToEvidence = async (rels, sideFile) => {
+      const elog = L('evidence');
+      try {
+        if (!evidenceVol) {
+          const ev = await dk.volume(`corpus-${tag}-evidence`, elog);
+          evidenceVol = ev;
+          await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: ev, dst: P.evidence }], cmd: ['sh', '-c', 'chmod 700 /evidence && chown 10001:10001 /evidence'] }, { log: elog, deadline: Date.now() + SMALL_STEP_MS }), 'evidence volume set-up');
+        }
+        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: evidenceVol, dst: P.evidence }, { src: ctx.cliVol, dst: P.cli, ro: true }],
+          cmd: ['node', `${SANDBOX_TOOLS}/evidence.mjs`, P.out, P.evidence, ...rels] }, { log: elog, deadline: Date.now() + CLEAN_MS, keepStdout: true, logStdout: false });
+        const l = safeJson(r.stdout.trim().split('\n').pop() ?? '');
+        if (r.timed_out || r.exit !== 0 || !l || !Array.isArray(l.files) || !/^[0-9a-f]{64}$/.test(l.sha256 ?? '') || !Array.isArray(l.moved)) throw new HarnessError(`the evidence helper failed (exit ${r.exit}${r.timed_out ? ', time limit' : ''})`);
+        writeFileSync(join(odir, sideFile), JSON.stringify({ paths: rels, sha256: l.sha256, files: l.files }) + '\n');
+        const strs = (x) => (Array.isArray(x) ? x.filter((y) => typeof y === 'string') : []);
+        return { moved: true, sha256: l.sha256, file_count: l.files.length, skipped: Number.isSafeInteger(l.skipped) ? l.skipped : null, missing: strs(l.missing), moved_paths: strs(l.moved) };
+      } catch (e) {
+        return { moved: false, why: String(e?.message ?? e).slice(0, 200) };
+      }
+    };
+    /** A step's output before the full repeats, into meta.evidence. */
+    const keepStepEvidence = async (step, rels) => {
+      const ev = await moveToEvidence(rels, `evidence-${step}-files.json`);
+      meta.evidence.push(ev.moved
+        ? { step, paths: rels, moved: true, files: `evidence-${step}-files.json`, file_count: ev.file_count, sha256: ev.sha256, skipped: ev.skipped, missing: ev.missing, moved_paths: ev.moved_paths }
+        : { step, paths: rels, moved: false, sha256: null, sha256_why: ev.why });
+    };
+    /** A full repeat's results and state, into its full_runs entry. */
+    const keepEvidence = async (i, fr) => {
+      const ev = await moveToEvidence([`results/full-${i}`, `state/full-${i}`], `full-${i}-files.json`);
+      if (ev.moved) {
+        fr.results_sha256 = ev.sha256;
+        fr.results_files = `full-${i}-files.json`;
+        fr.evidence = { moved: true, files: ev.file_count, skipped: ev.skipped, missing: ev.missing };
+      } else {
+        fr.results_sha256 = null;
+        fr.results_sha256_why = ev.why;
+        fr.evidence = { moved: false };
+      }
+    };
 
     // 3. Install, in sandbox containers. Only the `egress` steps have a network that leaves the host.
     for (const f of plan.files) await put(f.path, f.artifact ? dl.buf : Buffer.from(f.text), L('install'));
@@ -1306,6 +1354,8 @@ async function runTarget(t, o, ctx, dk) {
     delete meta.config_source_why;
     meta.config_source_entry = eb;
     Object.assign(meta, configSourceMeta(safeJson(cs.stdout.trim().split('\n').pop() ?? ''), cs));
+    // Out of reach before any set-up or server runs.
+    await keepStepEvidence('config-source', ['config-source']);
 
     // 3c. D5: with repeats, a clean copy of /work as install left it (before any set-up or server
     //     start), in a volume of its own that no target container mounts. Each later repeat starts
@@ -1463,6 +1513,7 @@ async function runTarget(t, o, ctx, dk) {
     if (t.init !== false) {
       const { step } = await cliStep('init', ['init', '--out', `${P.out}/init-draft.yaml`, ...Object.keys(senv).flatMap((k) => ['--env', k]), '--', ...serverWrap(command)]);
       step.informational = true; // init's result is data: a draft that fails is recorded, not judged
+      await keepStepEvidence('init', ['init-draft.yaml']);
     }
     const manifestText = t.full?.manifest ? fillManifest(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
     await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L('plan'));
@@ -1503,35 +1554,6 @@ async function runTarget(t, o, ctx, dk) {
       }
     };
 
-    /**
-     * D5 evidence: once a repeat's CLI container has exited (no target process runs), our helper moves
-     * its results/full-<i> and state/full-<i> out of /work into a volume only our helpers mount, so a
-     * later repeat cannot touch them, and lists every file with its sha256. The listing goes to
-     * full-<i>-files.json and its combined hash to results_sha256; the copy-out is checked against it.
-     */
-    const keepEvidence = async (i, fr) => {
-      const elog = L('evidence');
-      try {
-        if (!evidenceVol) {
-          const ev = await dk.volume(`corpus-${tag}-evidence`, elog);
-          evidenceVol = ev;
-          await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: ev, dst: P.evidence }], cmd: ['sh', '-c', 'chmod 700 /evidence && chown 10001:10001 /evidence'] }, { log: elog, deadline: Date.now() + SMALL_STEP_MS }), 'evidence volume set-up');
-        }
-        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: evidenceVol, dst: P.evidence }, { src: ctx.cliVol, dst: P.cli, ro: true }],
-          cmd: ['node', `${SANDBOX_TOOLS}/evidence.mjs`, P.out, P.evidence, `results/full-${i}`, `state/full-${i}`] }, { log: elog, deadline: Date.now() + CLEAN_MS, keepStdout: true, logStdout: false });
-        const l = safeJson(r.stdout.trim().split('\n').pop() ?? '');
-        if (r.timed_out || r.exit !== 0 || !l || !Array.isArray(l.files) || !/^[0-9a-f]{64}$/.test(l.sha256 ?? '')) throw new HarnessError(`the evidence helper failed (exit ${r.exit}${r.timed_out ? ', time limit' : ''})`);
-        writeFileSync(join(odir, `full-${i}-files.json`), JSON.stringify({ i, sha256: l.sha256, files: l.files }) + '\n');
-        fr.results_sha256 = l.sha256;
-        fr.results_files = `full-${i}-files.json`;
-        fr.evidence = { moved: true, files: l.files.length, skipped: Number.isSafeInteger(l.skipped) ? l.skipped : null, missing: Array.isArray(l.missing) ? l.missing.filter((x) => typeof x === 'string') : [] };
-      } catch (e) {
-        fr.results_sha256 = null;
-        fr.results_sha256_why = String(e?.message ?? e).slice(0, 200);
-        fr.evidence = { moved: false };
-      }
-    };
-
     // 7. plan, catalog, and full where a person accepted the plan hash. The first CLI step that does
     //    not complete decides the target's status; later steps still run when they can.
     const decisive = [];
@@ -1540,6 +1562,9 @@ async function runTarget(t, o, ctx, dk) {
     decisive.push(planStep.step);
     const cat = await cliStep('catalog', ['catalog', '-m', manifest, '--out', `${P.out}/results`]);
     decisive.push(cat.step);
+    // The catalog's results folders (results.json, report.md, catalog.json, ...), before a full repeat
+    // runs target code again. plan writes no file: its output is the step's log, written by the host.
+    await keepStepEvidence('catalog', ['results/catalog-*']);
     if (t.full && t.full.plan_hash) {
       if (meta.plan_hash !== t.full.plan_hash) {
         meta.plan_drift = { accepted: t.full.plan_hash, seen: meta.plan_hash };
@@ -1693,6 +1718,22 @@ async function runTarget(t, o, ctx, dk) {
       // A results/full-<i> or state/full-<i> that came back from /work/out for a moved repeat was made
       // after the move (by a later repeat's target code): it is removed and recorded, and the moved
       // evidence takes its place.
+      // The same for each step's moved output; a results/catalog-* folder that came back from /work/out
+      // was made after the catalog's were moved, whatever its name.
+      for (const e of meta.evidence) {
+        if (!e.moved) continue;
+        const back = [...e.moved_paths];
+        if (e.paths.includes('results/catalog-*') && existsSync(join(odir, 'sandbox', 'results'))) {
+          back.push(...readdirSync(join(odir, 'sandbox', 'results')).filter((n) => n.startsWith('catalog-')).map((n) => `results/${n}`));
+        }
+        for (const rel of back) {
+          const p = join(odir, 'sandbox', ...rel.split('/'));
+          if (safeRel(rel) && existsSync(p)) {
+            e.planted_after_move = true;
+            rmSync(p, { recursive: true, force: true });
+          }
+        }
+      }
       for (const fr of meta.full_runs) {
         if (!fr.evidence?.moved) continue;
         for (const k of ['results', 'state']) {
@@ -1710,6 +1751,16 @@ async function runTarget(t, o, ctx, dk) {
         meta.harness_error = 'copy-out of the evidence failed';
       }
       await dk.d(['volume', 'rm', '-f', evidenceVol], { log: lg });
+    }
+    for (const e of meta.evidence) {
+      if (!e.moved) {
+        e.tampered = null;
+        e.tampered_why = 'nothing was moved';
+        continue;
+      }
+      const now256 = listTree(join(odir, 'sandbox'), e.moved_paths.filter(safeRel)).sha256;
+      e.tampered = now256 !== e.sha256;
+      if (e.tampered) e.sha256_in_bundle = now256;
     }
     for (const fr of meta.full_runs) {
       if (fr.status === 'not_started') continue;

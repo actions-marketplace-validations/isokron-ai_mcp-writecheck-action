@@ -64,10 +64,14 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   in any container that runs target code. The copy and the restore run under bash with `pipefail`, and
   their success is the helper's exit status: no status file is written anywhere a target could plant a
   forged one or block it with a fifo.
-- After each full repeat (its CLI container has exited, so no target process runs), another helper
-  moves that repeat's `results/full-<i>` and `state/full-<i>` out of `/work` into a second helper-only
-  volume, so a later repeat's code cannot change them, and lists every file with its sha256. The bundle
-  is checked against that listing at copy-out (`results_tampered`).
+- Every output a step leaves in `/work/out` is moved, right after that step's container has exited (so
+  no target process runs) and before any later step runs target code, into a second helper-only volume
+  by another helper, which lists every file with its sha256: the config-source copy (before set-up),
+  the init draft (after init), the catalog's `results/catalog-*` folders with their `catalog.json`
+  (after catalog, before the first full run), and each full repeat's `results/full-<i>` and
+  `state/full-<i>`. Later target code cannot change them, and the bundle is checked against the
+  listings at copy-out (`meta.evidence[].tampered`, `full_runs[].results_tampered`). `plan` writes no
+  file (its output is the step's log, written by the host), and `surface.json` is written by the host.
 - Every volume the driver uses must be new: one that exists already (`docker volume inspect`) is
   refused, since `docker volume create` would hand it back. Our helpers are bounded like the sandboxes
   (`--memory 2g`, `--pids-limit 256`, the same CPUs) and each has a time limit.
@@ -146,6 +150,7 @@ name.
 | `full_runs` | `[{ i, results_dir, cli_exit, writes, status, plan_hash, fresh_state, ... }]`, one per full repeat: `results_dir` is `sandbox/results/full-<i>`, `writes` and `run_status` come from its `results.json`, `status` classifies the CLI step like `status` does. Fresh state before each repeat after the first: `/work` is restored from a clean copy taken after install and before any set-up (kept by our helper in a volume of its own that no target container mounts; `/work/out` is left as it is), every backend is removed with its volumes, started again from its pinned image and seeded again by its `setup`, the list's own `setup` runs again, and the manifest is written again (`reset` says what was done). A seed capture whose value changes refuses that repeat, since the manifest was filled with the first value. `fresh_state` is true when all of that held, false with `fresh_state_why` otherwise (no clean copy could be made: the repeat still runs, on the state the last one left plus the reset backends and set-up). Each later repeat is planned again first and refused (`not_started`, `plan_drift_repeat`) unless its plan hash is the accepted one; no later repeat runs. Evidence: `results_sha256` is the combined hash of the listing our helper made when it moved the repeat's results and state out of `/work` (per file in `full-<i>-files.json`; null with a reason if the move failed); `results_tampered` says whether the bundle still matches it; `planted_after_move` marks a `results/full-<i>` or `state/full-<i>` that a later repeat recreated in `/work/out` (removed, the moved copy is kept). The CLI steps are `full`, `plan-2`, `full-2`, ... in `steps` |
 | `timeout_s`, `time_limits` | `timeout_s` is now the whole target's limit; `time_limits` is `{ base_s, full_s, repeats, total_s }` |
 | `canary` | As given in the list, or null |
+| `evidence` | `[{ step, paths, moved, files, file_count, sha256, moved_paths, tampered, planted_after_move? }]`, one per step whose output was moved before the full repeats (`config-source`, `init`, `catalog`): `sha256` is the combined hash of the listing made when it was moved (per file in `evidence-<step>-files.json`), `tampered` whether the bundle still matches it, `planted_after_move` that something was found again at a moved path (or, for the catalog, any `results/catalog-*` folder) in `/work/out` at the end: removed, the moved copy is kept. `moved: false` with `sha256_why` when the move failed (the output then comes back from `/work/out` as before) |
 
 `surface.json`, `backend-N-*.txt` and `config-source/` are written only into the target's folder of
 the bundle, which is encrypted before upload like the rest.

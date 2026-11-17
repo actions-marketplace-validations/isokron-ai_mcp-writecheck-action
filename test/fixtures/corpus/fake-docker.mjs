@@ -166,6 +166,13 @@ if (script.includes('find . -mindepth 1')) {
     const st = inVol(c[c.indexOf('--state') + 1]);
     mkdirSync(st, { recursive: true });
     writeFileSync(join(st, 'ledger.jsonl'), `{"run":${n}}\n`);
+    // FAKE root `plant-catalog`: target code in a full repeat rewrites the catalog's result and adds another.
+    if (existsSync(join(root, 'plant-catalog'))) {
+      mkdirSync(inVol('/work/out/results/catalog-x'), { recursive: true });
+      writeFileSync(inVol('/work/out/results/catalog-x/results.json'), JSON.stringify({ run: { status: 'forged' } }));
+      mkdirSync(inVol('/work/out/results/catalog-zzz'), { recursive: true });
+      writeFileSync(inVol('/work/out/results/catalog-zzz/results.json'), JSON.stringify({ run: { status: 'forged' } }));
+    }
     // FAKE root `plant-after-move`: a later repeat's target code plants a forged earlier result.
     if (n > 1 && existsSync(join(root, 'plant-after-move'))) {
       mkdirSync(inVol('/work/out/results/full-1/run-1'), { recursive: true });

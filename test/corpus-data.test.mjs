@@ -19,7 +19,7 @@ import {
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
   validateTarget, VERSION_PROBE, checkId, RESERVED_ID,
 } from '../corpus/run-shard.mjs';
-import { listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
+import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -752,6 +752,17 @@ test('D5 evidence: moveEvidence moves regular files and folders only, removes th
   assert.equal(listTree(to, ['results/full-1']).sha256, res.sha256);
   writeFileSync(join(to, 'results', 'full-1', 'r', 'report.md'), '# changed');
   assert.notEqual(listTree(to, ['results/full-1']).sha256, res.sha256);
+  // results/catalog-* is every catalog folder; a single file moves too; only the listed paths are accepted.
+  mkdirSync(join(from, 'results', 'catalog-a'), { recursive: true });
+  mkdirSync(join(from, 'results', 'other'));
+  writeFileSync(join(from, 'results', 'catalog-a', 'catalog.json'), '{}');
+  writeFileSync(join(from, 'init-draft.yaml'), 'mws: "0.9"');
+  const r2 = moveEvidence(from, to, ['results/catalog-*', 'init-draft.yaml']);
+  assert.deepEqual(r2.moved, ['results/catalog-a', 'init-draft.yaml']);
+  assert.deepEqual(r2.files.map((f) => f.path), ['init-draft.yaml', 'results/catalog-a/catalog.json']);
+  assert.ok(existsSync(join(from, 'results', 'other')) && !existsSync(join(from, 'init-draft.yaml')));
+  for (const ok of ['config-source', 'init-draft.yaml', 'results/catalog-*', 'results/full-3', 'state/full-10']) assert.ok(EVIDENCE_PATH.test(ok), ok);
+  for (const bad of ['results', '../x', 'results/catalog-a', 'state/full-1/x', 'out']) assert.ok(!EVIDENCE_PATH.test(bad), bad);
 });
 
 test('D5 evidence: each finished repeat is moved out of /work, hashed, and checked again at copy-out', () => {
@@ -774,7 +785,7 @@ test('D5 evidence: each finished repeat is moved out of /work, hashed, and check
   assert.equal(JSON.parse(file('t01', 'sandbox/results/full-1/run-1/results.json')).run.writes, 11);
   // The evidence helper: ours, as 10001, no network, bounded; the evidence volume is mounted by helpers only.
   const ev = calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/_corpus/evidence.mjs'));
-  assert.equal(ev.length, 2);
+  assert.deepEqual(ev.map((a) => a.slice(a.indexOf('/evidence', a.indexOf('/opt/mwsc/_corpus/evidence.mjs') + 1) + 1)), [['config-source'], ['results/catalog-*'], ['results/full-1', 'state/full-1'], ['results/full-2', 'state/full-2']]);
   for (const a of ev) {
     assert.equal(a[a.indexOf('--user') + 1], '10001:10001');
     assert.equal(a[a.indexOf('--network') + 1], 'none');
@@ -787,4 +798,34 @@ test('D5 evidence: each finished repeat is moved out of /work, hashed, and check
   const m2 = drive(d2, { fake: { 'evidence-tamper': '1' } }).meta('t01');
   assert.equal(m2.full_runs[0].results_tampered, true);
   assert.match(m2.full_runs[0].results_sha256_in_bundle, /^[0-9a-f]{64}$/);
+});
+
+test('evidence before the repeats: config source, init draft and catalog results are moved right after their step and checked at copy-out', () => {
+  const d = stand([{ id: 't01', full: fullOf({ repeats: 2 }) }]);
+  const { calls, meta, file } = drive(d, { fake: { 'plant-catalog': '1' } });
+  const m = meta('t01');
+  assert.equal(m.status, 'completed', m.harness_error);
+  assert.deepEqual(m.evidence.map((e) => [e.step, e.moved, e.tampered]), [['config-source', true, false], ['catalog', true, false]]);
+  const cat = m.evidence.find((e) => e.step === 'catalog');
+  assert.deepEqual(cat.moved_paths, ['results/catalog-x']);
+  assert.match(cat.sha256, /^[0-9a-f]{64}$/);
+  assert.deepEqual(JSON.parse(file('t01', cat.files)).files.map((f) => f.path), ['results/catalog-x/results.json']);
+  // A full repeat's target code rewrote the catalog result and added another catalog folder in /work/out:
+  // both are detected and removed; the bundle holds the catalog's own result.
+  assert.equal(cat.planted_after_move, true);
+  assert.equal(JSON.parse(file('t01', 'sandbox/results/catalog-x/results.json')).run.status, 'complete');
+  assert.ok(!existsSync(join(d, 'out', 't01', 'sandbox', 'results', 'catalog-zzz')));
+  assert.deepEqual(m.results.filter((r) => r.folder.includes('catalog-')).map((r) => [r.folder, r.status]), [['sandbox/results/catalog-x', 'complete']]);
+  // The catalog's move ran after the catalog step and before the first full run.
+  const order = calls.filter((a) => a[0] === 'run').map((a) => (a.includes('results/catalog-*') ? 'move' : a.includes('catalog') && a.includes('/opt/mwsc/dist/src/cli/main.js') ? 'catalog' : a.includes('--plan-hash') ? 'full' : null)).filter(Boolean);
+  assert.deepEqual(order.slice(0, 3), ['catalog', 'move', 'full']);
+  // A change between the listing and the bundle shows as tampered for that step.
+  const d2 = stand([{ id: 't01' }]);
+  const m2 = drive(d2, { fake: { 'evidence-tamper': '1' } }).meta('t01');
+  assert.deepEqual(m2.evidence.map((e) => [e.step, e.tampered]), [['config-source', true], ['catalog', true]]);
+  // The init draft, when init runs, is moved right after it (init exits 4 in the stand-in: nothing to move).
+  const d3 = stand([{ id: 't01', init: true }]);
+  const m3 = drive(d3).meta('t01');
+  assert.deepEqual(m3.evidence.map((e) => e.step), ['config-source', 'init', 'catalog']);
+  assert.deepEqual(m3.evidence[1].missing, ['init-draft.yaml']);
 });
