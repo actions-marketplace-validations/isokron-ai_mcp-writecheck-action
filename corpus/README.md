@@ -123,7 +123,7 @@ A shard fails only when some target's `N` is not 0. A server's verdicts never fa
 - Open-source licences that permit running the software, only.
 - Standard GitHub-hosted runners and a few dozen targets at most; the long tail runs on IsoKron's own
   hardware with the same driver, the same containers and the same record format.
-- Manual dispatch only, from `main`, in batches of 3 to 5 targets named in the `only` input (`t13,t09,t08`). There is no schedule (17 Nov 2026), so enabling the workflow starts nothing. No `pull_request` or `pull_request_target` trigger.
+- Manual dispatch only, from `main`, in batches of 3 to 5 targets named in the `only` input (`t13,t09,t08`). There is no schedule (17 Nov 2026), so enabling the workflow starts nothing. An ID that is not in the list matches nothing: that shard runs nothing and still goes green, so check the IDs against the list before dispatching. No `pull_request` or `pull_request_target` trigger.
 - Catalog and plan modes for every target. A full run happens only for a target whose hand-written
   manifest and plan hash a person has read and accepted, and only against its in-job backend.
 

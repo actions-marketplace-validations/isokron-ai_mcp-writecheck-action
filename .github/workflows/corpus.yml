@@ -90,8 +90,12 @@ jobs:
         # why: the IDs reach a shell and the driver; only the list's own ID shape is accepted, before any secret is read.
         env:
           ONLY_IN: ${{ inputs.only }}
+        shell: bash
         run: |
-          if [ -n "$ONLY_IN" ] && ! printf '%s' "$ONLY_IN" | grep -Eqx 't[0-9]{2,3}(,t[0-9]{2,3}){0,9}'; then
+          # The whole value must match: a bash regex, not grep (grep -x matches line by line, so a value
+          # with a newline could add lines to GITHUB_ENV). Only a value that passed is written.
+          re='^t[0-9]{2,3}(,t[0-9]{2,3}){0,9}$'
+          if [ -n "$ONLY_IN" ] && ! [[ "$ONLY_IN" =~ $re ]]; then
             echo "::error::only must be comma-separated target IDs such as t13,t09 (at most 10)"
             exit 1
           fi

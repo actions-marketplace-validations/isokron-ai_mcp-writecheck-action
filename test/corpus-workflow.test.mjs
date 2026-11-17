@@ -110,9 +110,27 @@ test('M3: a second recipient (a tampered recipients file) fails the step and lea
 test('batches: the only input is checked against the ID shape before any secret, and reaches the driver', () => {
   const check = step('Check the batch');
   assert.match(check, /ONLY_IN: \$\{\{ inputs\.only \}\}/);
-  assert.match(check, /grep -Eqx 't\[0-9\]\{2,3\}\(,t\[0-9\]\{2,3\}\)\{0,9\}'/);
   assert.ok(body.indexOf('name: Check the batch') < body.indexOf('secrets.CORPUS_TARGETS_KEY'));
   assert.doesNotMatch(body, /run:[^\n]*\$\{\{ inputs\.only/);
   const shard = readFileSync(new URL('../corpus/run-ci-shard.sh', import.meta.url), 'utf8');
   assert.match(shard, /\$\{CORPUS_ONLY:\+--only "\$CORPUS_ONLY"\}/);
+});
+
+test('batches: the check runs: good IDs pass, and a newline, a separator or too many IDs never reach GITHUB_ENV', () => {
+  const raw = wf.slice(wf.indexOf('name: Check the batch'));
+  const script = raw.slice(raw.indexOf('run: |\n') + 'run: |\n'.length, raw.indexOf('\n      - ')).split('\n').map((l) => l.replace(/^          /, '')).join('\n');
+  const dir = mkdtempSync(join(tmpdir(), 'only-'));
+  const run = (value) => {
+    const env = join(dir, 'env');
+    writeFileSync(env, '');
+    const r = spawnSync('bash', ['-c', script], { env: { PATH: process.env.PATH, ONLY_IN: value, GITHUB_ENV: env }, encoding: 'utf8' });
+    return { code: r.status, env: readFileSync(env, 'utf8') };
+  };
+  assert.deepEqual(run('t13,t09,t08'), { code: 0, env: 'CORPUS_ONLY=t13,t09,t08\n' });
+  assert.deepEqual(run(''), { code: 0, env: 'CORPUS_ONLY=\n' });
+  for (const bad of ['t13\nNODE_OPTIONS=--require=/x', 't13\r\nX=1', 't13;id', 't1', 't13,t09,t08,t01,t02,t03,t04,t05,t06,t07,t10', ' t13']) {
+    const r = run(bad);
+    assert.equal(r.code, 1, JSON.stringify(bad));
+    assert.equal(r.env, '', JSON.stringify(bad));
+  }
 });
