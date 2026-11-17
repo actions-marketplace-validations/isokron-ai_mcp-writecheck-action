@@ -90,6 +90,17 @@ jobs:
         run: |
           echo "::error::set the repository variable MWS_CLI_PUBLIC to true (corpus/README.md)"
           exit 1
+      - name: Require the CLI commit to be on mcp-write-safety main
+        # why: a dispatch may name any 40-character SHA, and GitHub serves fork-PR commits by SHA. The CLI is
+        # built on the host before the target list is decrypted, so only commits already on main are built.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(gh api "repos/isokron-ai/mcp-write-safety/compare/${CLI_REF}...main" --jq .status || true)
+          if [ "$status" != "ahead" ] && [ "$status" != "identical" ]; then
+            echo "::error::cli-ref ${CLI_REF} is not on mcp-write-safety main (compare: ${status:-error})"
+            exit 1
+          fi
       - name: Check out mcp-writecheck (public)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
