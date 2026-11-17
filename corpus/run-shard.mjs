@@ -6,7 +6,7 @@
  *
  *   node corpus/run-shard.mjs --targets T.json --cli DIR --out DIR [--work DIR] [--lane ci|mac]
  *                             [--shard N --shards M] [--only ID,ID] [--cli-commit SHA]
- *                             [--consume-targets] [--images corpus/images.json]
+ *                             [--consume-targets] [--images corpus/images.json] [--spec FILE]
  *
  * Isolation (every target is untrusted). No target code runs on the host. Each target's install,
  * set-up, CLI and server run in containers of a digest-pinned image (corpus/images.json), started
@@ -49,15 +49,17 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, createWriteStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { sha256Jcs } from './jcs.mjs';
+import { listTree } from './sandbox/evidence.mjs';
 import { checkListedUrl } from './sandbox/fetch.mjs';
 
 export const LABEL = 'automated candidate, unreviewed: not a finding';
-export const RUN_FORMAT = 'isokron-corpus-run/2';
+export const RUN_FORMAT = 'isokron-corpus-run/3';
 export const TARGETS_FORMAT = 'isokron-corpus-targets/2';
 export const SANDBOX_USER = '10001:10001';
 const CLI_DOCUMENTED = new Set([0, 1, 2, 3, 4, 130]);
@@ -67,7 +69,7 @@ const say = (line) => process.stdout.write(`${line}\n`);
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** In-container paths. /work is the target's own volume; /opt/mwsc and /opt/tools are read-only. */
-export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home' };
+export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home', clean: '/clean', evidence: '/evidence' };
 export const CLI_MAIN = `${P.cli}/dist/src/cli/main.js`;
 /** Our own in-container helpers (corpus/sandbox/), read-only beside the CLI. Never target code. */
 export const SANDBOX_TOOLS = `${P.cli}/_corpus`;
@@ -100,7 +102,9 @@ const COPY_OUT_MS = 600_000;
 const LOG_CAP = Number(process.env.CORPUS_LOG_CAP || 64 * 1024 * 1024);
 const BUF_CAP = Number(process.env.CORPUS_BUF_CAP || 16 * 1024 * 1024);
 /** results.json larger than this is recorded by size only, never read into memory. */
-const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 64 * 1024 * 1024);
+const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 4 * 1024 * 1024);
+/** results.json folders recorded per target at most (the folder names are target-writable). */
+const RESULTS_MAX = 200;
 /** Size cap of one set-up `fetch` tarball. */
 const FETCH_CAP = Number(process.env.CORPUS_FETCH_CAP || 256 * 1024 * 1024);
 if (!(Number.isSafeInteger(FETCH_CAP) && FETCH_CAP > 0)) throw new Error('CORPUS_FETCH_CAP must be a positive whole number of bytes');
@@ -112,6 +116,29 @@ export const CPUS = 2;
 export const DOCKER_MIN = [26, 0, 0];
 /** The only registry a hash-locked npm dependency may come from. */
 export const NPM_REGISTRY = 'https://registry.npmjs.org/';
+/** The protocol revision the surface probe offers in `initialize` (the CLI's own PROTOCOL_VERSION at main 30fdddb). */
+export const SURFACE_PROTOCOL = '2025-11-25';
+/** Time limit of the surface probe (initialize and every tools/list page). */
+const SURFACE_MS = Number(process.env.CORPUS_SURFACE_MS || 60_000);
+/** Time limit of the small informational steps: the version probe, the config-source copy, one snapshot. */
+const SMALL_STEP_MS = 120_000;
+/** `full.repeats` and `full.timeout_s` bounds: three repeats of two hours fit one CI job (see SHARD_BUDGET_S). */
+export const MAX_REPEATS = 5;
+export const MAX_FULL_TIMEOUT_S = 7_200;
+/** A target's own `timeout_s` (install to catalog) at most. */
+export const MAX_TIMEOUT_S = 7_200;
+/**
+ * Lane ci: the planned time of one shard (the sum of its targets' limits, timeLimits().total_s) may not
+ * pass this. The corpus job stops at 360 minutes (`timeout-minutes`, GitHub's hosted maximum); 30 are
+ * left for checkout, build, set-up, copy-out, encryption and upload. CORPUS_SHARD_BUDGET_S overrides.
+ */
+export const SHARD_BUDGET_S = Number(process.env.CORPUS_SHARD_BUDGET_S || 330 * 60);
+/**
+ * The only ids that may be reused although they are in dropped[] (`reused_by_grandfathered: true`):
+ * t08 was given to another package on 16 Nov 2026, the day before the never-reuse rule. No other id
+ * may ever carry the flag; a dropped[] entry that does refuses the whole list.
+ */
+export const GRANDFATHERED_IDS = Object.freeze(['t08']);
 
 /** The public exit of one target (see the header). Pure; unit-tested. */
 export function publicExit(t) {
@@ -216,9 +243,17 @@ export function checkPinned(ref, what) {
   return ref;
 }
 
+/**
+ * Ids that would name one of the driver's own Docker objects: the shard's volumes and containers
+ * (corpus-<run>-cli, -tools, -uvsrc) or another target's (corpus-<run>-<id>-clean, -evidence, -egress,
+ * -run, -b<N>, -h<N>, -<N>). A list with one is refused at load.
+ */
+export const RESERVED_ID = /^(cli|tools|uvsrc|shard)$|-(clean|evidence|egress|run|b\d+|h\d+|\d+)$/;
+
 /** A target id is used in container, volume and network names. */
 export function checkId(id) {
   if (typeof id !== 'string' || !/^[a-z0-9][a-z0-9-]{0,31}$/.test(id)) throw new HarnessError('target id must match [a-z0-9][a-z0-9-]{0,31}');
+  if (RESERVED_ID.test(id)) throw new HarnessError(`target id ${id} is reserved (it would name one of the driver's own volumes, networks or containers)`);
   return id;
 }
 
@@ -276,7 +311,12 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
     '--network', network,
     '--workdir', workdir,
   ];
-  for (const m of mounts) a.push('--mount', volumeMount(m));
+  for (const m of mounts) {
+    // The clean copy of /work and the finished repeats' evidence are for our helpers only.
+    if (m.dst === P.clean) throw new HarnessError('a target container never mounts the clean copy');
+    if (m.dst === P.evidence) throw new HarnessError('a target container never mounts the evidence volume');
+    a.push('--mount', volumeMount(m));
+  }
   for (const [k, v] of Object.entries(env)) a.push('--env', `${k}=${v}`);
   if (stdin) a.push('--interactive');
   a.push(image, ...cmd);
@@ -286,7 +326,7 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
 /** Only named Docker volumes, by a name this script made; never a host path. */
 export function volumeMount({ src, dst, ro = false }) {
   if (!/^corpus-[a-z0-9-]+$/.test(src)) throw new HarnessError('only corpus volumes are mounted');
-  if (!/^\/(work|opt\/mwsc|opt\/tools)$/.test(dst)) throw new HarnessError(`unexpected mount point ${dst}`);
+  if (!/^\/(work|opt\/mwsc|opt\/tools|clean|evidence)$/.test(dst)) throw new HarnessError(`unexpected mount point ${dst}`);
   return `type=volume,src=${src},dst=${dst}${ro ? ',readonly' : ''}`;
 }
 
@@ -310,15 +350,280 @@ export function backendCaps(b, what = 'backend') {
  * Checks of one target entry that need no network and start nothing, run for every entry when the
  * list is loaded: a target that fails them is refused before anything of it is fetched or started.
  */
-export function validateTarget(t) {
+export function validateTarget(t, dropped = []) {
   checkId(t?.id);
+  checkReuse(t.id, dropped);
   if (t.backends !== undefined && !Array.isArray(t.backends)) throw new HarnessError('backends must be a list');
-  for (const [i, b] of (t.backends ?? []).entries()) backendCaps(b, `backend ${i}`);
+  for (const [i, b] of (t.backends ?? []).entries()) {
+    backendCaps(b, `backend ${i}`);
+    if (b?.snapshot !== undefined) checkSnapshot(b.snapshot, `backend ${i}`);
+  }
   if (t.setup !== undefined && !Array.isArray(t.setup)) throw new HarnessError('setup must be a list');
   for (const [k, s] of (t.setup ?? []).entries()) {
     if (typeof s === 'string') continue;
     checkFetch(s, `set-up ${k}`);
   }
+  if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
+  if (t.timeout_s !== undefined && !(Number.isInteger(t.timeout_s) && t.timeout_s >= 1 && t.timeout_s <= MAX_TIMEOUT_S)) throw new HarnessError(`timeout_s must be a whole number of seconds from 1 to ${MAX_TIMEOUT_S}`);
+  if (t.full !== undefined) checkFull(t.full);
+}
+
+/**
+ * `backends[].snapshot`: `{ exec: [argv...], user? }`, run with `docker exec` in the backend (like a
+ * set-up step) before the first CLI step that writes and after the last; it prints the fixture's
+ * state as text. Templates are filled like set-up's.
+ */
+export function checkSnapshot(s, what = 'backend') {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) throw new HarnessError(`${what}: snapshot is { exec: [...], user? }`);
+  for (const k of Object.keys(s)) if (k !== 'exec' && k !== 'user') throw new HarnessError(`${what}: snapshot has an unknown field`);
+  if (!Array.isArray(s.exec) || !s.exec.length || s.exec.some((x) => typeof x !== 'string')) throw new HarnessError(`${what}: snapshot.exec must be a non-empty list of strings`);
+  if (s.user !== undefined && (typeof s.user !== 'string' || !/^[A-Za-z0-9_.-]{1,32}(:[A-Za-z0-9_.-]{1,32})?$/.test(s.user))) throw new HarnessError(`${what}: snapshot.user`);
+  return s;
+}
+
+/** `full.repeats` (1 to MAX_REPEATS, default 1) and `full.timeout_s` (seconds per repeat, 1 to MAX_FULL_TIMEOUT_S). */
+export function checkFull(f) {
+  if (!f || typeof f !== 'object' || Array.isArray(f)) throw new HarnessError('full must be an object');
+  if (f.repeats !== undefined && !(Number.isInteger(f.repeats) && f.repeats >= 1 && f.repeats <= MAX_REPEATS)) throw new HarnessError(`full.repeats must be a whole number from 1 to ${MAX_REPEATS}`);
+  if (f.timeout_s !== undefined && !(Number.isInteger(f.timeout_s) && f.timeout_s >= 1 && f.timeout_s <= MAX_FULL_TIMEOUT_S)) throw new HarnessError(`full.timeout_s must be a whole number of seconds from 1 to ${MAX_FULL_TIMEOUT_S}`);
+  return f;
+}
+
+/**
+ * The time limits of one target. `timeout_s` (or the list default, or 600) covers install, backends,
+ * set-up and the init, plan and catalog steps. With `full.timeout_s`, each full repeat (its reset,
+ * re-plan, snapshots and run) gets that many seconds of its own, so the whole target may take
+ * timeout_s + repeats x full.timeout_s; without it, the repeats share what is left of timeout_s.
+ */
+export function timeLimits(t, defaults = {}) {
+  const base = t.timeout_s ?? defaults.timeout_s ?? 600;
+  const repeats = t.full?.plan_hash ? (t.full.repeats ?? 1) : 0;
+  const full = t.full?.timeout_s ?? null;
+  return { base_s: base, full_s: full, repeats, total_s: base + (full ? repeats * full : 0) };
+}
+
+/**
+ * The list's `dropped[]`: each entry `{ id, dropped_at, reused_by_grandfathered?, ... }`. Checked when
+ * the list is loaded; an entry outside this shape refuses the whole list (the never-reuse rule cannot
+ * be applied without it). `reused_by_grandfathered: true` is accepted only for an id in
+ * GRANDFATHERED_IDS (t08).
+ */
+export function checkDropped(dropped) {
+  if (dropped === undefined) return [];
+  if (!Array.isArray(dropped)) throw new HarnessError('dropped must be a list');
+  for (const [i, d] of dropped.entries()) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) throw new HarnessError(`dropped ${i}: not an object`);
+    try { checkId(d.id); } catch { throw new HarnessError(`dropped ${i}: id must match [a-z0-9][a-z0-9-]{0,31}`); }
+    if (typeof d.dropped_at !== 'string' || !/^\d{4}-\d{2}-\d{2}(T[0-9:.]+(Z|[+-]\d{2}:\d{2}))?$/.test(d.dropped_at)) throw new HarnessError(`dropped ${i} (${d.id}): dropped_at must be a date (YYYY-MM-DD or an ISO time)`);
+    if (d.reused_by_grandfathered !== undefined && typeof d.reused_by_grandfathered !== 'boolean') throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered must be true or false`);
+    if (d.reused_by_grandfathered === true && !GRANDFATHERED_IDS.includes(d.id)) throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered is only for ${GRANDFATHERED_IDS.join(', ')}`);
+  }
+  return dropped;
+}
+
+/**
+ * Lane ci: the shard's planned time (the targets' timeLimits().total_s, in list order) against
+ * SHARD_BUDGET_S. Throws a harness error naming the first target that passes it, so a list cannot plan
+ * more than one job allows. Targets already refused at load (`invalid`) cost nothing.
+ */
+export function checkShardBudget(targets, defaults = {}, invalid = new Map(), budget = SHARD_BUDGET_S) {
+  let sum = 0;
+  for (const t of targets) {
+    if (invalid.has(t.id)) continue;
+    const s = timeLimits(t, defaults).total_s;
+    if (!Number.isFinite(s) || s < 0) throw new HarnessError(`shard time budget: ${t.id} has no usable time limit`);
+    sum += s;
+    if (sum > budget) throw new HarnessError(`shard time budget: with ${t.id} this shard plans ${sum} s, over the ${budget} s one job allows (timeout_s + repeats x full.timeout_s)`);
+  }
+  return sum;
+}
+
+/** Never reuse an id: a target whose id was dropped is refused, unless every such entry is grandfathered. */
+export function checkReuse(id, dropped = []) {
+  const hits = dropped.filter((d) => d?.id === id);
+  if (hits.some((d) => d.reused_by_grandfathered !== true)) throw new HarnessError(`id ${id} was dropped and is never reused`);
+}
+
+/**
+ * List-level checks at load: the format, the targets list, dropped[], and every id's shape (a bad id
+ * or dropped[] refuses the whole list). Each entry is then checked on its own: one that fails is
+ * returned in `invalid` and refused, and the others run.
+ */
+export function validateList(list) {
+  if (list?.format !== TARGETS_FORMAT) throw new HarnessError('the target list has another format');
+  if (!Array.isArray(list.targets)) throw new HarnessError('the target list has no targets');
+  const dropped = checkDropped(list.dropped);
+  const invalid = new Map();
+  for (const t of list.targets) {
+    checkId(t?.id); // an id names folders and containers: a bad one refuses the whole list
+    try { validateTarget(t, dropped); } catch (e) { invalid.set(t.id, `refused at load: ${e.message}`); }
+  }
+  return { invalid, dropped };
+}
+
+/** `name[:tag]@sha256:<hex>` into its tag part and digest; the digest is null for an unpinned reference. */
+export function imageParts(ref) {
+  const m = /^(.*)@(sha256:[0-9a-f]{64})$/.exec(String(ref ?? ''));
+  return m ? { image_tag: m[1], image_digest: m[2] } : { image_tag: ref ?? null, image_digest: null };
+}
+
+/**
+ * D5 fresh state, run by our helper with bash as the sandbox user, no network. CLEAN_COPY: /work
+ * (read-only) into /clean, without /work/out, after install and before any set-up. RESTORE_WORK:
+ * everything in /work but out/ removed, then /clean copied back. tar keeps symlinks and special files as
+ * entries (never follows or opens them). Success is the helper's exit status (pipefail: either tar
+ * failing fails it); no status file is written anywhere a target could plant or block one.
+ */
+export const CLEAN_COPY = 'set -o pipefail; tar -C /work --sparse --exclude=./out -cf - . | tar -C /clean -xpf -';
+export const RESTORE_WORK = 'set -o pipefail; chmod -R u+rwX /work 2>/dev/null; '
+  + 'for e in /work/* /work/.[!.]* /work/..?*; do { [ -e "$e" ] || [ -L "$e" ]; } || continue; [ "$e" = /work/out ] && continue; rm -rf "$e" || exit 1; done; '
+  + 'tar -C /clean --sparse -cf - . | tar -C /work -xpf -';
+/** Time limit of one clean copy, restore or evidence move. */
+const CLEAN_MS = 600_000;
+
+/** The version probe: what `node` and `python3` the server under test would get (the same PATH). */
+export const VERSION_PROBE = 'v=$(node -v 2>/dev/null) && echo "node $v" || echo "node -"; '
+  + 'if command -v python3 >/dev/null 2>&1; then v=$(python3 -V 2>&1) && echo "python $v" || echo "python -"; else echo "python none"; fi';
+
+/** A version string as recorded: 64 characters at most. */
+export const VERSION_STRING = /^v?\d[\w.+-]{0,62}$/;
+
+/** The versions the version probe printed inside the target container (null with a reason otherwise). */
+export function envVersions(r) {
+  const out = {};
+  const text = typeof r?.stdout === 'string' ? r.stdout : '';
+  const failed = !r || r.timed_out || r.spawn_error || r.exit !== 0;
+  const ran = `the version probe did not run (exit ${r?.exit ?? null}${r?.timed_out ? ', time limit' : ''})`;
+  // The probe's container may run target code (a python3 the target ships), so its output is untrusted:
+  // a version is kept only when it looks like one, 64 characters at most.
+  const node = /^node (\S{1,64})\s*$/m.exec(text);
+  out.node_version = node && VERSION_STRING.test(node[1]) ? node[1] : null;
+  if (!out.node_version) out.node_version_why = failed ? ran : /^node -$/m.test(text) ? 'node -v failed in the target container' : 'node -v printed nothing recognisable as a version';
+  const py = /^python Python (\S{1,64})\s*$/m.exec(text);
+  out.python_version = py && VERSION_STRING.test(py[1]) ? py[1] : null;
+  if (!out.python_version) out.python_version_why = failed ? ran : /^python none$/m.test(text) ? "python3 is not on the target container's PATH" : /^python -$/m.test(text) ? 'python3 -V failed in the target container' : 'python3 -V printed nothing recognisable as a version';
+  return out;
+}
+
+const jcsOrWhy = (v) => {
+  try { return { hash: sha256Jcs(v) }; } catch (e) { return { hash: null, why: e.message }; }
+};
+
+/**
+ * surface.json from the probe's (untrusted) output: initialize and tools kept only as JSON objects,
+ * the other fields type-checked and bounded. The time of capture is the probe's only when it is an
+ * ISO time. Pure; unit-tested.
+ */
+export function surfaceDoc(p) {
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : null);
+  const transport = isObj(p.transport) ? Object.fromEntries(['stdout_bytes', 'non_json_lines', 'notifications', 'server_requests', 'exit', 'signal', 'over_cap']
+    .filter((k) => Object.hasOwn(p.transport, k)).map((k) => { const v = p.transport[k]; return [k, Number.isSafeInteger(v) || typeof v === 'boolean' ? v : typeof v === 'string' ? v.slice(0, 16) : null]; })) : null;
+  return {
+    initialize: isObj(p.initialize) ? p.initialize : null,
+    tools: isObj(p.tools) && Array.isArray(p.tools.tools) ? p.tools : null,
+    captured_at: typeof p.captured_at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(p.captured_at) ? p.captured_at : new Date().toISOString(),
+    protocol_offered: SURFACE_PROTOCOL,
+    initialize_error: str(p.initialize_error, 500),
+    tools_error: str(p.tools_error, 500),
+    pages: Number.isSafeInteger(p.pages) && p.pages >= 0 && p.pages <= SURFACE_BOUNDS.pages ? p.pages : null,
+    transport,
+  };
+}
+
+/** Annotation keys kept in meta.surface.tools[] (the MCP ToolAnnotations), with their value types. */
+export const ANNOTATION_KEYS = Object.freeze({ title: 'string', readOnlyHint: 'boolean', destructiveHint: 'boolean', idempotentHint: 'boolean', openWorldHint: 'boolean' });
+/** Bounds of what meta.surface keeps from the (untrusted) probe output. */
+export const SURFACE_BOUNDS = Object.freeze({ tools: 1000, text: 256, keys: 64, pages: 100 });
+
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+/** A string from the probe kept as is only when short: else null with a reason (never cut). */
+const shortStr = (v, max = SURFACE_BOUNDS.text) => (typeof v !== 'string' ? { v: null, why: v === undefined ? 'absent' : 'not a string' } : v.length > max ? { v: null, why: `over ${max} characters` } : { v });
+
+/** `annotations` reduced to the known keys with values of their type; what was left out is counted. */
+export function boundAnnotations(a) {
+  if (a === undefined || a === null) return { annotations: null, annotations_why: 'absent' };
+  if (!isObj(a)) return { annotations: null, annotations_why: 'not an object' };
+  const out = {};
+  let dropped = 0;
+  for (const k of Object.keys(a)) {
+    const type = Object.hasOwn(ANNOTATION_KEYS, k) ? ANNOTATION_KEYS[k] : null;
+    const v = a[k];
+    if (type && typeof v === type && (type !== 'string' || v.length <= SURFACE_BOUNDS.text)) out[k] = v;
+    else dropped++;
+  }
+  return { annotations: out, ...(dropped ? { annotations_dropped: dropped } : {}) };
+}
+
+/**
+ * `meta.surface` from the probe's output (`s`: { initialize, tools, pages, ... }). Pure; unit-tested.
+ * The probe's stdout is untrusted (the server under test shares its container and user, and can
+ * write to it through /proc), so every field is type-checked and bounded here; sha256_jcs is over
+ * { initialize, tools } (RFC 8785), and only when both answered.
+ */
+export function surfaceMeta(s, file = 'surface.json') {
+  if (!isObj(s) || !isObj(s.initialize)) {
+    const e = isObj(s) && typeof s.initialize_error === 'string' ? s.initialize_error.slice(0, 300) : null;
+    return { surface: null, surface_why: e ? `initialize: ${e}` : 'the surface probe gave no initialize result' };
+  }
+  const init = s.initialize;
+  const toolsRes = isObj(s.tools) && Array.isArray(s.tools.tools) ? s.tools : null;
+  const m = { file };
+  if (toolsRes) {
+    const h = jcsOrWhy({ initialize: init, tools: toolsRes });
+    m.sha256_jcs = h.hash;
+    if (!h.hash) m.sha256_jcs_why = h.why;
+  } else {
+    m.sha256_jcs = null;
+    m.sha256_jcs_why = `tools/list did not answer: ${typeof s.tools_error === 'string' ? s.tools_error.slice(0, 300) : 'no result'}`;
+  }
+  const pv = shortStr(init.protocolVersion, 64);
+  m.protocol_version = pv.v;
+  if (pv.v === null) m.protocol_version_why = `initialize protocolVersion: ${pv.why}`;
+  if (isObj(init.serverInfo)) {
+    const n = shortStr(init.serverInfo.name);
+    const v = shortStr(init.serverInfo.version, 64);
+    m.server_info = { name: n.v, version: v.v, ...(n.v === null ? { name_why: n.why } : {}), ...(v.v === null ? { version_why: v.why } : {}) };
+  } else {
+    m.server_info = null;
+    m.server_info_why = 'initialize gave no serverInfo';
+  }
+  if (isObj(init.capabilities)) {
+    const keys = Object.keys(init.capabilities);
+    m.capabilities_keys = keys.length <= SURFACE_BOUNDS.keys && keys.every((k) => k.length <= 64) ? keys.sort() : null;
+    if (!m.capabilities_keys) m.capabilities_keys_why = `over ${SURFACE_BOUNDS.keys} keys or a key over 64 characters`;
+  } else {
+    m.capabilities_keys = null;
+    m.capabilities_keys_why = 'initialize gave no capabilities object';
+  }
+  m.instructions_sha256 = typeof init.instructions === 'string' ? sha256Text(init.instructions) : null;
+  if (m.instructions_sha256 === null) m.instructions_sha256_why = init.instructions === undefined ? 'the server gave no instructions' : 'instructions is not a string';
+  const tools = toolsRes ? toolsRes.tools : null;
+  m.tool_count = tools ? tools.length : null;
+  if (!tools) m.tool_count_why = 'tools/list did not answer';
+  m.tools = tools ? tools.slice(0, SURFACE_BOUNDS.tools).map((t) => {
+    const o = isObj(t) ? t : {};
+    const schema = (v) => (v === undefined || v === null ? { hash: null, why: 'absent' } : jcsOrWhy(v));
+    const n = shortStr(o.name);
+    const inS = schema(o.inputSchema);
+    const outS = schema(o.outputSchema);
+    return {
+      name: n.v,
+      ...(n.v === null ? { name_why: n.why } : {}),
+      description_sha256: typeof o.description === 'string' ? sha256Text(o.description) : null,
+      ...(typeof o.description === 'string' ? {} : { description_sha256_why: o.description === undefined ? 'absent' : 'not a string' }),
+      input_schema_sha256_jcs: inS.hash,
+      ...(inS.hash ? {} : { input_schema_sha256_jcs_why: inS.why }),
+      output_schema_sha256_jcs: outS.hash,
+      ...(outS.hash ? {} : { output_schema_sha256_jcs_why: outS.why }),
+      ...boundAnnotations(o.annotations),
+    };
+  }) : null;
+  if (tools && tools.length > SURFACE_BOUNDS.tools) m.tools_omitted = tools.length - SURFACE_BOUNDS.tools;
+  if (s.pages !== undefined) {
+    m.tools_pages = Number.isSafeInteger(s.pages) && s.pages >= 0 && s.pages <= SURFACE_BOUNDS.pages ? s.pages : null;
+    if (m.tools_pages === null) m.tools_pages_why = `not a whole number from 0 to ${SURFACE_BOUNDS.pages}`;
+  }
+  return { surface: m };
 }
 
 /**
@@ -522,6 +827,7 @@ function args(argv) {
     else if (a === '--cli-commit') o.cliCommit = v();
     else if (a === '--consume-targets') o.consumeTargets = true;
     else if (a === '--images') o.images = v();
+    else if (a === '--spec') o.spec = v();
     else throw new HarnessError(`unknown option ${a}`);
   }
   for (const k of ['targets', 'cli', 'out']) if (!o[k]) throw new HarnessError(`--${k} is required`);
@@ -529,7 +835,32 @@ function args(argv) {
   return o;
 }
 
-const sha256File = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
+/** sha256 of a file, read in 1 MiB chunks (a target-written file can be as large as the copy-out cap). */
+function sha256File(f) {
+  const h = createHash('sha256');
+  const fd = openSync(f, 'r');
+  try {
+    const buf = Buffer.alloc(1024 * 1024);
+    for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return h.digest('hex');
+}
+
+/**
+ * The two fields the driver keeps from a (target-writable) results.json: `run.status` (a string of 64
+ * characters at most) and `run.writes` (a finite number), each null with a reason otherwise. A file
+ * over `cap` bytes is not read. The parsed document is dropped at once; nothing else of it is kept.
+ */
+export function readRunFields(f, cap = JSON_CAP) {
+  if (lstatSync(f).size > cap) return { too_large: true, status: null, writes: null, why: `over ${cap} bytes: not read` };
+  const run = (() => { const d = safeJson(readFileSync(f, 'utf8')); return d && typeof d === 'object' && d.run && typeof d.run === 'object' ? d.run : null; })();
+  if (!run) return { too_large: false, status: null, writes: null, why: 'no run object (not JSON, or no run)' };
+  const status = typeof run.status === 'string' && run.status.length <= 64 ? run.status : null;
+  const writes = typeof run.writes === 'number' && Number.isFinite(run.writes) ? run.writes : null;
+  return { too_large: false, status, writes, ...(status === null ? { status_why: 'run.status is not a string of 64 characters at most' } : {}), ...(writes === null ? { writes_why: 'results.json has no finite run.writes' } : {}) };
+}
 const sha256Text = (s) => createHash('sha256').update(s).digest('hex');
 const now = () => new Date().toISOString();
 
@@ -539,7 +870,7 @@ const now = () => new Date().toISOString();
  * `onTimeout` runs once when the deadline passes (a container is removed there: killing the docker
  * client alone would leave the container running). `keepStdout: 'buffer'` keeps raw bytes.
  */
-function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null }) {
+function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false }) {
   return new Promise((done) => {
     const t0 = Date.now();
     const out = createWriteStream(log, { flags: 'a' });
@@ -548,6 +879,7 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
     let logged = 0;
     let buffered = 0;
     let dropped = 0;
+    let seen = 0;
     // Up to the cap and then nothing: a cut chunk keeps its head, so the log stays one prefix.
     const toLog = (c) => {
       const keep = Math.max(0, Math.min(c.length, LOG_CAP - logged));
@@ -566,6 +898,7 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       child.stdin.end(input);
     }
     child.stdout.on('data', (c) => {
+      seen += c.length;
       // 'buffer' is ours only (docker cp of a pinned image's file); text captures of target steps are capped.
       if (keepStdout === 'buffer') chunks.push(c);
       else if (keepStdout && buffered < BUF_CAP) {
@@ -573,7 +906,8 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
         buffered += keep;
         chunks.push(keep === c.length ? c : c.subarray(0, keep));
       }
-      if (keepStdout !== 'buffer') toLog(c);
+      // A capture written to its own file (surface, snapshot) is not copied into the log as well.
+      if (keepStdout !== 'buffer' && logStdout) toLog(c);
     });
     child.stderr.on('data', (c) => toLog(c));
     let timedOut = false;
@@ -591,9 +925,9 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       // Anything the step left behind in its process group dies with it: an orphan would outlive
       // the job and the runner prints its process name in the public log.
       try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-      out.end(`${dropped ? `\n# ${dropped} bytes of output dropped (log cap)\n` : ''}# exit ${code} signal ${signal}${timedOut ? ' (time limit)' : ''} after ${Date.now() - t0} ms\n`);
+      out.end(`${dropped ? `\n# ${dropped} bytes of output dropped (log cap)\n` : ''}${logStdout ? '' : `# ${seen} bytes of stdout captured, not logged\n`}# exit ${code} signal ${signal}${timedOut ? ' (time limit)' : ''} after ${Date.now() - t0} ms\n`);
       const buf = Buffer.concat(chunks);
-      done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' ? buf : buf.toString('utf8') });
+      done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' || raw ? buf : buf.toString('utf8'), stdout_truncated: keepStdout !== 'buffer' && !!keepStdout && seen > buffered });
     });
   });
 }
@@ -636,7 +970,7 @@ class Docker {
   }
 
   d(argv, opts = {}) {
-    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null });
+    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false });
   }
 
   /** Remove a container now, without waiting (at a time limit: killing the client leaves it running). */
@@ -657,11 +991,11 @@ class Docker {
   }
 
   /** A sandbox container running `cmd`; removed (with its processes) at the deadline. */
-  async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, target }) {
+  async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, target }) {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
     const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd });
     const r = await run('docker', argv, {
-      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input,
+      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input, logStdout,
       onTimeout: () => this.kill(name),
     });
     if (r.timed_out) await this.d(['rm', '-f', name], { log });
@@ -676,6 +1010,8 @@ class Docker {
       '--user', user, '--cap-drop', 'ALL', ...(chown ? ['--cap-add', 'CHOWN'] : []),
       // Only the set-up fetch helper (ours, no target code running) is given the install network.
       '--security-opt', 'no-new-privileges', '--read-only', '--network', network,
+      // Bounded like the sandboxes: our helpers read target-made trees (copy-out, clean copy, evidence).
+      '--pids-limit', '256', '--memory', '2g', '--memory-swap', '2g', '--cpus', String(this.ctx.cpus ?? 1),
       ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
       ...mounts.flatMap((m) => ['--mount', volumeMount(m)]),
       ...(stdin ? ['--interactive'] : []),
@@ -697,7 +1033,14 @@ class Docker {
     return id.stdout.trim();
   }
 
+  /**
+   * A new, empty volume. `docker volume create` hands back an existing volume of the same name, so
+   * one that exists already is refused: a target's /work must never be the CLI's, the tools' or
+   * another target's volume.
+   */
   async volume(name, log) {
+    const seen = await this.d(['volume', 'inspect', '--format', '{{.Name}}', name], { log, keepStdout: true });
+    if (seen.exit === 0) throw new HarnessError(`volume ${name} exists already`);
     await must(this.d(['volume', 'create', ...Object.entries(this.labels()).flatMap(([k, v]) => ['--label', `${k}=${v}`]), name], { log }), 'volume');
     return name;
   }
@@ -745,14 +1088,14 @@ export function keepRegular(dir) {
  * Bring /work/out back to the host: a helper (no network, read-only volume) tars regular files and
  * folders only; the host extracts with no owner and no modes, under COPY_OUT_CAP bytes.
  */
-function copyOut(dk, vol, dest, log, target) {
+function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
   mkdirSync(dest, { recursive: true });
   const name = `corpus-${dk.ctx.runId}-${target}-h${++dk.n}`;
   const argv = dk.helperArgs({
     name, target,
     user: SANDBOX_USER,
     mounts: [{ src: vol, dst: P.work, ro: true }],
-    cmd: ['sh', '-c', 'cd /work/out 2>/dev/null || exit 0; find . -mindepth 1 \\( -type f -o -type d \\) -print0 | tar --null --no-recursion -cf - -T -'],
+    cmd: ['sh', '-c', 'cd "$1" 2>/dev/null || exit 0; find . -mindepth 1 \\( -type f -o -type d \\) -print0 | tar --null --no-recursion -cf - -T -', 'sh', srcDir],
   });
   return new Promise((done) => {
     const lg = createWriteStream(log, { flags: 'a' });
@@ -792,13 +1135,52 @@ function copyOut(dk, vol, dest, log, target) {
   });
 }
 
+/**
+ * The bin whose entry point the config-source copy follows: `bins[0]` from the list when it is a
+ * plain file name, else the server command's first word when it names a file in the bin folder.
+ */
+export function entryBin(t, binDir, command0) {
+  const ok = (n) => typeof n === 'string' && /^[A-Za-z0-9@._+-]{1,214}$/.test(n) && n !== '.' && n !== '..';
+  if (Array.isArray(t.bins) && ok(t.bins[0])) return { bin: t.bins[0], from: 'bins[0]' };
+  if (typeof command0 === 'string' && command0.startsWith(`${binDir}/`) && ok(command0.slice(binDir.length + 1))) return { bin: command0.slice(binDir.length + 1), from: 'server.command[0]' };
+  return { bin: null, from: null, why: 'neither bins[0] nor the server command names a file in the bin folder' };
+}
+
+/**
+ * `meta.config_source` from the helper's listing. The listing is read as untrusted input (its
+ * container holds the installed target's files): entries are type-checked and bounded, and an entry
+ * whose path could leave the folder is dropped.
+ */
+export function configSourceMeta(listing, step = {}) {
+  if (!listing || typeof listing !== 'object' || !Array.isArray(listing.files)) {
+    return { config_source: null, config_source_why: `the config-source helper gave no listing (exit ${step.exit ?? null}${step.timed_out ? ', time limit' : ''})` };
+  }
+  const rule = (r) => (['manifest', 'readme', 'license', 'entry', 'config'].includes(r) ? r : null);
+  const files = listing.files.slice(0, 40)
+    .filter((f) => f && safeRel(f.path) && typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/.test(f.sha256) && Number.isSafeInteger(f.bytes) && f.bytes >= 0 && rule(f.rule))
+    .map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, rule: f.rule, file: `sandbox/config-source/${f.path}` }));
+  if (!files.length && typeof listing.why === 'string') return { config_source: null, config_source_why: listing.why.slice(0, 300) };
+  const skipped = (Array.isArray(listing.skipped) ? listing.skipped : []).slice(0, 200).filter((x) => x && typeof x === 'object').map((x) => ({
+    path: typeof x.path === 'string' && x.path.length <= 4096 ? x.path : null,
+    bytes: Number.isSafeInteger(x.bytes) ? x.bytes : null,
+    rule: rule(x.rule),
+    why: typeof x.why === 'string' ? x.why.slice(0, 64) : null,
+  }));
+  const more = Number.isSafeInteger(listing.skipped_more) && listing.skipped_more > 0 ? listing.skipped_more : 0;
+  return { config_source: files, config_source_skipped: skipped, ...(more ? { config_source_skipped_more: more } : {}) };
+}
+
+/** A config-source listing entry's path: relative, inside the work folder, nothing to climb out with. */
+const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length < 4096 && !p.startsWith('/') && !p.split('/').some((x) => x === '..' || x === '' || x === '.') && !/[\0\n\r]/.test(p);
+
 /** One target. Returns its metadata record; never throws. */
 async function runTarget(t, o, ctx, dk) {
   const odir = resolve(o.out, t.id);
   mkdirSync(join(odir, 'logs'), { recursive: true });
   const L = (n) => join(odir, 'logs', `${n}.log`);
-  const timeoutS = t.timeout_s ?? ctx.defaults.timeout_s ?? 600;
-  const deadline = Date.now() + timeoutS * 1000;
+  const lim = timeLimits(t, ctx.defaults);
+  const deadline = Date.now() + lim.base_s * 1000;
+  const notYet = (what) => `not ${what} (the target stopped before it)`;
   const meta = {
     format: RUN_FORMAT,
     label: LABEL,
@@ -818,7 +1200,9 @@ async function runTarget(t, o, ctx, dk) {
     lane: o.lane,
     started: now(),
     ended: null,
-    timeout_s: timeoutS,
+    // The whole target's limit; `time_limits` says how it is made up (D8).
+    timeout_s: lim.total_s,
+    time_limits: lim,
     artifact_sha256_verified: null,
     networks: {},
     backends: [],
@@ -832,15 +1216,46 @@ async function runTarget(t, o, ctx, dk) {
     harness_error: null,
     copy_out: null,
     results: [],
+    canary: t.canary ?? null,
+    env: {
+      node_version: null, node_version_why: notYet('probed'),
+      python_version: null, python_version_why: notYet('probed'),
+      ...ctx.env,
+      backends: (Array.isArray(t.backends) ? t.backends : []).map((b) => {
+        const p = imageParts(b?.image);
+        return { image_tag: typeof b?.image_tag === 'string' ? b.image_tag : p.image_tag, image_digest: p.image_digest, ...(p.image_digest ? {} : { image_digest_why: 'the image is not pinned by digest' }) };
+      }),
+      images: [{ role: 'runtime', ...imageParts(ctx.images.runtime) }],
+    },
+    surface: null,
+    surface_why: notYet('probed'),
+    config_source: null,
+    config_source_why: notYet('collected'),
+    backend_state: [],
+    full_runs: [],
+    evidence: [],
   };
   const tag = `${ctx.runId}-${t.id}`;
+  const backendName = (i) => `corpus-${tag}-b${i}`;
   let vol = null;
+  let cleanVol = null;
+  let evidenceVol = null;
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
-    validateTarget(t);
+    validateTarget(t, ctx.dropped);
     checkLane(t, o.lane);
+    // D3: one record per backend with a snapshot, filled when the snapshots are taken.
+    const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
+    const states = new Map();
+    for (const [i] of snapping) {
+      const e = { backend: i, before: null, before_why: 'no CLI step that writes ran', after: null, after_why: 'no CLI step that writes ran' };
+      if (lim.repeats > 1) e.repeats = [];
+      meta.backend_state.push(e);
+      states.set(i, e);
+    }
     // 1. The artifact, on the host: downloaded and checked against the pinned sha256. Never run here.
     const plan = installPlan(t, ctx.plat);
+    if (plan.needsUv) meta.env.images.push({ role: 'uv', ...imageParts(ctx.images.uv) });
     const art = artifactFor(t, ctx.plat);
     const dl = await download(art.url, art.sha256, L('install'));
     meta.artifact_sha256_verified = dl.sha256;
@@ -853,7 +1268,54 @@ async function runTarget(t, o, ctx, dk) {
     const internal = await dk.network(`corpus-${tag}-run`, true, L('install'));
     meta.networks = { install: { internal: egress.internal }, run: { internal: internal.internal } };
     const mounts = [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }, ...(ctx.toolsVol ? [{ src: ctx.toolsVol, dst: P.tools, ro: true }] : [])];
-    const put = (path, buf, log) => must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', path] }, { log, input: buf, deadline }), `write ${path.split('/').pop()}`);
+    const put = (path, buf, log, d = deadline) => must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', path] }, { log, input: buf, deadline: d }), `write ${path.split('/').pop()}`);
+
+    /**
+     * Evidence: once the step that wrote them has exited (no target process runs), our helper moves
+     * outputs out of /work into a volume only our helpers mount, so later target code cannot touch them,
+     * and lists every file with its sha256. Used for the config-source copy, the init draft, the
+     * catalog's results and each full repeat's results and state. Returns the helper's listing, or
+     * { moved: false, why }. The listing goes to a side file; the copy-out is checked against it.
+     */
+    const moveToEvidence = async (rels, sideFile) => {
+      const elog = L('evidence');
+      try {
+        if (!evidenceVol) {
+          const ev = await dk.volume(`corpus-${tag}-evidence`, elog);
+          evidenceVol = ev;
+          await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: ev, dst: P.evidence }], cmd: ['sh', '-c', 'chmod 700 /evidence && chown 10001:10001 /evidence'] }, { log: elog, deadline: Date.now() + SMALL_STEP_MS }), 'evidence volume set-up');
+        }
+        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: evidenceVol, dst: P.evidence }, { src: ctx.cliVol, dst: P.cli, ro: true }],
+          cmd: ['node', `${SANDBOX_TOOLS}/evidence.mjs`, P.out, P.evidence, ...rels] }, { log: elog, deadline: Date.now() + CLEAN_MS, keepStdout: true, logStdout: false });
+        const l = safeJson(r.stdout.trim().split('\n').pop() ?? '');
+        if (r.timed_out || r.exit !== 0 || !l || !Array.isArray(l.files) || !/^[0-9a-f]{64}$/.test(l.sha256 ?? '') || !Array.isArray(l.moved)) throw new HarnessError(`the evidence helper failed (exit ${r.exit}${r.timed_out ? ', time limit' : ''})`);
+        writeFileSync(join(odir, sideFile), JSON.stringify({ paths: rels, sha256: l.sha256, files: l.files }) + '\n');
+        const strs = (x) => (Array.isArray(x) ? x.filter((y) => typeof y === 'string') : []);
+        return { moved: true, sha256: l.sha256, file_count: l.files.length, skipped: Number.isSafeInteger(l.skipped) ? l.skipped : null, missing: strs(l.missing), moved_paths: strs(l.moved) };
+      } catch (e) {
+        return { moved: false, why: String(e?.message ?? e).slice(0, 200) };
+      }
+    };
+    /** A step's output before the full repeats, into meta.evidence. */
+    const keepStepEvidence = async (step, rels) => {
+      const ev = await moveToEvidence(rels, `evidence-${step}-files.json`);
+      meta.evidence.push(ev.moved
+        ? { step, paths: rels, moved: true, files: `evidence-${step}-files.json`, file_count: ev.file_count, sha256: ev.sha256, skipped: ev.skipped, missing: ev.missing, moved_paths: ev.moved_paths }
+        : { step, paths: rels, moved: false, sha256: null, sha256_why: ev.why });
+    };
+    /** A full repeat's results and state, into its full_runs entry. */
+    const keepEvidence = async (i, fr) => {
+      const ev = await moveToEvidence([`results/full-${i}`, `state/full-${i}`], `full-${i}-files.json`);
+      if (ev.moved) {
+        fr.results_sha256 = ev.sha256;
+        fr.results_files = `full-${i}-files.json`;
+        fr.evidence = { moved: true, files: ev.file_count, skipped: ev.skipped, missing: ev.missing };
+      } else {
+        fr.results_sha256 = null;
+        fr.results_sha256_why = ev.why;
+        fr.evidence = { moved: false };
+      }
+    };
 
     // 3. Install, in sandbox containers. Only the `egress` steps have a network that leaves the host.
     for (const f of plan.files) await put(f.path, f.artifact ? dl.buf : Buffer.from(f.text), L('install'));
@@ -876,18 +1338,50 @@ async function runTarget(t, o, ctx, dk) {
     const vars = { tdir: P.work, bin: plan.bin, host: '127.0.0.1' };
     if (plan.pkgdir) vars.pkgdir = plan.pkgdir;
 
-    // 4. Backends: digest-pinned, on the internal network only, reachable as b0, b1, ...
-    for (const [i, b] of (t.backends ?? []).entries()) {
-      const name = `corpus-${tag}-b${i}`;
+    // 3b. D2 and D4, for the record only (neither decides the status): the node and python3 the
+    //     server under test gets, and the installed package's configuration source. Both run in a
+    //     sandbox container of this target with no network, after install and before any set-up.
+    const small = () => Math.min(deadline, Date.now() + SMALL_STEP_MS);
+    const ev = await dk.sandbox({ log: L('env'), deadline: small(), network: 'none', mounts, env: sandboxEnv(plan.bin), cmd: ['sh', '-c', VERSION_PROBE], keepStdout: true, target: t.id });
+    delete meta.env.node_version_why;
+    delete meta.env.python_version_why;
+    Object.assign(meta.env, envVersions(ev));
+    let command0;
+    try { command0 = fill(t.server?.command?.[0], vars); } catch {}
+    const eb = entryBin(t, plan.bin, command0);
+    const cs = await dk.sandbox({ log: L('config-source'), deadline: small(), network: 'none', mounts, env: sandboxEnv(plan.bin), target: t.id, keepStdout: true,
+      cmd: ['node', `${SANDBOX_TOOLS}/config-source.mjs`, P.work, String(t.ecosystem), String(t.package ?? ''), plan.bin, eb.bin ?? '', `${P.out}/config-source`] });
+    delete meta.config_source_why;
+    meta.config_source_entry = eb;
+    Object.assign(meta, configSourceMeta(safeJson(cs.stdout.trim().split('\n').pop() ?? ''), cs));
+    // Out of reach before any set-up or server runs.
+    await keepStepEvidence('config-source', ['config-source']);
+
+    // 3c. D5: with repeats, a clean copy of /work as install left it (before any set-up or server
+    //     start), in a volume of its own that no target container mounts. Each later repeat starts
+    //     from it again (restoreWork). Our helper copies with tar as the sandbox user, no network,
+    //     symlinks and special files as they are (never followed or opened).
+    let clean = null;
+    if (lim.repeats > 1) {
+      try {
+        const cv = await dk.volume(`corpus-${tag}-clean`, L('fresh-state'));
+        cleanVol = cv;
+        await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: cv, dst: P.clean }], cmd: ['sh', '-c', 'chmod 700 /clean && chown 10001:10001 /clean'] }, { log: L('fresh-state'), deadline: small() }), 'clean copy set-up');
+        await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work, ro: true }, { src: cv, dst: P.clean }], cmd: ['bash', '-c', CLEAN_COPY] }, { log: L('fresh-state'), deadline: Math.min(deadline, Date.now() + CLEAN_MS) }), 'clean copy');
+        clean = cv;
+      } catch (e) {
+        if (e.timeout) throw e;
+        meta.fresh_state_why = `no clean copy of /work: ${String(e.message).slice(0, 200)}`;
+      }
+    }
+
+    // 4. Backends: digest-pinned, on the internal network only, reachable as b0, b1, ... A backend is
+    //    started (and, between full repeats, started again from its image) by startBackend.
+    const startBackend = async (i, b, bm, d, v) => {
+      const name = backendName(i);
       const image = checkPinned(b.image, `backend ${i}`);
-      const imageId = await dk.image(image, L(`backend-${i}`), `backend ${i}`);
-      vars[`host${i}`] = `b${i}`;
-      vars[`port${i}`] = String(b.port);
-      if (i === 0) vars.host = 'b0';
       const capAdd = backendCaps(b, `backend ${i}`);
-      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, vars), args: fill(b.args ?? [], vars), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
-      const bm = { image, image_id: imageId, container_port: b.port, cap_add: capAdd, cap_add_default: b.cap_add === undefined, ready: null };
-      meta.backends.push(bm);
+      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, v), args: fill(b.args ?? [], v), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
       const blog = L(`backend-${i}`);
       // A backend that did not come up: its own output (docker logs, capped like every command's log)
       // and its state go into backend-N.log, in the encrypted bundle, before the teardown removes it.
@@ -898,56 +1392,118 @@ async function runTarget(t, o, ctx, dk) {
         bm.log = `logs/backend-${i}.log`;
         throw new HarnessError(why);
       };
-      const started = await dk.d(argv, { log: blog, deadline });
+      const started = await dk.d(argv, { log: blog, deadline: d });
       if (started.timed_out) throw Object.assign(new HarnessError(`backend ${i} start: time limit`), { timeout: true });
       if (started.spawn_error || started.exit !== 0) await backendFailed(`backend ${i} start: exit ${started.exit}`);
-      const waitUntil = Math.min(deadline, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
+      const waitUntil = Math.min(d, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
       let ok = !b.wait;
       while (!ok && Date.now() < waitUntil) {
-        const w = await dk.d(['exec', name, ...fill(b.wait, vars)], { log: blog, deadline });
+        const w = await dk.d(['exec', name, ...fill(b.wait, v)], { log: blog, deadline: d });
         ok = w.exit === 0;
         if (!ok) await new Promise((r) => setTimeout(r, 2000));
       }
       if (!ok) await backendFailed(`backend ${i} not ready`);
+      const captured = {};
       for (const s of b.setup ?? []) {
-        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, vars)], { log: blog, deadline, keepStdout: !!s.capture });
+        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture });
         if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
         if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
-        if (s.capture) vars[s.capture] = r.stdout.trim().split('\n').pop();
+        if (s.capture) v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
       }
       bm.ready = true;
+      return captured;
+    };
+    for (const [i, b] of (t.backends ?? []).entries()) {
+      const image = checkPinned(b.image, `backend ${i}`);
+      const imageId = await dk.image(image, L(`backend-${i}`), `backend ${i}`);
+      vars[`host${i}`] = `b${i}`;
+      vars[`port${i}`] = String(b.port);
+      if (i === 0) vars.host = 'b0';
+      const capAdd = backendCaps(b, `backend ${i}`);
+      const bm = { image, image_id: imageId, container_port: b.port, cap_add: capAdd, cap_add_default: b.cap_add === undefined, ready: null };
+      meta.backends.push(bm);
+      await startBackend(i, b, bm, deadline, vars);
     }
+    /**
+     * D5: fresh state between full repeats. Re-running a seed against the used database could fail
+     * (CREATE TABLE twice) or leave the last repeat's rows, so each backend is removed with its
+     * anonymous volumes and started again from its pinned image, waited for, and seeded by the same
+     * `setup` steps. Returns the names of set-up captures whose value changed: the manifest was filled
+     * with the first values, so a repeat with other values would not test the same fixture.
+     */
+    const resetBackends = async (d) => {
+      const v = { ...vars };
+      const changed = [];
+      for (const [i, b] of (t.backends ?? []).entries()) {
+        await dk.d(['rm', '-f', '-v', backendName(i)], { log: L(`backend-${i}`), deadline: d });
+        const bm = meta.backends[i];
+        bm.resets = (bm.resets ?? 0) + 1;
+        const got = await startBackend(i, b, bm, d, v);
+        for (const [k, x] of Object.entries(got)) if (x !== vars[k]) changed.push(k);
+      }
+      return changed;
+    };
 
     // 5. Set-up in the target's work folder, in a sandbox container on the internal network.
     const command = fill(t.server.command, vars);
     const senv = fill(t.server.env ?? {}, vars);
     const envRun = sandboxEnv(plan.bin, senv);
-    for (const [k, line] of (t.setup ?? []).entries()) {
-      if (typeof line !== 'string') {
-        // B: a pinned tarball instead of a git step. Our helper fetches it on the install network
-        // (no target code runs meanwhile: every sandbox container of the target has exited) and
-        // verifies its sha256; only a verified file is unpacked, by tar in a sandbox container with
-        // no network, as data. The driver checks the helper's sha256 line against the pin as well.
-        const f = checkFetch(line, `set-up ${k}`);
-        const file = `${P.work}/.fetch/${k}.tgz`;
-        const caEnv = envInstall.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: envInstall.NODE_EXTRA_CA_CERTS } : {};
-        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, network: egress.name, env: caEnv, mounts: [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }],
-          cmd: ['node', `${SANDBOX_TOOLS}/fetch.mjs`, f.url, f.sha256, file, String(FETCH_CAP)] }, { log: L('setup'), deadline, keepStdout: true });
-        if (r.timed_out) throw Object.assign(new HarnessError(`set-up ${k} fetch: time limit`), { timeout: true });
-        if (r.spawn_error || r.exit !== 0) throw new HarnessError(`set-up ${k} fetch: refused or failed (exit ${r.exit})`);
-        const got = /^sha256 ([0-9a-f]{64}) bytes (\d+)$/m.exec(r.stdout);
-        if (!got || got[1] !== f.sha256) throw new HarnessError(`set-up ${k} fetch: sha256 is not the pinned one`);
-        meta.setup_fetch.push({ step: k, url: f.url, sha256: got[1], bytes: Number(got[2]), dest: f.dest, strip_components: f.strip });
-        await must(dk.sandbox({ log: L('setup'), deadline, network: 'none', mounts, env: envRun, target: t.id,
-          cmd: ['sh', '-c', 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --no-same-owner --no-same-permissions --strip-components="$3" && rm -f "$1"', 'sh', file, `${P.work}/${f.dest}`, String(f.strip)] }), `set-up ${k} unpack`);
-        continue;
+    // runSetup runs the list's set-up steps; again before every full repeat after the first (D5).
+    const runSetup = async (d, first) => {
+      for (const [k, line] of (t.setup ?? []).entries()) {
+        if (typeof line !== 'string') {
+          // B: a pinned tarball instead of a git step. Our helper fetches it on the install network
+          // (no target code runs meanwhile: every sandbox container of the target has exited) and
+          // verifies its sha256; only a verified file is unpacked, by tar in a sandbox container with
+          // no network, as data. The driver checks the helper's sha256 line against the pin as well.
+          const f = checkFetch(line, `set-up ${k}`);
+          const file = `${P.work}/.fetch/${k}.tgz`;
+          const caEnv = envInstall.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: envInstall.NODE_EXTRA_CA_CERTS } : {};
+          const r = await dk.helper({ target: t.id, user: SANDBOX_USER, network: egress.name, env: caEnv, mounts: [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }],
+            cmd: ['node', `${SANDBOX_TOOLS}/fetch.mjs`, f.url, f.sha256, file, String(FETCH_CAP)] }, { log: L('setup'), deadline: d, keepStdout: true });
+          if (r.timed_out) throw Object.assign(new HarnessError(`set-up ${k} fetch: time limit`), { timeout: true });
+          if (r.spawn_error || r.exit !== 0) throw new HarnessError(`set-up ${k} fetch: refused or failed (exit ${r.exit})`);
+          const got = /^sha256 ([0-9a-f]{64}) bytes (\d+)$/m.exec(r.stdout);
+          if (!got || got[1] !== f.sha256) throw new HarnessError(`set-up ${k} fetch: sha256 is not the pinned one`);
+          if (first) meta.setup_fetch.push({ step: k, url: f.url, sha256: got[1], bytes: Number(got[2]), dest: f.dest, strip_components: f.strip });
+          await must(dk.sandbox({ log: L('setup'), deadline: d, network: 'none', mounts, env: envRun, target: t.id,
+            cmd: ['sh', '-c', 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --no-same-owner --no-same-permissions --strip-components="$3" && rm -f "$1"', 'sh', file, `${P.work}/${f.dest}`, String(f.strip)] }), `set-up ${k} unpack`);
+          continue;
+        }
+        await must(dk.sandbox({ log: L('setup'), deadline: d, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
       }
-      await must(dk.sandbox({ log: L('setup'), deadline, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
+    };
+    await runSetup(deadline, true);
+
+    // 5b. D1: the server surface (initialize and tools/list, nothing else), by our probe in a sandbox
+    //     container like the CLI's, starting the same server. For the record only; the probe's
+    //     output is written by the host to surface.json and never printed.
+    const sv = await dk.sandbox({ log: L('surface'), deadline: Math.min(deadline, Date.now() + SURFACE_MS + 30_000), network: internal.name, mounts, env: envRun, target: t.id, keepStdout: true, logStdout: false,
+      cmd: ['node', `${SANDBOX_TOOLS}/surface.mjs`, SURFACE_PROTOCOL, String(SURFACE_MS), '--', ...command] });
+    // The probe's stdout is untrusted (the server shares its container and user): surfaceDoc
+    // type-checks it, and nothing here may stop the target (a hostile, deeply nested answer that
+    // cannot be serialised gives surface: null with the reason).
+    delete meta.surface_why;
+    try {
+      const probe = safeJson(sv.stdout.trim().split('\n').pop() ?? '');
+      if (!probe || typeof probe !== 'object' || Array.isArray(probe)) {
+        meta.surface_why = `the surface probe gave no answer (exit ${sv.exit}${sv.timed_out ? ', time limit' : ''}${sv.stdout_truncated ? ', output over the capture cap' : ''})`;
+      } else {
+        const doc = surfaceDoc(probe);
+        const sm = surfaceMeta(doc, 'surface.json');
+        writeFileSync(join(odir, 'surface.json'), JSON.stringify(doc) + '\n');
+        Object.assign(meta, sm);
+        if (meta.surface) meta.surface.step = { exit: sv.exit, ms: sv.ms, timed_out: sv.timed_out };
+      }
+    } catch (e) {
+      rmSync(join(odir, 'surface.json'), { force: true });
+      meta.surface = null;
+      meta.surface_why = `the surface probe's answer could not be recorded: ${String(e?.message ?? e).slice(0, 200)}`;
     }
 
     // 6. The manifests: the init draft (archived as data), then the one the CLI runs.
-    const cliStep = async (name, argv) => {
-      const r = await dk.sandbox({ log: L(name), deadline, network: internal.name, mounts, env: envRun, cmd: ['node', CLI_MAIN, ...argv], keepStdout: true, target: t.id });
+    const cliStep = async (name, argv, d = deadline) => {
+      const r = await dk.sandbox({ log: L(name), deadline: d, network: internal.name, mounts, env: envRun, cmd: ['node', CLI_MAIN, ...argv], keepStdout: true, target: t.id });
       const step = { step: name, exit: r.exit, signal: r.signal, timed_out: r.timed_out, spawn_error: r.spawn_error, container: true, ms: r.ms };
       meta.steps.push(step);
       return { r, step };
@@ -957,12 +1513,46 @@ async function runTarget(t, o, ctx, dk) {
     if (t.init !== false) {
       const { step } = await cliStep('init', ['init', '--out', `${P.out}/init-draft.yaml`, ...Object.keys(senv).flatMap((k) => ['--env', k]), '--', ...serverWrap(command)]);
       step.informational = true; // init's result is data: a draft that fails is recorded, not judged
+      await keepStepEvidence('init', ['init-draft.yaml']);
     }
     const manifestText = t.full?.manifest ? fillManifest(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
     await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L('plan'));
     writeFileSync(join(odir, 'writecheck.yaml'), manifestText);
     meta.manifest_sha256 = sha256Text(manifestText);
     const manifest = `${P.work}/writecheck.yaml`;
+
+    // D3: the backends' state as text, before the first CLI step that writes and after the last.
+    // With repeats, also before and after each repeat (backend-N-full-I-before.txt / -after.txt).
+    const takeSnapshots = async (when, rep, d) => {
+      for (const [i, b] of snapping) {
+        const e = states.get(i);
+        const r = await dk.d(['exec', ...(b.snapshot.user ? ['-u', b.snapshot.user] : []), backendName(i), ...fill(b.snapshot.exec, vars)],
+          { log: L(`backend-${i}`), deadline: Math.min(d, Date.now() + SMALL_STEP_MS), keepStdout: true, logStdout: false, raw: true });
+        const ok = !r.timed_out && !r.spawn_error && r.exit === 0;
+        const why = ok ? null : `snapshot exec: exit ${r.exit}${r.timed_out ? ' (time limit)' : ''}`;
+        const rec = (file) => {
+          writeFileSync(join(odir, file), r.stdout);
+          return { file, sha256: createHash('sha256').update(r.stdout).digest('hex'), bytes: r.stdout.length, ...(r.stdout_truncated ? { truncated: true } : {}) };
+        };
+        const contract = `backend-${i}-${when}.txt`;
+        if (when === 'after' || rep === 1) {
+          if (ok) {
+            e[when] = rec(contract);
+            delete e[`${when}_why`];
+          } else {
+            rmSync(join(odir, contract), { force: true });
+            e[when] = null;
+            e[`${when}_why`] = why;
+          }
+        }
+        if (e.repeats) {
+          let er = e.repeats.find((x) => x.i === rep);
+          if (!er) e.repeats.push((er = { i: rep }));
+          er[when] = ok ? rec(`backend-${i}-full-${rep}-${when}.txt`) : null;
+          if (!ok) er[`${when}_why`] = why;
+        }
+      }
+    };
 
     // 7. plan, catalog, and full where a person accepted the plan hash. The first CLI step that does
     //    not complete decides the target's status; later steps still run when they can.
@@ -972,12 +1562,72 @@ async function runTarget(t, o, ctx, dk) {
     decisive.push(planStep.step);
     const cat = await cliStep('catalog', ['catalog', '-m', manifest, '--out', `${P.out}/results`]);
     decisive.push(cat.step);
+    // The catalog's results folders (results.json, report.md, catalog.json, ...), before a full repeat
+    // runs target code again. plan writes no file: its output is the step's log, written by the host.
+    await keepStepEvidence('catalog', ['results/catalog-*']);
     if (t.full && t.full.plan_hash) {
       if (meta.plan_hash !== t.full.plan_hash) {
         meta.plan_drift = { accepted: t.full.plan_hash, seen: meta.plan_hash };
       } else {
-        const full = await cliStep('full', ['run', '-m', manifest, '--confirm-target', t.full.confirm, '--plan-hash', t.full.plan_hash, '--out', `${P.out}/results`, '--state', `${P.out}/state`]);
-        decisive.push(full.step);
+        // D5: `full.repeats` runs against fresh state, each into results/full-<i>/ with its own state
+        // folder. Every repeat after the first is planned again first and refused unless its plan
+        // hash is the accepted one (the same for every repeat).
+        for (let i = 1; i <= lim.repeats; i++) {
+          const rd = lim.full_s ? Date.now() + lim.full_s * 1000 : deadline;
+          const fr = { i, results_dir: `sandbox/results/full-${i}`, cli_exit: null, writes: null, status: null, plan_hash: null, fresh_state: null };
+          meta.full_runs.push(fr);
+          if (i > 1) {
+            // Fresh state: /work back to its clean copy, the backends started again and seeded, the
+            // list's set-up run again, the manifest written again. A step that fails stops the target
+            // (harness error) and is named in this repeat's `why`.
+            try {
+              if (clean) await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: clean, dst: P.clean, ro: true }], cmd: ['bash', '-c', RESTORE_WORK] }, { log: L('fresh-state'), deadline: Math.min(rd, Date.now() + CLEAN_MS) }), `restore /work for repeat ${i}`);
+              if (t.backends?.length) {
+                const changed = await resetBackends(rd);
+                if (changed.length) {
+                  fr.status = 'not_started';
+                  fr.fresh_state = false;
+                  fr.fresh_state_why = fr.why = `a set-up capture changed after the reset (${changed.join(', ')})`;
+                  break;
+                }
+              }
+              await runSetup(rd, false);
+              await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L(`plan-${i}`), rd);
+            } catch (e) {
+              fr.fresh_state = false;
+              fr.why = `reset before repeat ${i}: ${String(e?.message ?? e).slice(0, 200)}`;
+              throw e;
+            }
+            fr.reset = [clean ? '/work restored from its clean copy' : null, t.backends?.length ? 'backends started again from their images and seeded' : null, t.setup?.length ? 'set-up run again' : null].filter(Boolean).join('; ') || 'nothing to reset';
+            fr.fresh_state = !!clean;
+            if (!clean) fr.fresh_state_why = meta.fresh_state_why ?? 'no clean copy of /work';
+            const p = await cliStep(`plan-${i}`, ['plan', '-m', manifest], rd);
+            fr.plan_hash = (/^plan hash: ([0-9a-f]{16})$/m.exec(p.r.stdout) ?? [])[1] ?? null;
+            if (classifyCli(p.step) !== 'completed') {
+              decisive.push(p.step);
+              fr.status = 'not_started';
+              fr.why = `plan-${i} did not complete`;
+              break;
+            }
+            if (fr.plan_hash !== t.full.plan_hash) {
+              fr.status = 'not_started';
+              fr.why = 'the plan hash is not the accepted one; no later repeat runs';
+              meta.plan_drift_repeat = { i, accepted: t.full.plan_hash, seen: fr.plan_hash };
+              break;
+            }
+          } else {
+            fr.plan_hash = meta.plan_hash;
+            fr.fresh_state = true; // the state install, set-up and the seeds left; no full run before it
+          }
+          await takeSnapshots('before', i, rd);
+          const full = await cliStep(i === 1 ? 'full' : `full-${i}`, ['run', '-m', manifest, '--confirm-target', t.full.confirm, '--plan-hash', t.full.plan_hash, '--out', `${P.out}/results/full-${i}`, '--state', `${P.out}/state/full-${i}`], rd);
+          decisive.push(full.step);
+          fr.cli_exit = full.step.exit;
+          fr.status = classifyCli(full.step);
+          fr.ms = full.step.ms;
+          await takeSnapshots('after', i, rd);
+          await keepEvidence(i, fr);
+        }
       }
     }
     for (const s of decisive) {
@@ -1005,6 +1655,12 @@ async function runTarget(t, o, ctx, dk) {
     meta.status = e.timeout ? 'timeout' : 'harness_error';
     meta.harness_error = String(e.message ?? e);
   } finally {
+    for (const fr of meta.full_runs) {
+      if (fr.status !== null) continue;
+      fr.status = 'not_started';
+      fr.why ??= meta.harness_error ? `the target stopped: ${meta.status}` : 'the target stopped';
+      if (fr.fresh_state === null) fr.fresh_state_why ??= 'the repeat did not start';
+    }
     try { await finishTarget(); } catch (e) {
       // One target's output must never stop the shard: record it and go on to the next target.
       meta.status = 'harness_error';
@@ -1012,14 +1668,37 @@ async function runTarget(t, o, ctx, dk) {
     }
     meta.public_exit = publicExit(meta);
     meta.ended = now();
-    writeFileSync(join(odir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+    writeMeta();
   }
   return meta;
+
+  /**
+   * meta.json, whatever is in it: a record that cannot be serialised or written turns this target into
+   * a harness error with a minimal record, and never stops the shard.
+   */
+  function writeMeta() {
+    let text;
+    try {
+      text = JSON.stringify(meta, null, 2) + '\n';
+    } catch (e) {
+      meta.status = 'harness_error';
+      meta.harness_error = `record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`;
+      meta.public_exit = publicExit(meta);
+      text = JSON.stringify({ format: meta.format, label: meta.label, target: { id: t.id }, status: meta.status, harness_error: meta.harness_error, public_exit: meta.public_exit, started: meta.started, ended: meta.ended }, null, 2) + '\n';
+    }
+    try {
+      writeFileSync(join(odir, 'meta.json'), text);
+    } catch (e) {
+      meta.status = 'harness_error';
+      meta.harness_error = `record: meta.json could not be written: ${String(e?.message ?? e).slice(0, 200)}`;
+      meta.public_exit = publicExit(meta);
+    }
+  }
 
   async function finishTarget() {
     const lg = L('teardown');
     for (const [i] of (t.backends ?? []).entries()) {
-      await dk.d(['logs', `corpus-${tag}-b${i}`], { log: lg, deadline: Date.now() + 60_000 });
+      await dk.d(['logs', backendName(i)], { log: lg, deadline: Date.now() + 60_000 });
     }
     // Every container of this target (backends, and any sandbox still running) goes first, so the
     // copy below reads a volume nothing can write any more.
@@ -1035,6 +1714,69 @@ async function runTarget(t, o, ctx, dk) {
       }
       await dk.d(['volume', 'rm', '-f', vol], { log: lg });
     }
+    if (evidenceVol) {
+      // A results/full-<i> or state/full-<i> that came back from /work/out for a moved repeat was made
+      // after the move (by a later repeat's target code): it is removed and recorded, and the moved
+      // evidence takes its place.
+      // The same for each step's moved output; a results/catalog-* folder that came back from /work/out
+      // was made after the catalog's were moved, whatever its name.
+      for (const e of meta.evidence) {
+        if (!e.moved) continue;
+        const back = [...e.moved_paths];
+        if (e.paths.includes('results/catalog-*') && existsSync(join(odir, 'sandbox', 'results'))) {
+          back.push(...readdirSync(join(odir, 'sandbox', 'results')).filter((n) => n.startsWith('catalog-')).map((n) => `results/${n}`));
+        }
+        for (const rel of back) {
+          const p = join(odir, 'sandbox', ...rel.split('/'));
+          if (safeRel(rel) && existsSync(p)) {
+            e.planted_after_move = true;
+            rmSync(p, { recursive: true, force: true });
+          }
+        }
+      }
+      for (const fr of meta.full_runs) {
+        if (!fr.evidence?.moved) continue;
+        for (const k of ['results', 'state']) {
+          const p = join(odir, 'sandbox', k, `full-${fr.i}`);
+          if (existsSync(p)) {
+            fr.planted_after_move = true;
+            rmSync(p, { recursive: true, force: true });
+          }
+        }
+      }
+      const c = await copyOut(dk, evidenceVol, join(odir, 'sandbox'), lg, t.id, P.work);
+      meta.copy_out_evidence = { bytes: c.bytes, over_cap: c.capped, timed_out: c.timed_out, non_regular_removed: c.removed };
+      if (!c.ok && meta.status === 'completed') {
+        meta.status = 'harness_error';
+        meta.harness_error = 'copy-out of the evidence failed';
+      }
+      await dk.d(['volume', 'rm', '-f', evidenceVol], { log: lg });
+    }
+    for (const e of meta.evidence) {
+      if (!e.moved) {
+        e.tampered = null;
+        e.tampered_why = 'nothing was moved';
+        continue;
+      }
+      const now256 = listTree(join(odir, 'sandbox'), e.moved_paths.filter(safeRel)).sha256;
+      e.tampered = now256 !== e.sha256;
+      if (e.tampered) e.sha256_in_bundle = now256;
+    }
+    for (const fr of meta.full_runs) {
+      if (fr.status === 'not_started') continue;
+      if (!fr.results_sha256) {
+        fr.results_tampered = null;
+        fr.results_tampered_why = 'no listing was made when the repeat ended';
+        continue;
+      }
+      const rels = [`results/full-${fr.i}`, `state/full-${fr.i}`].filter((r) => !(fr.evidence?.missing ?? []).includes(r));
+      const now256 = listTree(join(odir, 'sandbox'), rels).sha256;
+      fr.results_tampered = now256 !== fr.results_sha256;
+      if (fr.results_tampered) fr.results_sha256_in_bundle = now256;
+    }
+    if (cleanVol) {
+      await dk.d(['volume', 'rm', '-f', cleanVol], { log: lg });
+    }
     for (const n of ['egress', 'run']) await dk.d(['network', 'rm', `corpus-${tag}-${n}`], { log: lg });
     // The server's stderr, as the stderr-tee kept it (sizes and hashes only in meta; the files stay
     // in sandbox/server-stderr/, in the encrypted bundle). Target-writable data like the rest.
@@ -1045,13 +1787,52 @@ async function runTarget(t, o, ctx, dk) {
     }
     const draft = join(odir, 'sandbox', 'init-draft.yaml');
     if (existsSync(draft) && lstatSync(draft).isFile()) meta.init_draft_sha256 = sha256File(draft);
+    // results/<run>/results.json, and one level deeper for the full repeats (results/full-<i>/<run>/).
+    // Only run.status and run.writes are kept of each results.json (readRunFields), and at most
+    // RESULTS_MAX folders are recorded: the folders and files are target-writable.
+    const fields = new Map();
+    const take = (rel) => {
+      const f = join(odir, rel, 'results.json');
+      if (!existsSync(f) || !lstatSync(f).isFile()) return false;
+      if (meta.results.length >= RESULTS_MAX) {
+        meta.results_omitted = (meta.results_omitted ?? 0) + 1;
+        return true;
+      }
+      const rf = readRunFields(f);
+      fields.set(rel, rf);
+      meta.results.push({ folder: rel, sha256: sha256File(f), status: rf.too_large ? 'too large to read' : rf.status });
+      return true;
+    };
     const rdir = join(odir, 'sandbox', 'results');
     if (existsSync(rdir) && lstatSync(rdir).isDirectory()) {
       for (const r of readdirSync(rdir)) {
-        const f = join(rdir, r, 'results.json');
-        if (!existsSync(f) || !lstatSync(f).isFile()) continue;
-        const big = lstatSync(f).size > JSON_CAP;
-        meta.results.push({ folder: `sandbox/results/${r}`, sha256: sha256File(f), status: big ? 'too large to read' : safeJson(readFileSync(f, 'utf8'))?.run?.status ?? null });
+        if (take(`sandbox/results/${r}`)) continue;
+        const sub = join(rdir, r);
+        if (/^full-\d+$/.test(r) && lstatSync(sub).isDirectory()) for (const x of readdirSync(sub).sort()) take(`sandbox/results/${r}/${x}`);
+      }
+    }
+    for (const fr of meta.full_runs) {
+      const mine = meta.results.filter((x) => x.folder.startsWith(`${fr.results_dir}/`));
+      if (mine.length !== 1) {
+        fr.writes = null;
+        fr.writes_why = mine.length ? 'more than one results folder' : 'no results.json';
+        continue;
+      }
+      const rf = fields.get(mine[0].folder);
+      fr.results = mine[0].folder;
+      fr.run_status = mine[0].status;
+      fr.writes = rf.writes;
+      if (fr.writes === null) fr.writes_why = rf.writes_why ?? rf.why;
+    }
+    // D4: each copied config-source file, as it came back (the server under test ran later with
+    // /work writable, so a change after the copy is recorded, never hidden).
+    for (const f of meta.config_source ?? []) {
+      const p = join(odir, 'sandbox', 'config-source', ...f.path.split('/'));
+      let now256 = null;
+      try { if (lstatSync(p).isFile()) now256 = sha256File(p); } catch {}
+      if (now256 !== f.sha256) {
+        f.changed_after_copy = true;
+        f.sha256_in_bundle = now256;
       }
     }
   }
@@ -1103,6 +1884,14 @@ async function context(o) {
   if (!commit) commit = (await q('git', ['-C', cliDir, 'rev-parse', 'HEAD'])) || null;
   const images = JSON.parse(readFileSync(o.images, 'utf8'));
   for (const k of ['runtime', 'uv']) checkPinned(images[k], `images.json ${k}`);
+  // D2: the CLI build carries no spec document, only the name of the text it follows (SPEC_TEXT in
+  // its requirements module). The workflow checks out spec/mws.md from the same CLI commit, beside
+  // the package; its sha256 is recorded (--spec names another file).
+  const specFile = o.spec ? resolve(o.spec) : join(cliDir, '..', '..', 'spec', 'mws.md');
+  const specOk = existsSync(specFile) && lstatSync(specFile).isFile();
+  const reqJs = join(cliDir, 'dist', 'src', 'requirements.js');
+  // spec_ref: the reference the CLI build says it follows (SPEC_TEXT, e.g. spec/0.9-review@15f71e5).
+  const specRef = existsSync(reqJs) ? (/SPEC_TEXT = ['"]([\w./@:+-]{1,200})['"]/.exec(readFileSync(reqJs, 'utf8')) ?? [])[1] ?? null : null;
   const runner = {
     lane: o.lane,
     image_os: process.env.ImageOS ?? null,
@@ -1126,6 +1915,22 @@ async function context(o) {
       ? { repository: process.env.GITHUB_REPOSITORY, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, sha: process.env.GITHUB_SHA, workflow: process.env.GITHUB_WORKFLOW, event: process.env.GITHUB_EVENT_NAME }
       : null,
     runId: ((process.env.GITHUB_RUN_ID ?? `l${Date.now().toString(36)}`) + `s${o.shard}`).toLowerCase().replace(/[^a-z0-9]/g, ''),
+    env: {
+      docker_server_version: runner.docker || null,
+      ...(runner.docker ? {} : { docker_server_version_why: 'docker version printed nothing' }),
+      runner_image: runner.image_os && runner.image_version ? `${runner.image_os}/${runner.image_version}` : null,
+      ...(runner.image_os && runner.image_version ? {} : { runner_image_why: 'not a GitHub-hosted runner (ImageOS and ImageVersion are not set)' }),
+      cli_commit: commit ?? null,
+      ...(commit ? {} : { cli_commit_why: 'no --cli-commit and the CLI folder is not a git checkout' }),
+      cli_version: (/ (\d+\.\d+\.\d+[^\s)]*)/.exec(version) ?? [])[1] ?? null,
+      ...(/ \d+\.\d+\.\d+/.test(version) ? {} : { cli_version_why: 'the CLI printed no version' }),
+      spec_sha256: specOk ? sha256File(specFile) : null,
+      ...(specOk ? { spec_file: o.spec ? 'given with --spec' : 'spec/mws.md at the CLI commit' } : { spec_sha256_why: 'no spec document beside the CLI package (the CLI build itself carries none)' }),
+      // Key on spec_ref (the text the CLI follows). spec_sha256 hashes spec/mws.md at the CLI commit,
+      // which can be a later text than spec_ref names.
+      spec_ref: specRef,
+      ...(specRef ? {} : { spec_ref_why: 'the CLI build names no SPEC_TEXT' }),
+    },
     isolation: { kind: 'container', user: SANDBOX_USER, cap_drop: 'ALL', no_new_privileges: true, read_only_root: true, mounts: 'named volumes only', install_network: 'bridge (egress)', run_network: 'internal', cpus: null, backend_cap_allowlist: [...BACKEND_CAPS], server_stderr_cap: STDERR_CAP },
   };
 }
@@ -1188,28 +1993,33 @@ async function main() {
     const raw = readFileSync(o.targets);
     if (o.consumeTargets) rmSync(o.targets, { force: true }); // no clear-text list on disk while targets run
     const list = JSON.parse(raw.toString('utf8'));
-    if (list.format !== TARGETS_FORMAT) throw new HarnessError('the target list has another format');
-    if (!Array.isArray(list.targets)) throw new HarnessError('the target list has no targets');
-    // Every entry is checked at load (capabilities, set-up forms, ids): one that fails is refused
-    // before anything of it is fetched or started; the others run.
-    const invalid = new Map();
-    for (const t of list.targets) {
-      checkId(t?.id); // an id names folders and containers: a bad one refuses the whole list
-      try { validateTarget(t); } catch (e) { invalid.set(t.id, `refused at load: ${e.message}`); }
-    }
+    // Every entry is checked at load (capabilities, set-up forms, snapshots, repeats, a dropped id):
+    // one that fails is refused before anything of it is fetched or started; the others run.
+    const { invalid, dropped } = validateList(list);
     const seed = process.env.CORPUS_ORDER_SEED || randomBytes(16).toString('hex');
-    const mine = shuffled(list.targets
+    const inShard = list.targets
       .filter((t) => (t.lane ?? 'ci') === o.lane && t.enabled !== false)
       .filter((t) => !o.only || o.only.includes(t.id))
-      .filter((_, i) => i % o.shards === o.shard - 1), seed);
+      .filter((_, i) => i % o.shards === o.shard - 1);
+    // D8: on the CI lane, the shard's planned time must fit one job (SHARD_BUDGET_S), before anything runs.
+    if (o.lane === 'ci') checkShardBudget(inShard, list.defaults ?? {}, invalid);
+    const mine = shuffled(inShard, seed);
     const ctx = await context(o);
     ctx.defaults = list.defaults ?? {};
     ctx.invalid = invalid;
+    ctx.dropped = dropped;
     dk = new Docker(ctx, join(o.out, '_shard', 'docker.log'));
     await prepareDocker(ctx, dk);
     const shard = { format: RUN_FORMAT, label: LABEL, lane: o.lane, shard: o.shard, shards: o.shards, targets_list_sha256: createHash('sha256').update(raw).digest('hex'), targets_list_updated: list.updated ?? null, order_seed: seed, order: mine.map((t) => t.id), cli: ctx.cli, spec: ctx.spec, runner: ctx.runner, images: ctx.imageInfo, sandbox_tools_sha256: ctx.sandboxTools, isolation: ctx.isolation, github: ctx.github, started: now(), targets: [] };
     for (const t of mine) {
-      const m = await runTarget(t, o, ctx, dk);
+      let m;
+      try {
+        m = await runTarget(t, o, ctx, dk);
+      } catch (e) {
+        // runTarget records and returns; should it ever throw, this target alone is lost, not the shard.
+        try { writeFileSync(join(o.out, '_shard', `target-error-${t.id}.txt`), `${now()}\n${e?.stack ?? e}\n`); } catch {}
+        m = { status: 'harness_error', cli_exit: null, public_exit: 125, results: [] };
+      }
       shard.targets.push({ id: t.id, status: m.status, cli_exit: m.cli_exit, public_exit: m.public_exit, results: m.results.map((r) => r.sha256) });
       say(`run finished, exit ${m.public_exit}`);
       if (m.public_exit !== 0) failed = true;

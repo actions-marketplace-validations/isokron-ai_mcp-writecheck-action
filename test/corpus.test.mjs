@@ -498,11 +498,20 @@ test('R2-10: helper containers are named and carry their target label, so the pe
   const d = stand();
   const { r, calls } = drive(d, { only: 't01' });
   assert.equal(r.status, 0);
-  const helpers = calls.filter((c) => c.argv[0] === 'run' && c.argv.includes('none') && c.argv[c.argv.indexOf('--network') + 1] === 'none' && !c.argv.includes('--cpus')).map((c) => c.argv);
+  // Our helpers, by name (-hN).
+  const helpers = calls.filter((c) => c.argv[0] === 'run' && !c.argv.includes('-d') && /-h\d+$/.test(c.argv[c.argv.indexOf('--name') + 1] ?? '')).map((c) => c.argv);
   assert.ok(helpers.length >= 3, 'CLI volume, volume set-up, file writes, copy-out');
-  for (const a of helpers) assert.match(a[a.indexOf('--name') + 1], /-h\d+$/, a.join(' '));
+  for (const a of helpers) {
+    assert.equal(a[a.indexOf('--network') + 1], 'none', a.join(' '));
+    // Bounded like the sandboxes (memory, pids, CPUs).
+    assert.equal(a[a.indexOf('--memory') + 1], '2g', a.join(' '));
+    assert.equal(a[a.indexOf('--pids-limit') + 1], '256', a.join(' '));
+    assert.ok(a.includes('--cpus'), a.join(' '));
+  }
+  // Every helper is named, so the per-target sweep finds it.
+  assert.ok(calls.filter((c) => c.argv[0] === 'run' && c.argv.includes('--user') && c.argv.includes('0:0')).every((c) => c.argv.includes('--name')));
   const mine = helpers.filter((a) => a.includes('isokron.corpus.target=t01'));
-  assert.ok(mine.some((a) => a.join(' ').includes('cd /work/out')), 'copy-out');
+  assert.ok(mine.some((a) => a.join(' ').includes('find . -mindepth 1') && a.at(-1) === '/work/out'), 'copy-out');
   assert.ok(mine.some((a) => a.join(' ').includes('cat > "$1"')), 'file write');
   assert.ok(mine.some((a) => a.join(' ').includes('chown -R')), 'volume set-up');
   // Target containers are limited to 2 CPUs (or what the Docker server has).
