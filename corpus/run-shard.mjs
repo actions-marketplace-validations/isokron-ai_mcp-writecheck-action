@@ -150,6 +150,32 @@ export function fill(v, vars) {
 }
 
 /**
+ * The CLI's own template names (`RESERVED_VARS` in mcp-write-safety packages/writecheck/src/core/manifest.ts).
+ * The CLI fills these itself during a run, so the driver never touches them in a manifest.
+ */
+export const CLI_TEMPLATE_NAMES = Object.freeze(['prefix', 'id', 'field', 'value', 'object', 'version', 'key', 'scope', 'marker', 'ids', 'batch', 'missing_id', 'names_inserted', 'position', 'element_id', 'n']);
+
+/** Names only the driver defines: a manifest that uses one the target does not set is a harness error. */
+const DRIVER_NAME = /^(?:tdir|bin|host|pkgdir|host\d+|port\d+)$/;
+
+/**
+ * `{{name}}` templates in a hand-written manifest's text. The manifest also carries the CLI's own
+ * templates ({{id}}, {{field}}, {{value}}, {{version}}, its `vars`, earlier results), which the CLI
+ * renders during the run and which fail loudly there when unknown. So only the driver's names are
+ * filled: the backends' hosts and ports, tdir, bin, pkgdir and the set-up captures. A CLI name is
+ * never filled, even by a capture of the same name; any other name is left as written for the CLI.
+ * A driver name the target does not set (e.g. {{host1}} with one backend) is still a harness error.
+ */
+export function fillManifest(text, vars) {
+  return text.replace(/\{\{([a-zA-Z0-9_]+)\}\}/g, (m, k) => {
+    if (CLI_TEMPLATE_NAMES.includes(k)) return m;
+    if (Object.hasOwn(vars, k)) return String(vars[k]);
+    if (DRIVER_NAME.test(k)) throw new HarnessError(`template variable ${k} is not set`);
+    return m;
+  });
+}
+
+/**
  * The server command as the CLI starts it: through our stderr-tee (corpus/sandbox/stderr-tee.mjs),
  * which leaves stdin and stdout alone, forwards stderr to the CLI in full and keeps its first
  * `cap` bytes in STDERR_DIR. `node` resolves to the image's (the target's bin folder is last on PATH).
@@ -932,7 +958,7 @@ async function runTarget(t, o, ctx, dk) {
       const { step } = await cliStep('init', ['init', '--out', `${P.out}/init-draft.yaml`, ...Object.keys(senv).flatMap((k) => ['--env', k]), '--', ...serverWrap(command)]);
       step.informational = true; // init's result is data: a draft that fails is recorded, not judged
     }
-    const manifestText = t.full?.manifest ? fill(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
+    const manifestText = t.full?.manifest ? fillManifest(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
     await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L('plan'));
     writeFileSync(join(odir, 'writecheck.yaml'), manifestText);
     meta.manifest_sha256 = sha256Text(manifestText);
