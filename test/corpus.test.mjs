@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -18,8 +18,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
   BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
-  dockerEnvFrom, fill, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, shuffled, validateTarget, volumeMount,
+  dockerEnvFrom, fill, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
 } from '../corpus/run-shard.mjs';
+import { MAX_FILES } from '../corpus/sandbox/stderr-tee.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const NAME = 'zz-secret-target-name';
@@ -590,4 +591,70 @@ test('A: a target with a capability outside the allowlist is refused at load; no
   assert.equal(meta('t01').status, 'completed');
   const made = calls.filter((c) => ['run', 'create', 'pull', 'image'].includes(c.argv[0]) || c.argv[1] === 'create');
   assert.ok(!made.some((c) => c.argv.some((x) => x.includes('t06'))), 'nothing of t06 was pulled, started or created');
+});
+
+// ------------------------------------------------------------------------------------------------
+// C1 (triage): the server's stderr is kept, capped, in the encrypted bundle only
+// ------------------------------------------------------------------------------------------------
+
+const TEE = join(root, 'corpus', 'sandbox', 'stderr-tee.mjs');
+const tee = (dir, cap, script) => spawnSync(process.execPath, [TEE, dir, String(cap), '--', process.execPath, '-e', script], { encoding: 'utf8' });
+
+test('C1: stderr-tee forwards stdout and stderr untouched, keeps the first cap bytes of stderr, passes the exit status on', () => {
+  const d = join(mkdtempSync(join(tmpdir(), 'corpus-tee-')), 'server-stderr');
+  const r = tee(d, 100, "process.stdout.write('{\"jsonrpc\":\"2.0\"}\\n'); process.stderr.write('e'.repeat(5000)); process.exitCode = 3;");
+  assert.equal(r.status, 3);
+  assert.equal(r.stdout, '{"jsonrpc":"2.0"}\n', 'stdout is the server\'s, byte for byte');
+  assert.equal(r.stderr, 'e'.repeat(5000), 'the CLI still sees all of stderr');
+  const files = readdirSync(d);
+  assert.equal(files.length, 1);
+  assert.match(files[0], /^01-\d+\.log$/);
+  const kept = readFileSync(join(d, files[0]), 'utf8');
+  assert.ok(kept.startsWith(`${'e'.repeat(100)}\n# 4900 bytes of stderr dropped (cap 100)\n# server exit 3 signal null\n`), kept.slice(0, 300));
+  assert.ok(!kept.includes('e'.repeat(101)));
+});
+
+test('C1: stderr-tee passes a terminating signal on, and keeps at most MAX_FILES files per folder', () => {
+  const d = join(mkdtempSync(join(tmpdir(), 'corpus-tee-')), 'server-stderr');
+  const r = tee(d, 1000, "process.stderr.write('bye\\n'); process.kill(process.pid, 'SIGTERM'); setTimeout(() => {}, 5000);");
+  assert.equal(r.signal, 'SIGTERM');
+  assert.match(readFileSync(join(d, readdirSync(d)[0]), 'utf8'), /^bye\n\n# server exit null signal SIGTERM\n$/);
+  for (let i = readdirSync(d).length; i < MAX_FILES; i++) writeFileSync(join(d, `x${i}`), '');
+  const r2 = tee(d, 1000, "process.stderr.write('more\\n');");
+  assert.equal(r2.status, 0);
+  assert.equal(r2.stderr, 'more\n', 'still forwarded');
+  assert.equal(readdirSync(d).length, MAX_FILES, 'no file past the limit');
+  // A server that cannot start: 127, and the reason on stderr.
+  const r3 = spawnSync(process.execPath, [TEE, d, '10', '--', join(d, 'does-not-exist')], { encoding: 'utf8' });
+  assert.equal(r3.status, 127);
+});
+
+test('C1: init and the catalog manifest start the server through the stderr-tee; a hand-written full manifest is run as written', () => {
+  const w = serverWrap(['/work/bin/srv', '--x'], 1234);
+  assert.deepEqual(w, ['node', '/opt/mwsc/_corpus/stderr-tee.mjs', STDERR_DIR, '1234', '--', '/work/bin/srv', '--x']);
+  assert.ok(STDERR_DIR.startsWith('/work/out/'), 'inside the copied-out (encrypted) folder');
+  const d = stand();
+  const list = JSON.parse(readFileSync(join(d, 'targets.json'), 'utf8'));
+  const t01 = list.targets.find((t) => t.id === 't01');
+  list.targets.push({ ...t01, id: 't12', init: true });
+  list.targets.push({ ...t01, id: 't13', full: { manifest: 'mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\n', confirm: 'x', plan_hash: 'ffffffffffffffff' } }); // drift: plan and catalog only
+  writeFileSync(join(d, 'targets.json'), JSON.stringify(list));
+  const { r, calls, meta } = drive(d, { only: 't12,t13' });
+  assert.equal(r.status, 0, r.stdout);
+  assert.ok(!r.stdout.includes('server stderr') && !r.stdout.includes(NAME) && r.stderr === '', 'nothing of it in the public output');
+  const init = cliRuns(calls).find((a) => a.includes('init') && a.includes('isokron.corpus.target=t12'));
+  assert.deepEqual(init.slice(init.indexOf('--') + 1), ['node', '/opt/mwsc/_corpus/stderr-tee.mjs', STDERR_DIR, String(4 * 1024 * 1024), '--', '/work/bin/srv']);
+  assert.match(readFileSync(join(d, 'out', 't12', 'writecheck.yaml'), 'utf8'), /stdio: \["node", "\/opt\/mwsc\/_corpus\/stderr-tee\.mjs", "\/work\/out\/server-stderr", "\d+", "--", "\/work\/bin\/srv"\]/);
+  assert.equal(readFileSync(join(d, 'out', 't13', 'writecheck.yaml'), 'utf8'), 'mws: "0.9"\nserver:\n  stdio: ["/work/bin/srv"]\n');
+  // The kept stderr came back with the rest of /work/out, under sandbox/ (encrypted bundle), and is listed in meta.
+  const m = meta('t12');
+  assert.equal(m.server_stderr.length, 1);
+  assert.equal(m.server_stderr[0].file, 'sandbox/server-stderr/01-7.log');
+  assert.match(m.server_stderr[0].sha256, /^[0-9a-f]{64}$/);
+  assert.match(readFileSync(join(d, 'out', 't12', 'sandbox', 'server-stderr', '01-7.log'), 'utf8'), /missing setting/);
+  assert.equal(m.isolation.server_stderr_cap, 4 * 1024 * 1024);
+  assert.deepEqual(Object.keys(m.sandbox_tools_sha256).sort(), readdirSync(join(root, 'corpus', 'sandbox')).filter((f) => f.endsWith('.mjs')).sort());
+  // Our helpers went into the CLI volume, read-only for every target container.
+  assert.ok(calls.some((c) => c.argv[0] === 'run' && c.argv.join(' ').includes('/opt/mwsc/_corpus') && c.argv.includes('--interactive')));
+  for (const a of cliRuns(calls)) assert.ok(a.includes('type=volume,src=' + a.find((x) => /src=corpus-\w+-cli,/.test(x))?.split('src=')[1].split(',')[0] + ',dst=/opt/mwsc,readonly'), a.join(' '));
 });

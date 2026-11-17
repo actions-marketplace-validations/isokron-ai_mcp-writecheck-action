@@ -63,6 +63,12 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** In-container paths. /work is the target's own volume; /opt/mwsc and /opt/tools are read-only. */
 export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home' };
 export const CLI_MAIN = `${P.cli}/dist/src/cli/main.js`;
+/** Our own in-container helpers (corpus/sandbox/), read-only beside the CLI. Never target code. */
+export const SANDBOX_TOOLS = `${P.cli}/_corpus`;
+/** Where the server's stderr is kept (inside /work/out: copied out into the encrypted bundle only). */
+export const STDERR_DIR = `${P.out}/server-stderr`;
+/** Bytes of the server's stderr kept per server process (at most 16 processes per target). */
+const STDERR_CAP = Number(process.env.CORPUS_STDERR_CAP || 4 * 1024 * 1024);
 /**
  * Capabilities a backend may ask for (`backends[].cap_add` in the target list); everything else
  * stays dropped, and anything else in the list is refused when the list is loaded. Backends only:
@@ -125,6 +131,15 @@ export function fill(v, vars) {
   if (Array.isArray(v)) return v.map((x) => fill(x, vars));
   if (v && typeof v === 'object') return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, fill(x, vars)]));
   return v;
+}
+
+/**
+ * The server command as the CLI starts it: through our stderr-tee (corpus/sandbox/stderr-tee.mjs),
+ * which leaves stdin and stdout alone, forwards stderr to the CLI in full and keeps its first
+ * `cap` bytes in STDERR_DIR. `node` resolves to the image's (the target's bin folder is last on PATH).
+ */
+export function serverWrap(command, cap = STDERR_CAP) {
+  return ['node', `${SANDBOX_TOOLS}/stderr-tee.mjs`, STDERR_DIR, String(cap), '--', ...command];
 }
 
 /** The generic catalog manifest: the server block and a stub resource (catalog mode calls no tool). */
@@ -724,6 +739,7 @@ async function runTarget(t, o, ctx, dk) {
     spec: ctx.spec,
     runner: ctx.runner,
     images: ctx.imageInfo,
+    sandbox_tools_sha256: ctx.sandboxTools ?? null,
     isolation: ctx.isolation,
     github: ctx.github,
     lane: o.lane,
@@ -843,11 +859,13 @@ async function runTarget(t, o, ctx, dk) {
       meta.steps.push(step);
       return { r, step };
     };
+    // The server's stderr is kept (C1): init and catalog start it through serverWrap. A hand-written
+    // full manifest is run as written (its plan hash was accepted by a person), so it is not wrapped.
     if (t.init !== false) {
-      const { step } = await cliStep('init', ['init', '--out', `${P.out}/init-draft.yaml`, ...Object.keys(senv).flatMap((k) => ['--env', k]), '--', ...command]);
+      const { step } = await cliStep('init', ['init', '--out', `${P.out}/init-draft.yaml`, ...Object.keys(senv).flatMap((k) => ['--env', k]), '--', ...serverWrap(command)]);
       step.informational = true; // init's result is data: a draft that fails is recorded, not judged
     }
-    const manifestText = t.full?.manifest ? fill(t.full.manifest, vars) : catalogManifest(command, Object.keys(senv), `mwsv-corpus-${t.id}`);
+    const manifestText = t.full?.manifest ? fill(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
     await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L('plan'));
     writeFileSync(join(odir, 'writecheck.yaml'), manifestText);
     meta.manifest_sha256 = sha256Text(manifestText);
@@ -925,6 +943,13 @@ async function runTarget(t, o, ctx, dk) {
       await dk.d(['volume', 'rm', '-f', vol], { log: lg });
     }
     for (const n of ['egress', 'run']) await dk.d(['network', 'rm', `corpus-${tag}-${n}`], { log: lg });
+    // The server's stderr, as the stderr-tee kept it (sizes and hashes only in meta; the files stay
+    // in sandbox/server-stderr/, in the encrypted bundle). Target-writable data like the rest.
+    const sdir = join(odir, 'sandbox', 'server-stderr');
+    if (existsSync(sdir) && lstatSync(sdir).isDirectory()) {
+      meta.server_stderr = readdirSync(sdir).sort().filter((f) => lstatSync(join(sdir, f)).isFile())
+        .map((f) => ({ file: `sandbox/server-stderr/${f}`, bytes: lstatSync(join(sdir, f)).size, sha256: sha256File(join(sdir, f)) }));
+    }
     const draft = join(odir, 'sandbox', 'init-draft.yaml');
     if (existsSync(draft) && lstatSync(draft).isFile()) meta.init_draft_sha256 = sha256File(draft);
     const rdir = join(odir, 'sandbox', 'results');
@@ -952,6 +977,22 @@ function cliTar(cliDir) {
     c.stdout.on('data', (x) => chunks.push(x));
     c.on('error', fail);
     c.on('close', (code) => (code === 0 ? done(Buffer.concat(chunks)) : fail(new HarnessError('CLI tar failed'))));
+  });
+}
+
+/** Tar of corpus/sandbox/*.mjs (our helpers that run inside containers), and its sha256. */
+function sandboxToolsTar() {
+  const dir = join(here, 'sandbox');
+  const files = readdirSync(dir).filter((f) => /^[a-z-]+\.mjs$/.test(f)).sort();
+  return new Promise((done, fail) => {
+    const c = spawn('tar', ['-C', dir, '-cf', '-', ...files], { stdio: ['ignore', 'pipe', 'ignore'] });
+    const chunks = [];
+    c.stdout.on('data', (x) => chunks.push(x));
+    c.on('error', fail);
+    c.on('close', (code) => {
+      if (code !== 0) return fail(new HarnessError('sandbox tools tar failed'));
+      done({ buf: Buffer.concat(chunks), sha256: Object.fromEntries(files.map((f) => [f, sha256File(join(dir, f))])) });
+    });
   });
 }
 
@@ -992,7 +1033,7 @@ async function context(o) {
       ? { repository: process.env.GITHUB_REPOSITORY, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, sha: process.env.GITHUB_SHA, workflow: process.env.GITHUB_WORKFLOW, event: process.env.GITHUB_EVENT_NAME }
       : null,
     runId: ((process.env.GITHUB_RUN_ID ?? `l${Date.now().toString(36)}`) + `s${o.shard}`).toLowerCase().replace(/[^a-z0-9]/g, ''),
-    isolation: { kind: 'container', user: SANDBOX_USER, cap_drop: 'ALL', no_new_privileges: true, read_only_root: true, mounts: 'named volumes only', install_network: 'bridge (egress)', run_network: 'internal', cpus: null },
+    isolation: { kind: 'container', user: SANDBOX_USER, cap_drop: 'ALL', no_new_privileges: true, read_only_root: true, mounts: 'named volumes only', install_network: 'bridge (egress)', run_network: 'internal', cpus: null, backend_cap_allowlist: [...BACKEND_CAPS], server_stderr_cap: STDERR_CAP },
   };
 }
 
@@ -1014,6 +1055,10 @@ async function prepareDocker(ctx, dk) {
   ctx.cliVol = await dk.volume(`corpus-${ctx.runId}-cli`, log);
   const tarBuf = await cliTar(ctx.cliDir);
   await must(dk.helper({ mounts: [{ src: ctx.cliVol, dst: P.cli }], stdin: true, cmd: ['tar', '-x', '-f', '-', '--no-same-owner', '-C', P.cli] }, { log, input: tarBuf }), 'CLI volume');
+  // Our in-container helpers (corpus/sandbox/), read-only beside the CLI.
+  const tools = await sandboxToolsTar();
+  ctx.sandboxTools = tools.sha256;
+  await must(dk.helper({ mounts: [{ src: ctx.cliVol, dst: P.cli }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$1" && tar -x -f - --no-same-owner -C "$1"', 'sh', SANDBOX_TOOLS] }, { log, input: tools.buf }), 'sandbox tools');
   ctx.toolsVol = null;
   let toolsReady = null;
   ctx.ensureTools = () => {
@@ -1062,7 +1107,7 @@ async function main() {
     ctx.invalid = invalid;
     dk = new Docker(ctx, join(o.out, '_shard', 'docker.log'));
     await prepareDocker(ctx, dk);
-    const shard = { format: RUN_FORMAT, label: LABEL, lane: o.lane, shard: o.shard, shards: o.shards, targets_list_sha256: createHash('sha256').update(raw).digest('hex'), targets_list_updated: list.updated ?? null, order_seed: seed, order: mine.map((t) => t.id), cli: ctx.cli, spec: ctx.spec, runner: ctx.runner, images: ctx.imageInfo, isolation: ctx.isolation, github: ctx.github, started: now(), targets: [] };
+    const shard = { format: RUN_FORMAT, label: LABEL, lane: o.lane, shard: o.shard, shards: o.shards, targets_list_sha256: createHash('sha256').update(raw).digest('hex'), targets_list_updated: list.updated ?? null, order_seed: seed, order: mine.map((t) => t.id), cli: ctx.cli, spec: ctx.spec, runner: ctx.runner, images: ctx.imageInfo, sandbox_tools_sha256: ctx.sandboxTools, isolation: ctx.isolation, github: ctx.github, started: now(), targets: [] };
     for (const t of mine) {
       const m = await runTarget(t, o, ctx, dk);
       shard.targets.push({ id: t.id, status: m.status, cli_exit: m.cli_exit, public_exit: m.public_exit, results: m.results.map((r) => r.sha256) });

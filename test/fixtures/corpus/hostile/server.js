@@ -8,6 +8,8 @@ try {
   orphan.unref();
 } catch {}
 try { fs.writeFileSync('/work/out/server-was-here.txt', 'x'); } catch {}
+// What a server says on stderr is kept for the record (the corpus's stderr-tee), never printed.
+process.stderr.write('corpus-hostile: started, zz-secret-target-name\n');
 let buf = '';
 const send = (m) => process.stdout.write(JSON.stringify(m) + '\n');
 process.stdin.on('data', (c) => {

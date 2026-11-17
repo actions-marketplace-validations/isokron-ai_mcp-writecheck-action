@@ -47,6 +47,14 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   container and so the server under test, keeps `--cap-drop ALL` with nothing added. No host port is
   published. A backend that does not become ready has its own output (`docker logs`, capped like every
   log) and its container state written to `backend-N.log` in the encrypted bundle before it is removed.
+- The server under test's stderr is kept for the record. The CLI starts the server through
+  `sandbox/stderr-tee.mjs` (ours, read-only in the CLI volume): stdin and stdout pass untouched,
+  stderr goes to the CLI in full as before, and its first 4 MiB per server process (at most 16
+  processes per target; `CORPUS_STDERR_CAP`) are written under `/work/out/server-stderr/`. That folder
+  comes back with the rest of the target's output into the encrypted bundle
+  (`sandbox/server-stderr/`, listed with sizes and sha256s in `meta.json`); nothing of it is printed.
+  Init and the generic catalog manifest are wrapped; a hand-written full manifest is run as written,
+  because its plan hash was accepted as written.
 - Containers get a fixed environment: no GitHub file commands (`GITHUB_ENV`, `GITHUB_STEP_SUMMARY`
   and the rest), no `ACTIONS_*` or `RUNNER_*`, no token, and a `HOME` and caches inside the target's
   own volume.

@@ -143,6 +143,10 @@ test('C1 smoke: a hostile target stays inside its container', { skip, timeout: 6
   // R2-2: the target's own `node` bin never ran our CLI (its bin folder is last on PATH).
   assert.ok(!existsSync(join(sb, 'node-shadowed.txt')), 'the CLI ran under the target\'s node');
   assert.equal(meta.results.length, 1);
+  // The server's stderr was kept (stderr-tee, read-only in the CLI volume), in the bundle only.
+  assert.ok(meta.server_stderr?.length >= 1, 'server stderr kept');
+  assert.ok(meta.server_stderr.some((f) => readFileSync(join(out, 't01', f.file), 'utf8').includes('corpus-hostile: started')));
+  assert.ok(!r.stdout.includes('corpus-hostile') && !r.stdout.includes('zz-secret-target-name'));
 
   // Nothing left: no container, volume or network of the run, and no orphan process on the host.
   for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {

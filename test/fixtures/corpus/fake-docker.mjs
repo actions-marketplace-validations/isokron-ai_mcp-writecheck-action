@@ -85,6 +85,9 @@ if (script.includes('cd /work/out')) {
   process.stderr.write(`${NAME} on stderr\n`);
   if (sub === 'plan') done(0, 'plan hash: 0123456789abcdef\n');
   if (sub === 'catalog') {
+    // What the stderr-tee would have kept of the server's stderr (it runs inside the real container).
+    mkdirSync(inVol('/work/out/server-stderr'), { recursive: true });
+    writeFileSync(inVol('/work/out/server-stderr/01-7.log'), `${NAME} server stderr: missing setting\n# server exit 1 signal null\n`);
     const r = inVol(join(c[c.indexOf('--out') + 1], 'catalog-x'));
     mkdirSync(r, { recursive: true });
     writeFileSync(join(r, 'results.json'), JSON.stringify({ format: 'mws-results/1', run: { status: 'complete' }, results: [{ requirement: 'MWS-ANN-4', verdict: 'violated' }] }));
