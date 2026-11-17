@@ -653,7 +653,8 @@ test('D5: without a clean copy of /work a repeat runs, recorded as fresh_state: 
 
 test('D1 / D5: hostile answers cannot stop a target or the shard: a too-deep initialize, a results.json with an object status', () => {
   const d = stand([{ id: 't01' }, { id: 't02' }]);
-  const deepStatus = JSON.stringify({ run: { status: JSON.parse(`${'['.repeat(100000)}${']'.repeat(100000)}`), writes: 1e400 } });
+  // why: built as text, not with JSON.stringify of a nested value, which overflows the smaller stack of Node 22 (CI).
+  const deepStatus = `{"run":{"status":${'['.repeat(100000)}${']'.repeat(100000)},"writes":1e400}}`;
   const { r, meta } = drive(d, { fake: { 'surface-deep': '100000', 'catalog-results': deepStatus } });
   assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\nrun finished, exit 0\n`);
   for (const id of ['t01', 't02']) {
