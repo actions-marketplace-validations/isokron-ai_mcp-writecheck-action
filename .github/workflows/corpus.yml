@@ -125,7 +125,11 @@ jobs:
           repository: isokron-ai/mcp-write-safety
           ref: ${{ steps.cliref.outputs.ref }}
           path: mws-cli
-          sparse-checkout: packages/writecheck
+          # The spec document at the same commit: the driver records its sha256 (meta.env.spec_sha256).
+          sparse-checkout: |
+            /packages/writecheck/
+            /spec/mws.md
+          sparse-checkout-cone-mode: false
           persist-credentials: false
       - name: Build mcp-writecheck
         run: dogfood/build-cli.sh
