@@ -161,6 +161,18 @@ test('C1 smoke: a hostile target stays inside its container', { skip, timeout: 6
   assert.ok(meta.server_stderr?.length >= 1, 'server stderr kept');
   assert.ok(meta.server_stderr.some((f) => readFileSync(join(out, 't01', f.file), 'utf8').includes('corpus-hostile: started')));
   assert.ok(!r.stdout.includes('corpus-hostile') && !r.stdout.includes('zz-secret-target-name'));
+  // D1, D2, D4 inside the real sandbox: the surface probe reached the server, the versions are the
+  // image's (not the target's shadow `node`), and the package's files were copied from the install.
+  assert.equal(meta.format, 'isokron-corpus-run/3');
+  assert.equal(meta.surface?.tool_count, 2, meta.surface_why);
+  assert.deepEqual(meta.surface.server_info, { name: 'corpus-hostile', version: '1.0.0' });
+  assert.match(meta.surface.sha256_jcs, /^[0-9a-f]{64}$/);
+  assert.equal(JSON.parse(readFileSync(join(out, 't01', 'surface.json'), 'utf8')).tools.tools.length, 2);
+  assert.match(meta.env.node_version ?? '', /^v22\./, meta.env.node_version_why);
+  const cs = Object.fromEntries((meta.config_source ?? []).map((f) => [f.path, f]));
+  assert.equal(cs['pkg/node_modules/corpus-hostile/package.json']?.rule, 'manifest', JSON.stringify(meta.config_source_why ?? meta.config_source));
+  assert.equal(cs['pkg/node_modules/corpus-hostile/server.js']?.rule, 'entry');
+  for (const f of meta.config_source) assert.equal(createHash('sha256').update(readFileSync(join(out, 't01', f.file))).digest('hex'), f.sha256, f.path);
 
   // Nothing left: no container, volume or network of the run, and no orphan process on the host.
   for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
@@ -315,6 +327,49 @@ test('A smoke: a redis backend with the default capabilities reaches ready; with
   assert.match(m('r02').harness_error, /backend 0 not ready/);
   assert.equal(m('r02').backends[0].ready, false);
   assert.match(readFileSync(join(out, 'r02', 'logs', 'backend-0.log'), 'utf8'), /\$ docker logs --timestamps [\s\S]*(Operation not permitted|setpriv|setgroups|su-exec)/);
+  for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
+    assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
+  }
+});
+
+// D against the real daemon (runs on a Mac too: no install scripts): the surface probe reaches a
+// real stdio MCP server inside the sandbox, the versions are the image's, the config source is copied
+// from the unpacked target, and two full repeats run against a backend that is started again and
+// seeded between them, with its snapshot taken before the first and after the last.
+test('D smoke: surface, versions, config source, snapshots and repeats in the real sandbox', { skip, timeout: 300_000 }, () => {
+  const d = mkdtempSync(join(tmpdir(), 'corpus-smoke-d-'));
+  mkdirSync(join(d, 's'));
+  writeFileSync(join(d, 's', 'srv'), `#!/usr/bin/env node\n${readFileSync(join(root, 'test', 'fixtures', 'corpus', 'fake-mcp.mjs'), 'utf8').replace(/^#!.*\n/, '')}`, { mode: 0o755 });
+  writeFileSync(join(d, 's', 'config.json'), '{"port":1}\n');
+  const art = join(d, 's.tgz');
+  spawnSync('tar', ['-czf', art, '-C', join(d, 's'), 'srv', 'config.json'], { env: { ...process.env, COPYFILE_DISABLE: '1' } }); // no AppleDouble files from macOS tar
+  const a = { url: pathToFileURL(art).href, file: 's.tgz', sha256: createHash('sha256').update(readFileSync(art)).digest('hex') };
+  const t = { id: 'd01', lane: 'ci', ecosystem: 'binary', package: 'x', version: '1', init: false, artifact: { 'linux-x64': a, 'linux-arm64': a },
+    server: { command: ['{{bin}}/srv'] },
+    backends: [{ image: images.runtime, port: 7000, args: ['node', '-e', "require('net').createServer((s) => { s.on('error', () => {}); s.end('pong'); }).listen(7000)"],
+      wait: ['node', '-e', "require('net').connect(7000, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"],
+      setup: [{ exec: ['sh', '-c', 'echo seeded >> /tmp/state'] }],
+      snapshot: { exec: ['cat', '/tmp/state'] } }],
+    full: { manifest: 'mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\n', confirm: 'mwsv-d01', plan_hash: '0123456789abcdef', repeats: 2, timeout_s: 120 } };
+  writeFileSync(join(d, 'targets.json'), JSON.stringify({ format: 'isokron-corpus-targets/2', targets: [t] }));
+  const out = join(d, 'out');
+  const r = spawnSync(process.execPath, [join(root, 'corpus', 'run-shard.mjs'), '--targets', join(d, 'targets.json'), '--cli', standInCli(d), '--cli-commit', 'f'.repeat(40), '--out', out], { encoding: 'utf8' });
+  const m = JSON.parse(readFileSync(join(out, 'd01', 'meta.json'), 'utf8'));
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`, m.harness_error);
+  assert.equal(m.format, 'isokron-corpus-run/3');
+  assert.equal(m.surface?.tool_count, 2, m.surface_why);
+  assert.equal(m.surface.tools_pages, 2);
+  assert.deepEqual(m.surface.server_info, { name: 'fake-mcp', version: '0.0.1' });
+  assert.match(m.env.node_version ?? '', /^v22\./, m.env.node_version_why);
+  const cs = Object.fromEntries(m.config_source.map((f) => [f.path, f.rule]));
+  assert.deepEqual(cs, { 'bin/srv': 'entry', 'bin/config.json': 'config' });
+  for (const f of m.config_source) assert.equal(createHash('sha256').update(readFileSync(join(out, 'd01', f.file))).digest('hex'), f.sha256);
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.plan_hash]), [[1, 'completed', '0123456789abcdef'], [2, 'completed', '0123456789abcdef']]);
+  assert.equal(m.backends[0].resets, 1);
+  // Fresh state: the backend was started again, so the seed ran once into an empty /tmp each time.
+  assert.equal(readFileSync(join(out, 'd01', 'backend-0-before.txt'), 'utf8'), 'seeded\n');
+  assert.equal(readFileSync(join(out, 'd01', 'backend-0-after.txt'), 'utf8'), 'seeded\n');
+  assert.equal(m.backend_state[0].repeats.length, 2);
   for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
     assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
   }
