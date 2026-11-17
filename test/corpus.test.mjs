@@ -17,8 +17,8 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
-  backendRunArgs, catalogManifest, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
-  dockerEnvFrom, fill, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, shuffled, volumeMount,
+  BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
+  dockerEnvFrom, fill, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, shuffled, validateTarget, volumeMount,
 } from '../corpus/run-shard.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -101,9 +101,27 @@ test('C1: backends drop every capability but an allowlisted few, and publish no 
   assert.ok(!a.includes('-p') && !a.includes('--publish') && !a.includes('--privileged'));
   assert.equal(a[a.indexOf('--network-alias') + 1], 'b0');
   assert.equal(a[a.indexOf('--cpus') + 1], '2');
-  for (const cap of ['SYS_ADMIN', 'NET_ADMIN', 'ALL', 'SYS_PTRACE']) {
+  for (const cap of ['SYS_ADMIN', 'NET_ADMIN', 'ALL', 'SYS_PTRACE', 'KILL', 'NET_BIND_SERVICE']) {
     assert.throws(() => backendRunArgs({ name: 'b', image: IMG, network: 'n', alias: 'b0', capAdd: [cap] }), /not allowed/);
   }
+  // no-new-privileges and the full drop come before any add.
+  const at = (k) => a.indexOf(k);
+  assert.ok(at('--security-opt') < at('--cap-drop') && at('--cap-drop') < at('--cap-add'), a.join(' '));
+});
+
+test('A: backend capabilities: exactly five allowlisted; the default is those five; anything else refused at load', () => {
+  assert.deepEqual([...BACKEND_CAPS].sort(), ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID']);
+  assert.deepEqual([...BACKEND_DEFAULT_CAPS].sort(), [...BACKEND_CAPS].sort());
+  assert.deepEqual(backendCaps({ image: IMG }).sort(), [...BACKEND_DEFAULT_CAPS].sort(), 'no cap_add: the default');
+  assert.deepEqual(backendCaps({ cap_add: [] }), [], 'an explicit empty list means none');
+  assert.deepEqual(backendCaps({ cap_add: ['SETUID', 'SETGID'] }), ['SETUID', 'SETGID']);
+  for (const bad of [['SYS_ADMIN'], ['CAP_CHOWN'], ['chown'], ['KILL'], ['NET_BIND_SERVICE'], ['ALL'], ['CHOWN', 'CHOWN'], [7], 'CHOWN', { CHOWN: true }, null]) {
+    assert.throws(() => backendCaps({ cap_add: bad }), /cap_add|not allowed|twice/, JSON.stringify(bad));
+    assert.throws(() => validateTarget({ id: 't01', backends: [{ image: IMG, cap_add: bad }] }), /backend 0/, JSON.stringify(bad));
+  }
+  assert.doesNotThrow(() => validateTarget({ id: 't01', backends: [{ image: IMG }, { image: IMG, cap_add: ['CHOWN'] }] }));
+  const a = backendRunArgs({ name: 'b', image: IMG, network: 'n', alias: 'b0', capAdd: backendCaps({}) });
+  assert.deepEqual(a.filter((x, i) => a[i - 1] === '--cap-add').sort(), [...BACKEND_DEFAULT_CAPS].sort());
 });
 
 test('C1 / H3: the docker client and the containers get no GitHub file command, no token, a HOME of their own', () => {
@@ -309,6 +327,8 @@ function stand({ format = 'isokron-corpus-targets/2', extra = [] } = {}) {
     { ...bt('t07', sha), ecosystem: 'npm', artifact: { url: pathToFileURL(art).href, sha256: sha } },
     { ...bt('t08', sha), lane: 'mac', ecosystem: 'npm', artifact: { url: pathToFileURL(art).href, sha256: sha }, lock: npmLock(NAME), install_scripts: true },
     { ...bt('t09', sha), lane: 'mac' },
+    { ...bt('t10', sha), backends: [{ image: IMG, port: 6379, wait: ['true'], wait_timeout_s: 1 }] },
+    { ...bt('t11', sha), backends: [{ image: IMG, port: 6379, cap_add: ['SETUID', 'SETGID'] }] },
     ...extra,
   ] };
   writeFileSync(join(d, 'targets.json'), JSON.stringify(targets));
@@ -493,4 +513,81 @@ test('R2-1: output past the caps is dropped, an oversized results.json is record
   // Captured stdout (the deps step) is cut at the cap; the log keeps a prefix of the cap's size.
   assert.equal(readFileSync(join(d, 'out', 't04', 'deps.json')).length, 1000);
   assert.match(readFileSync(join(d, 'out', 't04', 'logs', 'deps.log'), 'utf8'), /\n(d{40})\n# 4961 bytes of output dropped \(log cap\)/);
+});
+
+// ------------------------------------------------------------------------------------------------
+// A: backend capabilities and logs; the server under test gets no capability
+// ------------------------------------------------------------------------------------------------
+
+const cliRuns = (calls) => calls.filter((c) => c.argv[0] === 'run' && c.argv.includes('/opt/mwsc/dist/src/cli/main.js')).map((c) => c.argv);
+const backendRuns = (calls) => calls.filter((c) => c.argv[0] === 'run' && c.argv.includes('-d')).map((c) => c.argv);
+const adds = (a) => a.filter((x, i) => a[i - 1] === '--cap-add');
+
+test('A: a backend gets the five default capabilities; the CLI and server-under-test container gets none', () => {
+  const d = stand();
+  const { r, calls, meta } = drive(d, { only: 't10,t11' });
+  assert.equal(r.status, 0, r.stdout);
+  const b = backendRuns(calls);
+  assert.equal(b.length, 2);
+  const def = b.find((a) => a.includes('isokron.corpus.target=t10'));
+  assert.deepEqual(adds(def).sort(), [...BACKEND_DEFAULT_CAPS].sort());
+  assert.equal(def[def.indexOf('--cap-drop') + 1], 'ALL');
+  assert.equal(def[def.indexOf('--security-opt') + 1], 'no-new-privileges');
+  assert.ok(def.indexOf('--security-opt') < def.indexOf('--cap-drop') && def.indexOf('--cap-drop') < def.indexOf('--cap-add'));
+  assert.deepEqual(adds(b.find((a) => a.includes('isokron.corpus.target=t11'))), ['SETUID', 'SETGID']);
+  assert.deepEqual(meta('t10').backends[0].cap_add.sort(), [...BACKEND_DEFAULT_CAPS].sort());
+  assert.equal(meta('t10').backends[0].cap_add_default, true);
+  assert.equal(meta('t10').backends[0].ready, true);
+  assert.equal(meta('t11').backends[0].cap_add_default, false);
+  // The server under test runs inside the CLI's container (the CLI starts it): no capability at all.
+  const cli = cliRuns(calls);
+  assert.ok(cli.length >= 4, 'plan and catalog for both targets');
+  for (const a of cli) {
+    assert.equal(a[a.indexOf('--cap-drop') + 1], 'ALL');
+    assert.deepEqual(adds(a), [], a.join(' '));
+    assert.equal(a[a.indexOf('--user') + 1], '10001:10001');
+    assert.ok(a.includes('--read-only') && !a.includes('--privileged'));
+  }
+  // Every other container that runs target code (install, set-up): no capability either.
+  for (const c of calls.filter((x) => x.argv[0] === 'run' && x.argv.includes('10001:10001') && !/-h\d+$/.test(x.argv[x.argv.indexOf('--name') + 1]))) {
+    assert.deepEqual(adds(c.argv), [], c.argv.join(' '));
+  }
+});
+
+test('A: sandboxRunArgs takes no capability (the server-under-test container stays at --cap-drop ALL)', () => {
+  const a = sandboxRunArgs({ name: 'n', image: IMG, network: 'none', mounts, capAdd: ['SETUID'], cap_add: ['SETUID'], cmd: ['node', '/opt/mwsc/dist/src/cli/main.js', 'catalog'] });
+  assert.ok(!a.includes('--cap-add'));
+  assert.equal(a[a.indexOf('--cap-drop') + 1], 'ALL');
+});
+
+test('A: a backend that is not ready: docker logs (capped) and its state go into backend-N.log before the teardown', () => {
+  const d = stand();
+  writeFileSync(join(d, 'fake', 'backend-not-ready'), '');
+  writeFileSync(join(d, 'fake', 'backend-log-bytes'), '5000');
+  const { r, calls, meta } = drive(d, { only: 't10', env: { CORPUS_LOG_CAP: '300' } });
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 125\n`);
+  assert.ok(!r.stdout.includes(NAME) && r.stderr === '');
+  const m = meta('t10');
+  assert.match(m.harness_error, /backend 0 not ready/);
+  assert.equal(m.backends[0].ready, false);
+  assert.equal(m.backends[0].log, 'logs/backend-0.log');
+  const log = readFileSync(join(d, 'out', 't10', 'logs', 'backend-0.log'), 'utf8');
+  assert.match(log, /\$ docker logs --timestamps corpus-\w+-t10-b0/);
+  assert.match(log, /state exited exit 127/);
+  assert.match(log, /bytes of output dropped \(log cap\)/, 'the logs are capped like every other command');
+  assert.ok(!log.includes('L'.repeat(400)));
+  // The logs were read before the teardown removed the container.
+  const i = calls.findIndex((c) => c.argv[0] === 'logs' && c.argv.includes('--timestamps'));
+  const rm = calls.findIndex((c) => c.argv[0] === 'rm');
+  assert.ok(i >= 0 && (rm === -1 || i < rm), 'logs before rm');
+});
+
+test('A: a target with a capability outside the allowlist is refused at load; nothing of it starts, the others run', () => {
+  const d = stand();
+  const { r, calls, meta } = drive(d, { only: 't01,t06' });
+  assert.equal(r.status, 1);
+  assert.match(meta('t06').harness_error, /^refused at load: backend 0: capability SYS_ADMIN is not allowed/);
+  assert.equal(meta('t01').status, 'completed');
+  const made = calls.filter((c) => ['run', 'create', 'pull', 'image'].includes(c.argv[0]) || c.argv[1] === 'create');
+  assert.ok(!made.some((c) => c.argv.some((x) => x.includes('t06'))), 'nothing of t06 was pulled, started or created');
 });

@@ -45,7 +45,15 @@ if (cmd === 'network') {
   if (rest[0] === 'inspect') done(0, `${nets[rest.at(-1)] ? 'true' : 'false'}\n`);
   done(0);
 }
-if (['ps', 'rm', 'logs', 'exec', 'create', 'cp'].includes(cmd)) done(0);
+// A backend that never gets ready (wait fails) and what its logs say (FAKE root files).
+if (cmd === 'exec') done(existsSync(join(root, 'backend-not-ready')) ? 1 : 0);
+if (cmd === 'logs') {
+  const n = existsSync(join(root, 'backend-log-bytes')) ? Number(readFileSync(join(root, 'backend-log-bytes'), 'utf8')) : 0;
+  process.stderr.write(`${NAME} backend: setresuid failed: Operation not permitted\n`);
+  done(0, n ? `${'L'.repeat(n)}\n` : '');
+}
+if (cmd === 'inspect') done(0, 'state exited exit 127 oom false error \n');
+if (['ps', 'rm', 'create', 'cp'].includes(cmd)) done(0);
 if (cmd !== 'run') done(1);
 
 // docker run [options] IMAGE CMD...

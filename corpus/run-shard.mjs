@@ -63,8 +63,18 @@ const here = dirname(fileURLToPath(import.meta.url));
 /** In-container paths. /work is the target's own volume; /opt/mwsc and /opt/tools are read-only. */
 export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home' };
 export const CLI_MAIN = `${P.cli}/dist/src/cli/main.js`;
-/** Capabilities a backend may ask for (`cap_add` in the target list); everything else stays dropped. */
-export const BACKEND_CAPS = new Set(['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETUID', 'SETGID', 'KILL', 'NET_BIND_SERVICE']);
+/**
+ * Capabilities a backend may ask for (`backends[].cap_add` in the target list); everything else
+ * stays dropped, and anything else in the list is refused when the list is loaded. Backends only:
+ * containers that run target code (install, set-up, the CLI and the server under test) get none.
+ */
+export const BACKEND_CAPS = new Set(['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID']);
+/**
+ * A backend without `cap_add` gets exactly these: what the official database images (postgres,
+ * redis, mongo, ...) need to take ownership of their data folder as root and then drop to their own
+ * user. With `--cap-drop ALL` and none of them they exit at once (setresuid: Operation not permitted).
+ */
+export const BACKEND_DEFAULT_CAPS = Object.freeze(['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID']);
 /** Size cap for what one target's outputs may bring back to the host (bytes of tar). */
 const COPY_OUT_CAP = Number(process.env.CORPUS_COPY_OUT_CAP || 1024 * 1024 * 1024);
 /** Time limit of the copy-out helper. */
@@ -223,6 +233,32 @@ export function volumeMount({ src, dst, ro = false }) {
   return `type=volume,src=${src},dst=${dst}${ro ? ',readonly' : ''}`;
 }
 
+/**
+ * The capabilities of one backend: `cap_add` when the entry gives it (a subset of BACKEND_CAPS,
+ * `[]` for none), BACKEND_DEFAULT_CAPS when it does not. Anything else is a harness error.
+ */
+export function backendCaps(b, what = 'backend') {
+  if (b?.cap_add === undefined) return [...BACKEND_DEFAULT_CAPS];
+  if (!Array.isArray(b.cap_add)) throw new HarnessError(`${what}: cap_add must be a list`);
+  const seen = new Set();
+  for (const c of b.cap_add) {
+    if (typeof c !== 'string' || !BACKEND_CAPS.has(c)) throw new HarnessError(`${what}: capability ${typeof c === 'string' ? c.replace(/[^A-Za-z0-9_]/g, '?').slice(0, 32) : typeof c} is not allowed`);
+    if (seen.has(c)) throw new HarnessError(`${what}: capability ${c} is listed twice`);
+    seen.add(c);
+  }
+  return [...b.cap_add];
+}
+
+/**
+ * Checks of one target entry that need no network and start nothing, run for every entry when the
+ * list is loaded: a target that fails them is refused before anything of it is fetched or started.
+ */
+export function validateTarget(t) {
+  checkId(t?.id);
+  if (t.backends !== undefined && !Array.isArray(t.backends)) throw new HarnessError('backends must be a list');
+  for (const [i, b] of (t.backends ?? []).entries()) backendCaps(b, `backend ${i}`);
+}
+
 /** `docker run -d` arguments for one backend: digest-pinned, on the target's internal network only. */
 export function backendRunArgs({ name, image, network, alias, env = {}, args = [], capAdd = [], labels = {}, cpus = CPUS }) {
   checkPinned(image, 'backend');
@@ -231,8 +267,9 @@ export function backendRunArgs({ name, image, network, alias, env = {}, args = [
     'run', '-d', '--name', name,
     ...Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]),
     '--network', network, '--network-alias', alias,
-    '--cap-drop', 'ALL', ...capAdd.flatMap((c) => ['--cap-add', c]),
+    // no-new-privileges and the full drop come first; only the allowlisted adds follow.
     '--security-opt', 'no-new-privileges',
+    '--cap-drop', 'ALL', ...capAdd.flatMap((c) => ['--cap-add', c]),
     '--pids-limit', '1024', '--memory', '2g', '--cpus', String(cpus),
     ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
     image, ...args,
@@ -709,7 +746,8 @@ async function runTarget(t, o, ctx, dk) {
   const tag = `${ctx.runId}-${t.id}`;
   let vol = null;
   try {
-    checkId(t.id);
+    if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
+    validateTarget(t);
     checkLane(t, o.lane);
     // 1. The artifact, on the host: downloaded and checked against the pinned sha256. Never run here.
     const plan = installPlan(t, ctx.plat);
@@ -756,21 +794,38 @@ async function runTarget(t, o, ctx, dk) {
       vars[`host${i}`] = `b${i}`;
       vars[`port${i}`] = String(b.port);
       if (i === 0) vars.host = 'b0';
-      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, vars), args: fill(b.args ?? [], vars), capAdd: b.cap_add ?? [], labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
-      await must(dk.d(argv, { log: L(`backend-${i}`), deadline }), `backend ${i} start`);
-      meta.backends.push({ image, image_id: imageId, container_port: b.port, cap_add: b.cap_add ?? [] });
+      const capAdd = backendCaps(b, `backend ${i}`);
+      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, vars), args: fill(b.args ?? [], vars), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
+      const bm = { image, image_id: imageId, container_port: b.port, cap_add: capAdd, cap_add_default: b.cap_add === undefined, ready: null };
+      meta.backends.push(bm);
+      const blog = L(`backend-${i}`);
+      // A backend that did not come up: its own output (docker logs, capped like every command's log)
+      // and its state go into backend-N.log, in the encrypted bundle, before the teardown removes it.
+      const backendFailed = async (why) => {
+        bm.ready = false;
+        await dk.d(['inspect', '--format', 'state {{.State.Status}} exit {{.State.ExitCode}} oom {{.State.OOMKilled}} error {{.State.Error}}', name], { log: blog, deadline: Date.now() + 30_000 });
+        await dk.d(['logs', '--timestamps', name], { log: blog, deadline: Date.now() + 60_000 });
+        bm.log = `logs/backend-${i}.log`;
+        throw new HarnessError(why);
+      };
+      const started = await dk.d(argv, { log: blog, deadline });
+      if (started.timed_out) throw Object.assign(new HarnessError(`backend ${i} start: time limit`), { timeout: true });
+      if (started.spawn_error || started.exit !== 0) await backendFailed(`backend ${i} start: exit ${started.exit}`);
       const waitUntil = Math.min(deadline, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
       let ok = !b.wait;
       while (!ok && Date.now() < waitUntil) {
-        const w = await dk.d(['exec', name, ...fill(b.wait, vars)], { log: L(`backend-${i}`), deadline });
+        const w = await dk.d(['exec', name, ...fill(b.wait, vars)], { log: blog, deadline });
         ok = w.exit === 0;
         if (!ok) await new Promise((r) => setTimeout(r, 2000));
       }
-      if (!ok) throw new HarnessError(`backend ${i} not ready`);
+      if (!ok) await backendFailed(`backend ${i} not ready`);
       for (const s of b.setup ?? []) {
-        const r = await must(dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, vars)], { log: L(`backend-${i}`), deadline, keepStdout: !!s.capture }), `backend ${i} set-up`);
+        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, vars)], { log: blog, deadline, keepStdout: !!s.capture });
+        if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
+        if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
         if (s.capture) vars[s.capture] = r.stdout.trim().split('\n').pop();
       }
+      bm.ready = true;
     }
 
     // 5. Set-up in the target's work folder, in a sandbox container on the internal network.
@@ -989,6 +1044,14 @@ async function main() {
     if (o.consumeTargets) rmSync(o.targets, { force: true }); // no clear-text list on disk while targets run
     const list = JSON.parse(raw.toString('utf8'));
     if (list.format !== TARGETS_FORMAT) throw new HarnessError('the target list has another format');
+    if (!Array.isArray(list.targets)) throw new HarnessError('the target list has no targets');
+    // Every entry is checked at load (capabilities, set-up forms, ids): one that fails is refused
+    // before anything of it is fetched or started; the others run.
+    const invalid = new Map();
+    for (const t of list.targets) {
+      checkId(t?.id); // an id names folders and containers: a bad one refuses the whole list
+      try { validateTarget(t); } catch (e) { invalid.set(t.id, `refused at load: ${e.message}`); }
+    }
     const seed = process.env.CORPUS_ORDER_SEED || randomBytes(16).toString('hex');
     const mine = shuffled(list.targets
       .filter((t) => (t.lane ?? 'ci') === o.lane && t.enabled !== false)
@@ -996,6 +1059,7 @@ async function main() {
       .filter((_, i) => i % o.shards === o.shard - 1), seed);
     const ctx = await context(o);
     ctx.defaults = list.defaults ?? {};
+    ctx.invalid = invalid;
     dk = new Docker(ctx, join(o.out, '_shard', 'docker.log'));
     await prepareDocker(ctx, dk);
     const shard = { format: RUN_FORMAT, label: LABEL, lane: o.lane, shard: o.shard, shards: o.shards, targets_list_sha256: createHash('sha256').update(raw).digest('hex'), targets_list_updated: list.updated ?? null, order_seed: seed, order: mine.map((t) => t.id), cli: ctx.cli, spec: ctx.spec, runner: ctx.runner, images: ctx.imageInfo, isolation: ctx.isolation, github: ctx.github, started: now(), targets: [] };

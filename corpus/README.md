@@ -38,9 +38,15 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   keeps every container network away from the runner and the cloud metadata addresses; it stops
   the job if forwarded traffic does not pass through its rules. Docker Engine 26.0.0 or later is
   required (older engines let `--internal` networks resolve outside names, CVE-2024-29018).
-- Backends are digest-pinned too, on the internal network only, with every capability dropped
-  except a short allowlist a backend may ask for (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`,
-  `SETGID`, `KILL`, `NET_BIND_SERVICE`). No host port is published.
+- Backends are digest-pinned too, on the internal network only, with `no-new-privileges` and
+  every capability dropped except an allowlist of five: `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`,
+  `SETUID`. A backend gets those five by default (the official postgres, redis and mongo images start
+  as root, take their data folder and drop to their own user, and exit at once without them); an
+  entry can narrow it with `cap_add`. Anything outside the allowlist refuses the entry when the list
+  is loaded. These are for backends only: every container that runs target code, including the CLI's
+  container and so the server under test, keeps `--cap-drop ALL` with nothing added. No host port is
+  published. A backend that does not become ready has its own output (`docker logs`, capped like every
+  log) and its container state written to `backend-N.log` in the encrypted bundle before it is removed.
 - Containers get a fixed environment: no GitHub file commands (`GITHUB_ENV`, `GITHUB_STEP_SUMMARY`
   and the rest), no `ACTIONS_*` or `RUNNER_*`, no token, and a `HOME` and caches inside the target's
   own volume.
@@ -58,6 +64,21 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
 
 What stays on the runner: the decrypted list (deleted by the driver before the first target
 runs), the secrets, the encrypt step and the upload.
+
+## Target list format
+
+The list is `isokron-corpus-targets/2`, encrypted (`targets.json.age`). The fields below were added
+after the format was first written. All are optional and additive, so the format name stays `/2`: a
+list without them reads as before, except that a backend without `cap_add` now gets the default five
+capabilities instead of none.
+
+| Field | Meaning |
+|---|---|
+| `backends[].cap_add` | Optional list, a subset of `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, each at most once. Absent: those five. `[]`: none. Anything else (another capability, a `CAP_` prefix, lower case, a duplicate, not a list) refuses the target when the list is loaded, before anything of it is fetched or started |
+
+Every entry is checked when the list is loaded. An entry that fails is recorded as a harness error
+(`refused at load: ...`, exit 125) and nothing of it runs; the other targets run. A target id that is
+not `[a-z0-9][a-z0-9-]{0,31}` refuses the whole list.
 
 ## What `exit N` means
 
