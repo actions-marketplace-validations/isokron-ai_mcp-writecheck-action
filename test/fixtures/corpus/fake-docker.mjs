@@ -45,7 +45,15 @@ if (cmd === 'network') {
   if (rest[0] === 'inspect') done(0, `${nets[rest.at(-1)] ? 'true' : 'false'}\n`);
   done(0);
 }
-if (['ps', 'rm', 'logs', 'exec', 'create', 'cp'].includes(cmd)) done(0);
+// A backend that never gets ready (wait fails) and what its logs say (FAKE root files).
+if (cmd === 'exec') done(existsSync(join(root, 'backend-not-ready')) ? 1 : 0);
+if (cmd === 'logs') {
+  const n = existsSync(join(root, 'backend-log-bytes')) ? Number(readFileSync(join(root, 'backend-log-bytes'), 'utf8')) : 0;
+  process.stderr.write(`${NAME} backend: setresuid failed: Operation not permitted\n`);
+  done(0, n ? `${'L'.repeat(n)}\n` : '');
+}
+if (cmd === 'inspect') done(0, 'state exited exit 127 oom false error \n');
+if (['ps', 'rm', 'create', 'cp'].includes(cmd)) done(0);
 if (cmd !== 'run') done(1);
 
 // docker run [options] IMAGE CMD...
@@ -71,12 +79,20 @@ if (script.includes('cd /work/out')) {
   if (!existsSync(out)) done(0);
   const t = spawn('tar', ['-C', out, '-cf', '-', '.'], { stdio: ['ignore', 'inherit', 'inherit'] });
   t.on('close', (code) => process.exit(code));
+} else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/fetch.mjs') {
+  // The set-up fetch helper: prints the sha256 it saw (FAKE root `fetch-sha`, else the pinned one).
+  const sha = existsSync(join(root, 'fetch-sha')) ? readFileSync(join(root, 'fetch-sha'), 'utf8').trim() : c[3];
+  const code = existsSync(join(root, 'fetch-exit')) ? Number(readFileSync(join(root, 'fetch-exit'), 'utf8')) : 0;
+  done(code, code === 0 ? `sha256 ${sha} bytes 10\n` : '');
 } else if (c[1] === '/opt/mwsc/dist/src/cli/main.js') {
   const sub = c[2];
   process.stdout.write(`${NAME} violated MWS-ANN-1 ::error::nope\n`);
   process.stderr.write(`${NAME} on stderr\n`);
   if (sub === 'plan') done(0, 'plan hash: 0123456789abcdef\n');
   if (sub === 'catalog') {
+    // What the stderr-tee would have kept of the server's stderr (it runs inside the real container).
+    mkdirSync(inVol('/work/out/server-stderr'), { recursive: true });
+    writeFileSync(inVol('/work/out/server-stderr/01-7.log'), `${NAME} server stderr: missing setting\n# server exit 1 signal null\n`);
     const r = inVol(join(c[c.indexOf('--out') + 1], 'catalog-x'));
     mkdirSync(r, { recursive: true });
     writeFileSync(join(r, 'results.json'), JSON.stringify({ format: 'mws-results/1', run: { status: 'complete' }, results: [{ requirement: 'MWS-ANN-4', verdict: 'violated' }] }));

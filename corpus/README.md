@@ -38,9 +38,23 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   keeps every container network away from the runner and the cloud metadata addresses; it stops
   the job if forwarded traffic does not pass through its rules. Docker Engine 26.0.0 or later is
   required (older engines let `--internal` networks resolve outside names, CVE-2024-29018).
-- Backends are digest-pinned too, on the internal network only, with every capability dropped
-  except a short allowlist a backend may ask for (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETUID`,
-  `SETGID`, `KILL`, `NET_BIND_SERVICE`). No host port is published.
+- Backends are digest-pinned too, on the internal network only, with `no-new-privileges` and
+  every capability dropped except an allowlist of five: `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`,
+  `SETUID`. A backend gets those five by default (the official postgres, redis and mongo images start
+  as root, take their data folder and drop to their own user, and exit at once without them); an
+  entry can narrow it with `cap_add`. Anything outside the allowlist refuses the entry when the list
+  is loaded. These are for backends only: every container that runs target code, including the CLI's
+  container and so the server under test, keeps `--cap-drop ALL` with nothing added. No host port is
+  published. A backend that does not become ready has its own output (`docker logs`, capped like every
+  log) and its container state written to `backend-N.log` in the encrypted bundle before it is removed.
+- The server under test's stderr is kept for the record. The CLI starts the server through
+  `sandbox/stderr-tee.mjs` (ours, read-only in the CLI volume): stdin and stdout pass untouched,
+  stderr goes to the CLI in full as before, and its first 4 MiB per server process (at most 16
+  processes per target; `CORPUS_STDERR_CAP`) are written under `/work/out/server-stderr/`. That folder
+  comes back with the rest of the target's output into the encrypted bundle
+  (`sandbox/server-stderr/`, listed with sizes and sha256s in `meta.json`); nothing of it is printed.
+  Init and the generic catalog manifest are wrapped; a hand-written full manifest is run as written,
+  because its plan hash was accepted as written.
 - Containers get a fixed environment: no GitHub file commands (`GITHUB_ENV`, `GITHUB_STEP_SUMMARY`
   and the rest), no `ACTIONS_*` or `RUNNER_*`, no token, and a `HOME` and caches inside the target's
   own volume.
@@ -58,6 +72,22 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
 
 What stays on the runner: the decrypted list (deleted by the driver before the first target
 runs), the secrets, the encrypt step and the upload.
+
+## Target list format
+
+The list is `isokron-corpus-targets/2`, encrypted (`targets.json.age`). The fields below were added
+after the format was first written. All are optional and additive, so the format name stays `/2`: a
+list without them reads as before, except that a backend without `cap_add` now gets the default five
+capabilities instead of none.
+
+| Field | Meaning |
+|---|---|
+| `setup[]` as `{ "fetch": { "url", "sha256", "dest", "strip_components" } }` | A set-up step may be this object instead of a shell line, so an entry needs no git (the images have none, and set-up has no egress). `url`: https on `github.com`, `codeload.github.com`, `registry.npmjs.org` or `files.pythonhosted.org`, no credentials, port, query or fragment; a GitHub archive must name a 40-hex commit. `sha256`: required, 64 lower-case hex. `dest`: a folder under `/work` (default `src`; not `out`, `home`, `dl`, `pkg`, `venv`, `bin`, `python` or `.fetch`). `strip_components`: 0 to 5 (default 0). Our helper (`sandbox/fetch.mjs`, read-only in the CLI volume; user 10001, no capability, read-only root) fetches it on the install network while no target code runs, follows redirects only to the same hosts, caps it at 256 MiB (`CORPUS_FETCH_CAP`) and checks the sha256; the driver checks the helper's sha256 line against the pin too. Only then is it unpacked by `tar` in a sandbox container with no network. A mismatch or refusal is a harness error and nothing is unpacked. Shell lines and fetch steps run in the order listed; `meta.json` records each fetch (`setup_fetch`) |
+| `backends[].cap_add` | Optional list, a subset of `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, each at most once. Absent: those five. `[]`: none. Anything else (another capability, a `CAP_` prefix, lower case, a duplicate, not a list) refuses the target when the list is loaded, before anything of it is fetched or started |
+
+Every entry is checked when the list is loaded. An entry that fails is recorded as a harness error
+(`refused at load: ...`, exit 125) and nothing of it runs; the other targets run. A target id that is
+not `[a-z0-9][a-z0-9-]{0,31}` refuses the whole list.
 
 ## What `exit N` means
 
@@ -107,4 +137,6 @@ node corpus/run-shard.mjs --targets targets.json --cli <built mcp-writecheck pac
 Unit tests: `node --test test/corpus.test.mjs test/corpus-workflow.test.mjs`. The sandbox against a
 real daemon: `CORPUS_DOCKER_TESTS=1 node --test test/corpus-container.test.mjs` (add
 `CORPUS_SMOKE_CLI=<built mcp-writecheck package>` for the real CLI, `CORPUS_DOCKER_NET=1` for the PyPI
-test, which needs registry egress from containers).
+and set-up fetch tests, which need registry egress from containers, and `CORPUS_INSTALL_CA_FILE`
+behind a TLS-inspecting proxy). The backend test pulls `redis:7-alpine` by digest;
+`CORPUS_BACKEND_SMOKE_IMAGE` names another digest-pinned reference of the same image (a mirror).
