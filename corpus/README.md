@@ -82,6 +82,7 @@ capabilities instead of none.
 
 | Field | Meaning |
 |---|---|
+| `setup[]` as `{ "fetch": { "url", "sha256", "dest", "strip_components" } }` | A set-up step may be this object instead of a shell line, so an entry needs no git (the images have none, and set-up has no egress). `url`: https on `github.com`, `codeload.github.com`, `registry.npmjs.org` or `files.pythonhosted.org`, no credentials, port, query or fragment; a GitHub archive must name a 40-hex commit. `sha256`: required, 64 lower-case hex. `dest`: a folder under `/work` (default `src`; not `out`, `home`, `dl`, `pkg`, `venv`, `bin`, `python` or `.fetch`). `strip_components`: 0 to 5 (default 0). Our helper (`sandbox/fetch.mjs`, read-only in the CLI volume; user 10001, no capability, read-only root) fetches it on the install network while no target code runs, follows redirects only to the same hosts, caps it at 256 MiB (`CORPUS_FETCH_CAP`) and checks the sha256; the driver checks the helper's sha256 line against the pin too. Only then is it unpacked by `tar` in a sandbox container with no network. A mismatch or refusal is a harness error and nothing is unpacked. Shell lines and fetch steps run in the order listed; `meta.json` records each fetch (`setup_fetch`) |
 | `backends[].cap_add` | Optional list, a subset of `CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `SETGID`, `SETUID`, each at most once. Absent: those five. `[]`: none. Anything else (another capability, a `CAP_` prefix, lower case, a duplicate, not a list) refuses the target when the list is loaded, before anything of it is fetched or started |
 
 Every entry is checked when the list is loaded. An entry that fails is recorded as a harness error
@@ -136,4 +137,6 @@ node corpus/run-shard.mjs --targets targets.json --cli <built mcp-writecheck pac
 Unit tests: `node --test test/corpus.test.mjs test/corpus-workflow.test.mjs`. The sandbox against a
 real daemon: `CORPUS_DOCKER_TESTS=1 node --test test/corpus-container.test.mjs` (add
 `CORPUS_SMOKE_CLI=<built mcp-writecheck package>` for the real CLI, `CORPUS_DOCKER_NET=1` for the PyPI
-test, which needs registry egress from containers).
+and set-up fetch tests, which need registry egress from containers, and `CORPUS_INSTALL_CA_FILE`
+behind a TLS-inspecting proxy). The backend test pulls `redis:7-alpine` by digest;
+`CORPUS_BACKEND_SMOKE_IMAGE` names another digest-pinned reference of the same image (a mirror).

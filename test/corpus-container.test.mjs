@@ -254,3 +254,54 @@ test('R2-1 / R2-10 smoke: output floods and a planted fifo cost only that target
     assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
   }
 });
+
+// B against the real daemon: a set-up `fetch` of a registry tarball pinned by sha256 is fetched by
+// our helper, verified and unpacked with no network; the same URL with another sha256 is refused
+// before anything is unpacked. Needs registry egress from containers (CORPUS_DOCKER_NET=1).
+test('B smoke: a set-up fetch is verified before it is unpacked; a wrong sha256 is a harness error', { skip: skipNet, timeout: 300_000 }, () => {
+  const d = mkdtempSync(join(tmpdir(), 'corpus-smoke-fetch-'));
+  const url = 'https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz';
+  const sha = '7b75c1057198cf97696909a9bee176c9c5e9bcb5b03bf3ecef2f484defadd51e';
+  const targets = [
+    binTarget(d, 'f01', { setup: [{ fetch: { url, sha256: sha, dest: 'src', strip_components: 1 } }, 'cp {{tdir}}/src/package.json {{tdir}}/out/fetched.json'] }),
+    binTarget(d, 'f02', { setup: [{ fetch: { url, sha256: '0'.repeat(64) } }, 'touch {{tdir}}/out/never'] }),
+  ];
+  writeFileSync(join(d, 'targets.json'), JSON.stringify({ format: 'isokron-corpus-targets/2', targets }));
+  const out = join(d, 'out');
+  const r = spawnSync(process.execPath, [join(root, 'corpus', 'run-shard.mjs'), '--targets', join(d, 'targets.json'), '--cli', standInCli(d), '--cli-commit', 'f'.repeat(40), '--out', out], { encoding: 'utf8', env: { ...process.env, CORPUS_ORDER_SEED: '00' } });
+  assert.equal(r.stdout.split('\n')[0], LABEL);
+  assert.deepEqual(r.stdout.split('\n').slice(1).filter(Boolean).sort(), ['run finished, exit 0', 'run finished, exit 125']);
+  const m = (id) => JSON.parse(readFileSync(join(out, id, 'meta.json'), 'utf8'));
+  assert.equal(m('f01').status, 'completed', m('f01').harness_error);
+  assert.equal(JSON.parse(readFileSync(join(out, 'f01', 'sandbox', 'fetched.json'), 'utf8')).name, 'is-number');
+  assert.equal(m('f01').setup_fetch[0].sha256, sha);
+  assert.match(m('f02').harness_error, /set-up 0 fetch: refused or failed/);
+  assert.match(readFileSync(join(out, 'f02', 'logs', 'setup.log'), 'utf8'), /is not the pinned 0{64}/);
+  assert.ok(!existsSync(join(out, 'f02', 'sandbox', 'never')));
+  for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
+    assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
+  }
+});
+
+// A: a real database image as a backend, with the default capabilities and nothing else, comes up
+// (it exits at once with --cap-drop ALL alone). CORPUS_BACKEND_SMOKE_IMAGE overrides the image.
+const REDIS = process.env.CORPUS_BACKEND_SMOKE_IMAGE || 'docker.io/library/redis:7-alpine@sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe';
+test('A smoke: a redis backend with the default capabilities reaches ready; with cap_add [] it does not, and its logs are kept', { skip, timeout: 300_000 }, () => {
+  const d = mkdtempSync(join(tmpdir(), 'corpus-smoke-redis-'));
+  const be = (extra) => [{ image: REDIS, port: 6379, wait: ['redis-cli', 'ping'], wait_timeout_s: 30, ...extra }];
+  const targets = [binTarget(d, 'r01', { backends: be({}) }), binTarget(d, 'r02', { backends: be({ cap_add: [] }) })];
+  writeFileSync(join(d, 'targets.json'), JSON.stringify({ format: 'isokron-corpus-targets/2', targets }));
+  const out = join(d, 'out');
+  const r = spawnSync(process.execPath, [join(root, 'corpus', 'run-shard.mjs'), '--targets', join(d, 'targets.json'), '--cli', standInCli(d), '--cli-commit', 'f'.repeat(40), '--out', out], { encoding: 'utf8', env: { ...process.env, CORPUS_ORDER_SEED: '00' } });
+  assert.deepEqual(r.stdout.split('\n').slice(1).filter(Boolean).sort(), ['run finished, exit 0', 'run finished, exit 125']);
+  const m = (id) => JSON.parse(readFileSync(join(out, id, 'meta.json'), 'utf8'));
+  assert.equal(m('r01').status, 'completed', m('r01').harness_error);
+  assert.equal(m('r01').backends[0].ready, true);
+  assert.deepEqual(m('r01').backends[0].cap_add.sort(), ['CHOWN', 'DAC_OVERRIDE', 'FOWNER', 'SETGID', 'SETUID']);
+  assert.match(m('r02').harness_error, /backend 0 not ready/);
+  assert.equal(m('r02').backends[0].ready, false);
+  assert.match(readFileSync(join(out, 'r02', 'logs', 'backend-0.log'), 'utf8'), /\$ docker logs --timestamps [\s\S]*(Operation not permitted|setpriv|setgroups|su-exec)/);
+  for (const kind of [['ps', '-aq'], ['volume', 'ls', '-q'], ['network', 'ls', '-q']]) {
+    assert.equal(spawnSync('docker', [...kind, '--filter', 'label=isokron.corpus.run'], { encoding: 'utf8' }).stdout.trim(), '', kind.join(' '));
+  }
+});

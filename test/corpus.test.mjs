@@ -17,9 +17,10 @@ import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
-  BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
+  BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkFetch, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
   dockerEnvFrom, fill, installPlan, keepRegular, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
 } from '../corpus/run-shard.mjs';
+import { checkListedUrl, FETCH_HOSTS, fetchVerified } from '../corpus/sandbox/fetch.mjs';
 import { MAX_FILES } from '../corpus/sandbox/stderr-tee.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -657,4 +658,139 @@ test('C1: init and the catalog manifest start the server through the stderr-tee;
   // Our helpers went into the CLI volume, read-only for every target container.
   assert.ok(calls.some((c) => c.argv[0] === 'run' && c.argv.join(' ').includes('/opt/mwsc/_corpus') && c.argv.includes('--interactive')));
   for (const a of cliRuns(calls)) assert.ok(a.includes('type=volume,src=' + a.find((x) => /src=corpus-\w+-cli,/.test(x))?.split('src=')[1].split(',')[0] + ',dst=/opt/mwsc,readonly'), a.join(' '));
+});
+
+// ------------------------------------------------------------------------------------------------
+// B: set-up `fetch`: a pinned tarball instead of git
+// ------------------------------------------------------------------------------------------------
+
+const COMMIT = 'c'.repeat(40);
+const GH = `https://github.com/o/r/archive/${COMMIT}.tar.gz`;
+const shaOf = (b) => createHash('sha256').update(b).digest('hex');
+
+/** A stand-in WHATWG fetch: a map of URL to { status, location?, body? }. */
+function fakeFetch(routes, seen = []) {
+  return async (url, opts) => {
+    seen.push({ url, redirect: opts?.redirect });
+    const r = routes[url];
+    if (!r) return new Response(null, { status: 404 });
+    return new Response(r.body ?? null, { status: r.status ?? 200, headers: r.location ? { location: r.location } : {} });
+  };
+}
+
+test('B: fetch URLs: https on allowlisted hosts only; a GitHub archive must name a commit', () => {
+  assert.deepEqual([...FETCH_HOSTS].sort(), ['codeload.github.com', 'files.pythonhosted.org', 'github.com', 'registry.npmjs.org']);
+  assert.equal(checkListedUrl(GH).hostname, 'github.com');
+  assert.ok(checkListedUrl(`https://codeload.github.com/o/r/tar.gz/${COMMIT}`));
+  assert.ok(checkListedUrl('https://registry.npmjs.org/x/-/x-1.0.0.tgz'));
+  for (const bad of [
+    `http://github.com/o/r/archive/${COMMIT}.tar.gz`, 'https://github.com/o/r/archive/main.tar.gz', 'https://github.com/o/r/archive/v1.2.tar.gz',
+    'https://example.com/x.tgz', `https://user:pw@github.com/o/r/archive/${COMMIT}.tar.gz`, `https://github.com:8443/o/r/archive/${COMMIT}.tar.gz`,
+    'https://registry.npmjs.org/x.tgz?y=1', 'https://registry.npmjs.org/x.tgz#f', 'https://169.254.169.254/x.tgz', 'https://localhost/x.tgz', 'file:///etc/passwd', 'git+https://github.com/o/r',
+    'https://registry.npmjs.org/a/%2Fb.tgz',
+  ]) assert.throws(() => checkListedUrl(bad), /fetch:/, bad);
+});
+
+test('B: fetchVerified writes the file only when the sha256 matches; a mismatch is refused and leaves nothing', async () => {
+  const d = mkdtempSync(join(tmpdir(), 'corpus-fetch-'));
+  const body = Buffer.from('tarball bytes');
+  const codeload = `https://codeload.github.com/o/r/tar.gz/${COMMIT}`;
+  const seen = [];
+  const f = fakeFetch({ [GH]: { status: 302, location: codeload }, [codeload]: { body } }, seen);
+  const ok = await fetchVerified({ url: GH, sha256: shaOf(body), out: join(d, 'a', '0.tgz'), cap: 1000, fetchImpl: f });
+  assert.deepEqual(ok, { sha256: shaOf(body), bytes: body.length });
+  assert.deepEqual(readFileSync(join(d, 'a', '0.tgz')), body);
+  assert.ok(seen.every((x) => x.redirect === 'manual'), 'redirects are followed by hand, each one checked');
+  // sha256 mismatch: refused, no file left.
+  await assert.rejects(fetchVerified({ url: GH, sha256: '0'.repeat(64), out: join(d, '1.tgz'), cap: 1000, fetchImpl: f }), /sha256 [0-9a-f]{64} is not the pinned/);
+  assert.ok(!existsSync(join(d, '1.tgz')));
+  // Over the cap: refused, no file left.
+  await assert.rejects(fetchVerified({ url: GH, sha256: shaOf(body), out: join(d, '2.tgz'), cap: 4, fetchImpl: f }), /cap/);
+  assert.ok(!existsSync(join(d, '2.tgz')));
+  // A redirect off the allowlist, or to http: refused before anything is written.
+  for (const location of ['https://evil.example/x.tgz', `http://codeload.github.com/o/r/tar.gz/${COMMIT}`, 'https://169.254.169.254/latest/meta-data']) {
+    await assert.rejects(fetchVerified({ url: GH, sha256: shaOf(body), out: join(d, '3.tgz'), cap: 1000, fetchImpl: fakeFetch({ [GH]: { status: 301, location } }) }), /fetch:/, location);
+    assert.ok(!existsSync(join(d, '3.tgz')));
+  }
+  // A redirect loop, an HTTP error, a missing or malformed sha256.
+  await assert.rejects(fetchVerified({ url: GH, sha256: shaOf(body), out: join(d, '4.tgz'), cap: 1000, fetchImpl: fakeFetch({ [GH]: { status: 302, location: GH } }) }), /too many redirects/);
+  await assert.rejects(fetchVerified({ url: GH, sha256: shaOf(body), out: join(d, '5.tgz'), cap: 1000, fetchImpl: fakeFetch({}) }), /HTTP 404/);
+  await assert.rejects(fetchVerified({ url: GH, sha256: 'ABC', out: join(d, '6.tgz'), cap: 1000, fetchImpl: f }), /sha256 must be/);
+  // The file is created exclusively and never through a symlink (something planted there).
+  symlinkSync(join(d, 'victim'), join(d, '7.tgz'));
+  await assert.rejects(fetchVerified({ url: GH, sha256: shaOf(body), out: join(d, '7.tgz'), cap: 1000, fetchImpl: f }), /EEXIST|ELOOP/);
+  assert.ok(!existsSync(join(d, 'victim')));
+});
+
+test('B: set-up fetch entries are checked at load: sha256 required, allowlisted URL, safe dest, no unknown field', () => {
+  const sha = 'a'.repeat(64);
+  assert.deepEqual(checkFetch({ fetch: { url: GH, sha256: sha } }), { url: GH, sha256: sha, dest: 'src', strip: 0 });
+  assert.deepEqual(checkFetch({ fetch: { url: GH, sha256: sha, dest: 'src/app', strip_components: 1 } }), { url: GH, sha256: sha, dest: 'src/app', strip: 1 });
+  for (const bad of [
+    { fetch: { url: GH } }, { fetch: { url: GH, sha256: 'A'.repeat(64) } }, { fetch: { url: 'https://example.com/x.tgz', sha256: sha } },
+    { fetch: { url: GH, sha256: sha, dest: '../x' } }, { fetch: { url: GH, sha256: sha, dest: '/etc' } }, { fetch: { url: GH, sha256: sha, dest: 'out' } },
+    { fetch: { url: GH, sha256: sha, dest: 'home/.npmrc' } }, { fetch: { url: GH, sha256: sha, dest: 'a/../../b' } }, { fetch: { url: GH, sha256: sha, dest: '.fetch' } },
+    { fetch: { url: GH, sha256: sha, strip_components: 9 } }, { fetch: { url: GH, sha256: sha, strip_components: '1' } },
+    { fetch: { url: GH, sha256: sha, run: 'x' } }, { fetch: { url: GH, sha256: sha }, sh: 'x' }, { git: GH }, ['x'], null, 7,
+  ]) {
+    assert.throws(() => checkFetch(bad), /set-up/, JSON.stringify(bad));
+    assert.throws(() => validateTarget({ id: 't01', setup: ['echo ok', bad] }), /set-up 1/, JSON.stringify(bad));
+  }
+  assert.doesNotThrow(() => validateTarget({ id: 't01', setup: ['echo ok', { fetch: { url: GH, sha256: sha } }] }));
+});
+
+function fetchTargets(d, steps) {
+  const list = JSON.parse(readFileSync(join(d, 'targets.json'), 'utf8'));
+  const t01 = list.targets.find((t) => t.id === 't01');
+  list.targets.push({ ...t01, id: 't14', setup: steps });
+  writeFileSync(join(d, 'targets.json'), JSON.stringify(list));
+}
+
+test('B: a fetch step runs our helper on the install network, then unpacks the verified file with no network', () => {
+  const d = stand();
+  const sha = 'e'.repeat(64);
+  fetchTargets(d, [{ fetch: { url: GH, sha256: sha, dest: 'src', strip_components: 1 } }, 'ls {{tdir}}/src']);
+  const { r, calls, meta } = drive(d, { only: 't14' });
+  assert.equal(r.status, 0, r.stdout);
+  const nets = JSON.parse(readFileSync(join(d, 'fake', 'networks.json'), 'utf8'));
+  const runs = calls.filter((c) => c.argv[0] === 'run').map((c) => c.argv);
+  const fi = runs.findIndex((a) => a.includes('/opt/mwsc/_corpus/fetch.mjs'));
+  const fa = runs[fi];
+  assert.ok(fa, 'the fetch helper ran');
+  assert.equal(nets[fa[fa.indexOf('--network') + 1]], false, 'the install (egress) network');
+  assert.equal(fa[fa.indexOf('--user') + 1], '10001:10001');
+  assert.equal(fa[fa.indexOf('--cap-drop') + 1], 'ALL');
+  assert.ok(!fa.includes('--cap-add') && fa.includes('--read-only') && fa.includes('no-new-privileges'));
+  assert.ok(fa.includes('type=volume,src=' + fa.find((x) => /-cli,dst=/.test(x))?.split('src=')[1].split(',')[0] + ',dst=/opt/mwsc,readonly'), 'our script, read-only');
+  assert.deepEqual(fa.slice(-6), ['node', '/opt/mwsc/_corpus/fetch.mjs', GH, sha, '/work/.fetch/0.tgz', String(256 * 1024 * 1024)]);
+  assert.ok(!fa.some((x) => x.startsWith('PATH=') || x.startsWith('NODE_OPTIONS=')), 'no target environment');
+  const ua = runs[fi + 1];
+  assert.equal(ua[ua.indexOf('--network') + 1], 'none', 'unpack: no network');
+  assert.deepEqual(ua.slice(-4), ['sh', '/work/.fetch/0.tgz', '/work/src', '1']);
+  assert.match(ua.at(-5), /tar -xzf "\$1" -C "\$2" --no-same-owner --no-same-permissions --strip-components="\$3"/);
+  assert.ok(runs.slice(fi + 2).some((a) => a.includes('ls /work/src')), 'the next set-up line runs after it');
+  assert.deepEqual(meta('t14').setup_fetch, [{ step: 0, url: GH, sha256: sha, bytes: 10, dest: 'src', strip_components: 1 }]);
+});
+
+test('B: a sha256 mismatch (helper refusal, or a line that does not match the pin) stops the target before any unpack', () => {
+  for (const [file, val] of [['fetch-exit', '3'], ['fetch-sha', '0'.repeat(64)]]) {
+    const d = stand();
+    writeFileSync(join(d, 'fake', file), val);
+    fetchTargets(d, [{ fetch: { url: GH, sha256: 'e'.repeat(64) } }, 'echo never']);
+    const { r, calls, meta } = drive(d, { only: 't14' });
+    assert.equal(r.stdout, `${LABEL}\nrun finished, exit 125\n`, file);
+    assert.match(meta('t14').harness_error, file === 'fetch-exit' ? /set-up 0 fetch: refused or failed \(exit 3\)/ : /set-up 0 fetch: sha256 is not the pinned one/);
+    assert.ok(!calls.some((c) => c.argv.join(' ').includes('--strip-components')), 'nothing unpacked');
+    assert.ok(!calls.some((c) => c.argv.join(' ').includes('echo never')));
+    assert.deepEqual(meta('t14').setup_fetch, []);
+  }
+});
+
+test('B: a fetch entry outside the rules is refused at load; nothing of it is fetched', () => {
+  const d = stand();
+  fetchTargets(d, [{ fetch: { url: 'https://example.com/x.tgz', sha256: 'e'.repeat(64) } }]);
+  const { r, calls, meta } = drive(d, { only: 't14' });
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 125\n`);
+  assert.match(meta('t14').harness_error, /^refused at load: set-up 0: fetch: host example\.com is not allowlisted/);
+  assert.ok(!calls.some((c) => c.argv[0] === 'run' && c.argv.includes('isokron.corpus.target=t14')));
 });

@@ -15,7 +15,11 @@
  * CLI read-only and the tools read-only). No bind mount of any host path: not the workspace,
  * RUNNER_TEMP, _actions, the home folder or the Docker socket. Install runs on a network with
  * egress; set-up, the CLI and the server run on an --internal network shared only with that
- * target's backends, which are digest-pinned too. Outputs leave the work volume through a helper
+ * target's backends, which are digest-pinned too (backends alone may hold an allowlist of five
+ * capabilities, by default all five; see BACKEND_CAPS). A set-up `fetch` step is fetched by our
+ * helper on the install network and verified by sha256 before a sandbox container unpacks it with
+ * no network. The server's stderr is kept, capped, by our stderr-tee for the encrypted bundle.
+ * Outputs leave the work volume through a helper
  * that copies regular files and folders only, under a size cap. The host keeps the clear-text
  * target list, the secrets, the encrypt step and the upload; no container can reach them.
  *
@@ -49,6 +53,8 @@ import { createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readF
 import { arch, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { checkListedUrl } from './sandbox/fetch.mjs';
 
 export const LABEL = 'automated candidate, unreviewed: not a finding';
 export const RUN_FORMAT = 'isokron-corpus-run/2';
@@ -90,6 +96,10 @@ const LOG_CAP = Number(process.env.CORPUS_LOG_CAP || 64 * 1024 * 1024);
 const BUF_CAP = Number(process.env.CORPUS_BUF_CAP || 16 * 1024 * 1024);
 /** results.json larger than this is recorded by size only, never read into memory. */
 const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 64 * 1024 * 1024);
+/** Size cap of one set-up `fetch` tarball. */
+const FETCH_CAP = Number(process.env.CORPUS_FETCH_CAP || 256 * 1024 * 1024);
+/** Top-level names in /work that a set-up `fetch` may not unpack into (ours, or the install's). */
+const RESERVED_DEST = new Set(['out', 'home', 'dl', 'pkg', 'venv', 'bin', 'python', 'lock.txt', 'writecheck.yaml', '.fetch']);
 /** CPUs per sandbox or backend container (lowered to what the Docker server has). */
 export const CPUS = 2;
 /** Oldest Docker Engine accepted: before 26.0.0, --internal networks still resolved outside names (CVE-2024-29018). */
@@ -272,6 +282,35 @@ export function validateTarget(t) {
   checkId(t?.id);
   if (t.backends !== undefined && !Array.isArray(t.backends)) throw new HarnessError('backends must be a list');
   for (const [i, b] of (t.backends ?? []).entries()) backendCaps(b, `backend ${i}`);
+  if (t.setup !== undefined && !Array.isArray(t.setup)) throw new HarnessError('setup must be a list');
+  for (const [k, s] of (t.setup ?? []).entries()) {
+    if (typeof s === 'string') continue;
+    checkFetch(s, `set-up ${k}`);
+  }
+}
+
+/**
+ * A set-up step of the `fetch` form: `{ fetch: { url, sha256, dest?, strip_components? } }`. The
+ * tarball is fetched by our helper (allowlisted https hosts, every redirect checked), verified
+ * against the pinned sha256, and only then unpacked into /work/<dest> (default `src`) in a sandbox
+ * container with no network. So an entry needs no git. Returns the normalised step.
+ */
+export function checkFetch(s, what = 'set-up') {
+  const f = s?.fetch;
+  if (!s || typeof s !== 'object' || Array.isArray(s) || Object.keys(s).join() !== 'fetch' || !f || typeof f !== 'object' || Array.isArray(f)) {
+    throw new HarnessError(`${what}: a set-up step is a shell line or { fetch: { url, sha256, dest, strip_components } }`);
+  }
+  for (const k of Object.keys(f)) if (!['url', 'sha256', 'dest', 'strip_components'].includes(k)) throw new HarnessError(`${what}: fetch has an unknown field`);
+  if (typeof f.url !== 'string') throw new HarnessError(`${what}: fetch.url`);
+  try { checkListedUrl(f.url); } catch (e) { throw new HarnessError(`${what}: ${e.message}`); }
+  if (typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(f.sha256)) throw new HarnessError(`${what}: fetch.sha256 is required (64 lower-case hex)`);
+  const dest = f.dest ?? 'src';
+  if (typeof dest !== 'string' || !/^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}(\/[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}){0,7}$/.test(dest) || RESERVED_DEST.has(dest.split('/')[0])) {
+    throw new HarnessError(`${what}: fetch.dest must be a relative folder under /work, not one of ours`);
+  }
+  const strip = f.strip_components ?? 0;
+  if (!Number.isInteger(strip) || strip < 0 || strip > 5) throw new HarnessError(`${what}: fetch.strip_components is 0 to 5`);
+  return { url: f.url, sha256: f.sha256, dest, strip };
 }
 
 /** `docker run -d` arguments for one backend: digest-pinned, on the target's internal network only. */
@@ -598,12 +637,14 @@ class Docker {
   }
 
   /** Ours, not target code: root without capabilities except CHOWN, no network, fixed command. */
-  helperArgs({ mounts, cmd, stdin = false, chown = false, user = '0:0', name = null, target = null }) {
+  helperArgs({ mounts, cmd, stdin = false, chown = false, user = '0:0', name = null, target = null, network = 'none', env = {} }) {
     return [
       'run', '--rm', ...(name ? ['--name', name] : []),
       ...Object.entries(this.labels(target ? { 'isokron.corpus.target': target } : {})).flatMap(([k, v]) => ['--label', `${k}=${v}`]),
       '--user', user, '--cap-drop', 'ALL', ...(chown ? ['--cap-add', 'CHOWN'] : []),
-      '--security-opt', 'no-new-privileges', '--read-only', '--network', 'none',
+      // Only the set-up fetch helper (ours, no target code running) is given the install network.
+      '--security-opt', 'no-new-privileges', '--read-only', '--network', network,
+      ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
       ...mounts.flatMap((m) => ['--mount', volumeMount(m)]),
       ...(stdin ? ['--interactive'] : []),
       this.ctx.images.runtime, ...cmd,
@@ -749,6 +790,7 @@ async function runTarget(t, o, ctx, dk) {
     artifact_sha256_verified: null,
     networks: {},
     backends: [],
+    setup_fetch: [],
     deps: null,
     manifest_sha256: null,
     init_draft_sha256: null,
@@ -848,7 +890,26 @@ async function runTarget(t, o, ctx, dk) {
     const command = fill(t.server.command, vars);
     const senv = fill(t.server.env ?? {}, vars);
     const envRun = sandboxEnv(plan.bin, senv);
-    for (const line of t.setup ?? []) {
+    for (const [k, line] of (t.setup ?? []).entries()) {
+      if (typeof line !== 'string') {
+        // B: a pinned tarball instead of a git step. Our helper fetches it on the install network
+        // (no target code runs meanwhile: every sandbox container of the target has exited) and
+        // verifies its sha256; only a verified file is unpacked, by tar in a sandbox container with
+        // no network, as data. The driver checks the helper's sha256 line against the pin as well.
+        const f = checkFetch(line, `set-up ${k}`);
+        const file = `${P.work}/.fetch/${k}.tgz`;
+        const caEnv = envInstall.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: envInstall.NODE_EXTRA_CA_CERTS } : {};
+        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, network: egress.name, env: caEnv, mounts: [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }],
+          cmd: ['node', `${SANDBOX_TOOLS}/fetch.mjs`, f.url, f.sha256, file, String(FETCH_CAP)] }, { log: L('setup'), deadline, keepStdout: true });
+        if (r.timed_out) throw Object.assign(new HarnessError(`set-up ${k} fetch: time limit`), { timeout: true });
+        if (r.spawn_error || r.exit !== 0) throw new HarnessError(`set-up ${k} fetch: refused or failed (exit ${r.exit})`);
+        const got = /^sha256 ([0-9a-f]{64}) bytes (\d+)$/m.exec(r.stdout);
+        if (!got || got[1] !== f.sha256) throw new HarnessError(`set-up ${k} fetch: sha256 is not the pinned one`);
+        meta.setup_fetch.push({ step: k, url: f.url, sha256: got[1], bytes: Number(got[2]), dest: f.dest, strip_components: f.strip });
+        await must(dk.sandbox({ log: L('setup'), deadline, network: 'none', mounts, env: envRun, target: t.id,
+          cmd: ['sh', '-c', 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --no-same-owner --no-same-permissions --strip-components="$3" && rm -f "$1"', 'sh', file, `${P.work}/${f.dest}`, String(f.strip)] }), `set-up ${k} unpack`);
+        continue;
+      }
       await must(dk.sandbox({ log: L('setup'), deadline, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
     }
 

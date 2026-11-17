@@ -79,6 +79,11 @@ if (script.includes('cd /work/out')) {
   if (!existsSync(out)) done(0);
   const t = spawn('tar', ['-C', out, '-cf', '-', '.'], { stdio: ['ignore', 'inherit', 'inherit'] });
   t.on('close', (code) => process.exit(code));
+} else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/fetch.mjs') {
+  // The set-up fetch helper: prints the sha256 it saw (FAKE root `fetch-sha`, else the pinned one).
+  const sha = existsSync(join(root, 'fetch-sha')) ? readFileSync(join(root, 'fetch-sha'), 'utf8').trim() : c[3];
+  const code = existsSync(join(root, 'fetch-exit')) ? Number(readFileSync(join(root, 'fetch-exit'), 'utf8')) : 0;
+  done(code, code === 0 ? `sha256 ${sha} bytes 10\n` : '');
 } else if (c[1] === '/opt/mwsc/dist/src/cli/main.js') {
   const sub = c[2];
   process.stdout.write(`${NAME} violated MWS-ANN-1 ::error::nope\n`);
