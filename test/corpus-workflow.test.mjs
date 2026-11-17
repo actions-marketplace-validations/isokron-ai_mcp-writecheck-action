@@ -21,8 +21,9 @@ const step = (name) => {
   return body.slice(from, to < 0 ? undefined : to);
 };
 
-test('triggers: schedule and dispatch from main only; no pull request trigger', () => {
-  assert.match(body, /^on:\n  schedule:\n    - cron: '17 9 \* \* \*'\n  workflow_dispatch:/m);
+test('triggers: manual dispatch from main only; no schedule, no pull request trigger', () => {
+  assert.match(body, /^on:\n(?:\s*\n)*  workflow_dispatch:\n    inputs:\n      only:/m);
+  assert.doesNotMatch(body, /schedule:|cron:/);
   assert.doesNotMatch(body, /pull_request/);
   assert.match(body, /if: github.repository == 'isokron-ai\/mcp-writecheck-action' && github.ref == 'refs\/heads\/main'/);
   assert.match(body, /^permissions:\n  contents: read\n/m);
@@ -104,4 +105,14 @@ test('M3: a second recipient (a tampered recipients file) fails the step and lea
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /not age ciphertext/);
   assert.throws(() => readdirSync(join(d, 'corpus-upload')));
+});
+
+test('batches: the only input is checked against the ID shape before any secret, and reaches the driver', () => {
+  const check = step('Check the batch');
+  assert.match(check, /ONLY_IN: \$\{\{ inputs\.only \}\}/);
+  assert.match(check, /grep -Eqx 't\[0-9\]\{2,3\}\(,t\[0-9\]\{2,3\}\)\{0,9\}'/);
+  assert.ok(body.indexOf('name: Check the batch') < body.indexOf('secrets.CORPUS_TARGETS_KEY'));
+  assert.doesNotMatch(body, /run:[^\n]*\$\{\{ inputs\.only/);
+  const shard = readFileSync(new URL('../corpus/run-ci-shard.sh', import.meta.url), 'utf8');
+  assert.match(shard, /\$\{CORPUS_ONLY:\+--only "\$CORPUS_ONLY"\}/);
 });
