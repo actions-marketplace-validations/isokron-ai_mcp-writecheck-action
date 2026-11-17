@@ -19,6 +19,7 @@ import {
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
   validateTarget, VERSION_PROBE, checkId, RESERVED_ID,
 } from '../corpus/run-shard.mjs';
+import { listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -729,4 +730,61 @@ test('D5: a volume that exists already is never used as a fresh one (the CLI\'s,
   const r2 = drive(d2, { fake: { 'volume-exists': '-cli\n' } });
   assert.equal(r2.r.stdout, `${LABEL}\nrun finished, exit 125\n`);
   assert.match(readFileSync(join(d2, 'out', '_shard', 'harness-error.txt'), 'utf8'), /volume corpus-\w+-cli exists already/);
+});
+
+test('D5 evidence: moveEvidence moves regular files and folders only, removes the originals, and lists what it moved', () => {
+  const w = mkdtempSync(join(tmpdir(), 'corpus-ev-'));
+  const from = join(w, 'out');
+  const to = join(w, 'evidence');
+  mkdirSync(join(from, 'results', 'full-1', 'r'), { recursive: true });
+  mkdirSync(to);
+  writeFileSync(join(from, 'results', 'full-1', 'r', 'results.json'), '{"run":{}}');
+  writeFileSync(join(from, 'results', 'full-1', 'r', 'report.md'), '# r');
+  symlinkSync('/etc/hosts', join(from, 'results', 'full-1', 'r', 'link'));
+  spawnSync('mkfifo', [join(from, 'results', 'full-1', 'fifo')]);
+  const res = moveEvidence(from, to, ['results/full-1', 'state/full-1']);
+  assert.deepEqual(res.files.map((f) => f.path), ['results/full-1/r/report.md', 'results/full-1/r/results.json']);
+  assert.equal(res.files[1].sha256, sha('{"run":{}}'));
+  assert.equal(res.skipped, 2, 'the symlink and the fifo');
+  assert.deepEqual(res.missing, ['state/full-1']);
+  assert.ok(!existsSync(join(from, 'results', 'full-1')), 'the original is gone');
+  assert.equal(res.sha256, listingHash(res.files));
+  assert.equal(listTree(to, ['results/full-1']).sha256, res.sha256);
+  writeFileSync(join(to, 'results', 'full-1', 'r', 'report.md'), '# changed');
+  assert.notEqual(listTree(to, ['results/full-1']).sha256, res.sha256);
+});
+
+test('D5 evidence: each finished repeat is moved out of /work, hashed, and checked again at copy-out', () => {
+  const d = stand([{ id: 't01', full: fullOf({ repeats: 2 }) }]);
+  const { calls, meta, file } = drive(d, { fake: { 'plant-after-move': '1' } });
+  const m = meta('t01');
+  assert.equal(m.status, 'completed', m.harness_error);
+  for (const fr of m.full_runs) {
+    assert.match(fr.results_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(fr.results_tampered, false);
+    assert.equal(fr.evidence.moved, true);
+    const side = JSON.parse(file('t01', fr.results_files));
+    assert.deepEqual(side.files.map((x) => x.path), [`results/full-${fr.i}/run-${fr.i}/results.json`, `state/full-${fr.i}/ledger.jsonl`]);
+    assert.equal(side.sha256, fr.results_sha256);
+  }
+  // Repeat 2's target code planted a forged repeat-1 result in /work/out: removed, recorded, and the
+  // moved original is what the bundle holds.
+  assert.equal(m.full_runs[0].planted_after_move, true);
+  assert.equal(m.full_runs[0].writes, 11);
+  assert.equal(JSON.parse(file('t01', 'sandbox/results/full-1/run-1/results.json')).run.writes, 11);
+  // The evidence helper: ours, as 10001, no network, bounded; the evidence volume is mounted by helpers only.
+  const ev = calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/_corpus/evidence.mjs'));
+  assert.equal(ev.length, 2);
+  for (const a of ev) {
+    assert.equal(a[a.indexOf('--user') + 1], '10001:10001');
+    assert.equal(a[a.indexOf('--network') + 1], 'none');
+    assert.equal(a[a.indexOf('--memory') + 1], '2g');
+  }
+  for (const a of calls.filter((x) => x[0] === 'run' && !/-h\d+$/.test(x[x.indexOf('--name') + 1] ?? ''))) assert.ok(!a.some((x) => x.includes('dst=/evidence')), a.join(' '));
+  assert.throws(() => sandboxRunArgs({ name: 'n', image: IMG, network: 'none', mounts: [{ src: 'corpus-x-evidence', dst: '/evidence' }], cmd: ['true'] }), /never mounts the evidence/);
+  // A change between the listing and the bundle shows as results_tampered.
+  const d2 = stand([{ id: 't01', full: fullOf() }]);
+  const m2 = drive(d2, { fake: { 'evidence-tamper': '1' } }).meta('t01');
+  assert.equal(m2.full_runs[0].results_tampered, true);
+  assert.match(m2.full_runs[0].results_sha256_in_bundle, /^[0-9a-f]{64}$/);
 });

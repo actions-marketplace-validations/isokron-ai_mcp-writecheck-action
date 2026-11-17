@@ -371,6 +371,14 @@ test('D smoke: surface, versions, config source, snapshots and repeats in the re
   assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.plan_hash]), [[1, 'completed', '0123456789abcdef'], [2, 'completed', '0123456789abcdef']]);
   assert.equal(m.backends[0].resets, 1);
   assert.deepEqual(m.full_runs.map((f) => f.fresh_state), [true, true]);
+  // Each finished repeat was moved into the evidence volume, hashed, and checked again at copy-out.
+  for (const fr of m.full_runs) {
+    assert.equal(fr.evidence?.moved, true, fr.results_sha256_why);
+    assert.match(fr.results_sha256, /^[0-9a-f]{64}$/);
+    assert.equal(fr.results_tampered, false);
+    assert.equal(fr.writes, 2);
+    assert.deepEqual(JSON.parse(readFileSync(join(out, 'd01', fr.results_files), 'utf8')).files.map((x) => x.path), [`results/full-${fr.i}/run-smoke/results.json`]);
+  }
   assert.equal(readFileSync(join(out, 'd01', 'sandbox', 'state-copy.txt'), 'utf8'), 's\n', '/work was restored from its clean copy before the set-up ran again');
   // Fresh state: the backend was started again, so the seed ran once into an empty /tmp each time.
   assert.equal(readFileSync(join(out, 'd01', 'backend-0-before.txt'), 'utf8'), 'seeded\n');

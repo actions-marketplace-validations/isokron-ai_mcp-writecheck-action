@@ -55,6 +55,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sha256Jcs } from './jcs.mjs';
+import { listTree } from './sandbox/evidence.mjs';
 import { checkListedUrl } from './sandbox/fetch.mjs';
 
 export const LABEL = 'automated candidate, unreviewed: not a finding';
@@ -68,7 +69,7 @@ const say = (line) => process.stdout.write(`${line}\n`);
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** In-container paths. /work is the target's own volume; /opt/mwsc and /opt/tools are read-only. */
-export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home', clean: '/clean' };
+export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home', clean: '/clean', evidence: '/evidence' };
 export const CLI_MAIN = `${P.cli}/dist/src/cli/main.js`;
 /** Our own in-container helpers (corpus/sandbox/), read-only beside the CLI. Never target code. */
 export const SANDBOX_TOOLS = `${P.cli}/_corpus`;
@@ -311,8 +312,9 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
     '--workdir', workdir,
   ];
   for (const m of mounts) {
-    // The clean copy of /work (fresh state between full repeats) is for our helpers only.
+    // The clean copy of /work and the finished repeats' evidence are for our helpers only.
     if (m.dst === P.clean) throw new HarnessError('a target container never mounts the clean copy');
+    if (m.dst === P.evidence) throw new HarnessError('a target container never mounts the evidence volume');
     a.push('--mount', volumeMount(m));
   }
   for (const [k, v] of Object.entries(env)) a.push('--env', `${k}=${v}`);
@@ -324,7 +326,7 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
 /** Only named Docker volumes, by a name this script made; never a host path. */
 export function volumeMount({ src, dst, ro = false }) {
   if (!/^corpus-[a-z0-9-]+$/.test(src)) throw new HarnessError('only corpus volumes are mounted');
-  if (!/^\/(work|opt\/mwsc|opt\/tools|clean)$/.test(dst)) throw new HarnessError(`unexpected mount point ${dst}`);
+  if (!/^\/(work|opt\/mwsc|opt\/tools|clean|evidence)$/.test(dst)) throw new HarnessError(`unexpected mount point ${dst}`);
   return `type=volume,src=${src},dst=${dst}${ro ? ',readonly' : ''}`;
 }
 
@@ -1236,6 +1238,7 @@ async function runTarget(t, o, ctx, dk) {
   const backendName = (i) => `corpus-${tag}-b${i}`;
   let vol = null;
   let cleanVol = null;
+  let evidenceVol = null;
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
     validateTarget(t, ctx.dropped);
@@ -1500,6 +1503,35 @@ async function runTarget(t, o, ctx, dk) {
       }
     };
 
+    /**
+     * D5 evidence: once a repeat's CLI container has exited (no target process runs), our helper moves
+     * its results/full-<i> and state/full-<i> out of /work into a volume only our helpers mount, so a
+     * later repeat cannot touch them, and lists every file with its sha256. The listing goes to
+     * full-<i>-files.json and its combined hash to results_sha256; the copy-out is checked against it.
+     */
+    const keepEvidence = async (i, fr) => {
+      const elog = L('evidence');
+      try {
+        if (!evidenceVol) {
+          const ev = await dk.volume(`corpus-${tag}-evidence`, elog);
+          evidenceVol = ev;
+          await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: ev, dst: P.evidence }], cmd: ['sh', '-c', 'chmod 700 /evidence && chown 10001:10001 /evidence'] }, { log: elog, deadline: Date.now() + SMALL_STEP_MS }), 'evidence volume set-up');
+        }
+        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: evidenceVol, dst: P.evidence }, { src: ctx.cliVol, dst: P.cli, ro: true }],
+          cmd: ['node', `${SANDBOX_TOOLS}/evidence.mjs`, P.out, P.evidence, `results/full-${i}`, `state/full-${i}`] }, { log: elog, deadline: Date.now() + CLEAN_MS, keepStdout: true, logStdout: false });
+        const l = safeJson(r.stdout.trim().split('\n').pop() ?? '');
+        if (r.timed_out || r.exit !== 0 || !l || !Array.isArray(l.files) || !/^[0-9a-f]{64}$/.test(l.sha256 ?? '')) throw new HarnessError(`the evidence helper failed (exit ${r.exit}${r.timed_out ? ', time limit' : ''})`);
+        writeFileSync(join(odir, `full-${i}-files.json`), JSON.stringify({ i, sha256: l.sha256, files: l.files }) + '\n');
+        fr.results_sha256 = l.sha256;
+        fr.results_files = `full-${i}-files.json`;
+        fr.evidence = { moved: true, files: l.files.length, skipped: Number.isSafeInteger(l.skipped) ? l.skipped : null, missing: Array.isArray(l.missing) ? l.missing.filter((x) => typeof x === 'string') : [] };
+      } catch (e) {
+        fr.results_sha256 = null;
+        fr.results_sha256_why = String(e?.message ?? e).slice(0, 200);
+        fr.evidence = { moved: false };
+      }
+    };
+
     // 7. plan, catalog, and full where a person accepted the plan hash. The first CLI step that does
     //    not complete decides the target's status; later steps still run when they can.
     const decisive = [];
@@ -1569,6 +1601,7 @@ async function runTarget(t, o, ctx, dk) {
           fr.status = classifyCli(full.step);
           fr.ms = full.step.ms;
           await takeSnapshots('after', i, rd);
+          await keepEvidence(i, fr);
         }
       }
     }
@@ -1655,6 +1688,40 @@ async function runTarget(t, o, ctx, dk) {
         meta.harness_error = c.capped ? 'copy-out: over the size cap' : c.timed_out ? 'copy-out: time limit' : 'copy-out failed';
       }
       await dk.d(['volume', 'rm', '-f', vol], { log: lg });
+    }
+    if (evidenceVol) {
+      // A results/full-<i> or state/full-<i> that came back from /work/out for a moved repeat was made
+      // after the move (by a later repeat's target code): it is removed and recorded, and the moved
+      // evidence takes its place.
+      for (const fr of meta.full_runs) {
+        if (!fr.evidence?.moved) continue;
+        for (const k of ['results', 'state']) {
+          const p = join(odir, 'sandbox', k, `full-${fr.i}`);
+          if (existsSync(p)) {
+            fr.planted_after_move = true;
+            rmSync(p, { recursive: true, force: true });
+          }
+        }
+      }
+      const c = await copyOut(dk, evidenceVol, join(odir, 'sandbox'), lg, t.id, P.work);
+      meta.copy_out_evidence = { bytes: c.bytes, over_cap: c.capped, timed_out: c.timed_out, non_regular_removed: c.removed };
+      if (!c.ok && meta.status === 'completed') {
+        meta.status = 'harness_error';
+        meta.harness_error = 'copy-out of the evidence failed';
+      }
+      await dk.d(['volume', 'rm', '-f', evidenceVol], { log: lg });
+    }
+    for (const fr of meta.full_runs) {
+      if (fr.status === 'not_started') continue;
+      if (!fr.results_sha256) {
+        fr.results_tampered = null;
+        fr.results_tampered_why = 'no listing was made when the repeat ended';
+        continue;
+      }
+      const rels = [`results/full-${fr.i}`, `state/full-${fr.i}`].filter((r) => !(fr.evidence?.missing ?? []).includes(r));
+      const now256 = listTree(join(odir, 'sandbox'), rels).sha256;
+      fr.results_tampered = now256 !== fr.results_sha256;
+      if (fr.results_tampered) fr.results_sha256_in_bundle = now256;
     }
     if (cleanVol) {
       await dk.d(['volume', 'rm', '-f', cleanVol], { log: lg });

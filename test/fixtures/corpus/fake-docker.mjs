@@ -13,6 +13,7 @@ import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
+import { moveEvidence } from '../../../corpus/sandbox/evidence.mjs';
 
 const argv = process.argv.slice(2);
 const root = process.env.FAKE_DOCKER_ROOT;
@@ -115,6 +116,13 @@ if (script.includes('find . -mindepth 1')) {
   const sha = existsSync(join(root, 'fetch-sha')) ? readFileSync(join(root, 'fetch-sha'), 'utf8').trim() : c[3];
   const code = existsSync(join(root, 'fetch-exit')) ? Number(readFileSync(join(root, 'fetch-exit'), 'utf8')) : 0;
   done(code, code === 0 ? `sha256 ${sha} bytes 10\n` : '');
+} else if (c[1] === '/opt/mwsc/_corpus/evidence.mjs') {
+  // The evidence helper, for real, between the fake volumes. FAKE root `evidence-tamper`: a moved file
+  // is changed afterwards (as if our copy-out were not to be trusted).
+  const ev = join(root, 'vols', volAt('/evidence'));
+  const res = moveEvidence(inVol(c[2]), ev, c.slice(4));
+  if (existsSync(join(root, 'evidence-tamper')) && res.files[0]) writeFileSync(join(ev, res.files[0].path), 'tampered');
+  done(0, JSON.stringify(res) + '\n');
 } else if (script.includes('--exclude=./out')) {
   // The clean copy of /work (FAKE root `clean-fail`: it fails).
   done(existsSync(join(root, 'clean-fail')) ? 1 : 0);
