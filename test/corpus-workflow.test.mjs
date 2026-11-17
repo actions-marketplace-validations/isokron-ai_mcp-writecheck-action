@@ -32,16 +32,19 @@ test('M2: the job runs in the corpus environment (its secrets, deployment branch
   assert.match(body, /\n    environment: corpus\n/);
 });
 
-test('MWS_CLI_TOKEN: one checkout step while the CLI is private, none once MWS_CLI_PUBLIC is true', () => {
-  const uses = body.match(/secrets\.MWS_CLI_TOKEN/g) ?? [];
-  assert.equal(uses.length, 1);
-  assert.match(step('Check out mcp-writecheck'), /if: vars\.MWS_CLI_PUBLIC != 'true'[\s\S]*token: \$\{\{ secrets\.MWS_CLI_TOKEN \}\}/);
+test('MWS_CLI_TOKEN: never read; the CLI is checked out without a token, only once MWS_CLI_PUBLIC is true', () => {
+  assert.doesNotMatch(body, /MWS_CLI_TOKEN/);
+  assert.deepEqual(body.match(/secrets\.\w+/g), ['secrets.CORPUS_TARGETS_KEY']);
+  const gate = step('Require MWS_CLI_PUBLIC');
+  assert.match(gate, /if: vars\.MWS_CLI_PUBLIC != 'true'/);
+  assert.match(gate, /exit 1/);
   const pub = step('Check out mcp-writecheck (public)');
-  assert.match(pub, /if: vars\.MWS_CLI_PUBLIC == 'true'/);
-  assert.doesNotMatch(pub, /token:/);
-  // Before any third-party code: both checkouts come before the shard step.
-  assert.ok(body.indexOf('secrets.MWS_CLI_TOKEN') < body.indexOf('corpus/run-ci-shard.sh'));
-  assert.equal((body.match(/secrets\.CORPUS_TARGETS_KEY/g) ?? []).length, 1);
+  assert.match(pub, /repository: isokron-ai\/mcp-write-safety/);
+  assert.doesNotMatch(pub, /token:|if:/);
+  // The gate first, then the checkout, both before any third-party code or the decrypt step.
+  assert.ok(body.indexOf('Require MWS_CLI_PUBLIC') < body.indexOf('Check out mcp-writecheck (public)'));
+  assert.ok(body.indexOf('Check out mcp-writecheck (public)') < body.indexOf('corpus/decrypt-targets.sh'));
+  assert.ok(body.indexOf('corpus/decrypt-targets.sh') < body.indexOf('corpus/run-ci-shard.sh'));
   assert.match(step('Decrypt the target list'), /CORPUS_TARGETS_KEY/);
 });
 

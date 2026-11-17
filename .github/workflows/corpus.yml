@@ -26,9 +26,9 @@
 # Security: schedule and manual dispatch only, from main; no pull_request or pull_request_target, so
 # no pull request (fork or branch) ever runs with a secret. CORPUS_TARGETS_KEY lives only in the
 # `corpus` environment, whose deployment branches are limited to main, and is used only by the
-# decrypt step. MWS_CLI_TOKEN is a repository secret (the dogfood workflows use it), so the
-# environment cannot keep it out: this workflow is first run once the repository variable
-# MWS_CLI_PUBLIC is 'true' (the CLI's repository is public), and then the token is not used at all.
+# decrypt step. The CLI comes from the public isokron-ai/mcp-write-safety without a token: no step
+# of this workflow reads MWS_CLI_TOKEN or any secret but CORPUS_TARGETS_KEY. The job also stops
+# before the checkout unless the repository variable MWS_CLI_PUBLIC is 'true' (set by the owner).
 # Third-party actions are pinned by full SHA.
 
 name: corpus
@@ -82,21 +82,15 @@ jobs:
         env:
           INPUT_REF: ${{ inputs.cli-ref }}
         run: dogfood/cli-ref.sh
-      # The CLI first, before any third-party code runs in this job. While the CLI's repository is
-      # private this is the only step with MWS_CLI_TOKEN; once it is public (repository variable
-      # MWS_CLI_PUBLIC = 'true') the second form runs instead and the token is not used at all.
-      - name: Check out mcp-writecheck
+      # The CLI first, before any third-party code runs in this job. Its repository is public, so the
+      # checkout has no token. Until the owner sets the repository variable MWS_CLI_PUBLIC to 'true',
+      # the job stops here, before the checkout and before anything is decrypted or run.
+      - name: Require MWS_CLI_PUBLIC
         if: vars.MWS_CLI_PUBLIC != 'true'
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: isokron-ai/mcp-write-safety
-          ref: ${{ steps.cliref.outputs.ref }}
-          token: ${{ secrets.MWS_CLI_TOKEN }}
-          path: mws-cli
-          sparse-checkout: packages/writecheck
-          persist-credentials: false
+        run: |
+          echo "::error::set the repository variable MWS_CLI_PUBLIC to true (corpus/README.md)"
+          exit 1
       - name: Check out mcp-writecheck (public)
-        if: vars.MWS_CLI_PUBLIC == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: isokron-ai/mcp-write-safety

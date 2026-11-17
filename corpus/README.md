@@ -93,7 +93,7 @@ A shard fails only when some target's `N` is not 0. A server's verdicts never fa
 | Secret | Where | Use |
 |---|---|---|
 | `CORPUS_TARGETS_KEY` | The `corpus` environment only (deployment branch `main`); never a repository secret, or the environment's branch rule does not protect it | The age identity that decrypts `targets.json.age`; used by one step |
-| `MWS_CLI_TOKEN` | A repository secret (the dogfood workflows use it), so the environment cannot keep it out of this job | Read-only checkout of the CLI while its repository is private. The corpus workflow is enabled only once the repository variable `MWS_CLI_PUBLIC` is `true`: the CLI is then checked out without a token, and the corpus job never holds it |
+| `MWS_CLI_TOKEN` | Not used | The CLI is checked out from the public `isokron-ai/mcp-write-safety` without a token. No step of the workflow reads `MWS_CLI_TOKEN`; the job stops before the checkout unless the repository variable `MWS_CLI_PUBLIC` is `true` |
 
 ## Running the driver locally
 
