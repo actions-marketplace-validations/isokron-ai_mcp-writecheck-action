@@ -15,8 +15,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
-  checkDropped, checkFull, checkSnapshot, entryBin, envVersions, HarnessError, imageParts, LABEL, MAX_FULL_TIMEOUT_S, MAX_REPEATS, NEVER_REUSE_SINCE,
-  surfaceMeta, TARGETS_FORMAT, timeLimits, validateList, validateTarget, VERSION_PROBE,
+  boundAnnotations, checkDropped, checkFull, checkShardBudget, checkSnapshot, CLEAN_COPY, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
+  MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
+  validateTarget, VERSION_PROBE,
 } from '../corpus/run-shard.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
@@ -184,7 +185,9 @@ test('D3: backends[].snapshot is { exec: [strings], user? } and is checked at lo
 });
 
 test('D5 / D8: full.repeats and full.timeout_s are checked; the time limit grows by repeats x full.timeout_s', () => {
-  for (const repeats of [0, 11, 1.5, '3', null]) assert.throws(() => checkFull({ repeats }), /full\.repeats/, String(repeats));
+  assert.equal(MAX_REPEATS, 5);
+  assert.equal(MAX_FULL_TIMEOUT_S, 7200);
+  for (const repeats of [0, 6, 1.5, '3', null]) assert.throws(() => checkFull({ repeats }), /full\.repeats/, String(repeats));
   for (const timeout_s of [0, MAX_FULL_TIMEOUT_S + 1, 2.5, '600']) assert.throws(() => checkFull({ timeout_s }), /full\.timeout_s/, String(timeout_s));
   assert.doesNotThrow(() => checkFull({ repeats: MAX_REPEATS, timeout_s: MAX_FULL_TIMEOUT_S }));
   assert.equal(MAX_REPEATS >= 3, true, 'the complete profile uses 3');
@@ -194,6 +197,8 @@ test('D5 / D8: full.repeats and full.timeout_s are checked; the time limit grows
   assert.deepEqual(timeLimits({ full: { plan_hash: 'x' } }), { base_s: 600, full_s: null, repeats: 1, total_s: 600 });
   assert.equal(timeLimits({ full: { repeats: 3, timeout_s: 60 } }).repeats, 0, 'no accepted plan hash: no full run');
   assert.throws(() => validateTarget({ id: 't01', full: { repeats: 0 } }), /full\.repeats/);
+  for (const timeout_s of [0, MAX_TIMEOUT_S + 1, '600', 1.5]) assert.throws(() => validateTarget({ id: 't01', timeout_s }), /timeout_s must be/);
+  assert.doesNotThrow(() => validateTarget({ id: 't01', timeout_s: 600 }));
 });
 
 test('D6: canary is "good" or "bad"', () => {
@@ -216,8 +221,12 @@ test('D7: a dropped id is never reused, except t08 (grandfathered: reused on 16 
   // validateTarget alone applies the same rule.
   assert.throws(() => validateTarget({ id: 't05' }, dropped), /never reused/);
   assert.doesNotThrow(() => validateTarget({ id: 't08' }, dropped));
-  // The grandfather flag cannot be used for an id dropped on or after the rule's date.
-  assert.throws(() => checkDropped([{ id: 't09', dropped_at: NEVER_REUSE_SINCE, reused_by_grandfathered: true }]), /only for an id dropped before/);
+  // The grandfather flag is for t08 alone, whatever the date; any other id with it refuses the list.
+  assert.deepEqual([...GRANDFATHERED_IDS], ['t08']);
+  assert.throws(() => checkDropped([{ id: 't09', dropped_at: '2026-11-01', reused_by_grandfathered: true }]), /reused_by_grandfathered is only for t08/);
+  assert.throws(() => validateList(list([{ id: 't13', dropped_at: '2026-11-10', reused_by_grandfathered: true }], ['t13'])), /only for t08/);
+  assert.doesNotThrow(() => checkDropped([{ id: 't08', dropped_at: '2026-12-01', reused_by_grandfathered: true }]));
+  assert.doesNotThrow(() => checkDropped([{ id: 't09', dropped_at: '2026-11-01', reused_by_grandfathered: false }]));
   // dropped[] outside its shape refuses the whole list.
   for (const bad of ['t05', [{ id: 't05' }], [{ id: 'T 5', dropped_at: '2026-11-17' }], [{ id: 't05', dropped_at: '17 Nov' }], [{ id: 't05', dropped_at: '2026-11-17', reused_by_grandfathered: 'yes' }], [null]]) {
     assert.throws(() => validateList(list(bad, ['t01'])), HarnessError, JSON.stringify(bad));
@@ -242,8 +251,11 @@ test('D1: surfaceMeta: JCS hash of { initialize, tools }, server info, capabilit
   assert.deepEqual(surface.capabilities_keys, ['logging', 'tools']);
   assert.equal(surface.instructions_sha256, sha('Read first.'));
   assert.equal(surface.tool_count, 2);
-  assert.deepEqual(surface.tools[0], { name: 'get', description_sha256: sha('Read one.'), input_schema_sha256_jcs: sha256Jcs(tools.tools[0].inputSchema), output_schema_sha256_jcs: null, annotations: { readOnlyHint: true } });
+  assert.deepEqual(surface.tools[0], { name: 'get', description_sha256: sha('Read one.'), input_schema_sha256_jcs: sha256Jcs(tools.tools[0].inputSchema), output_schema_sha256_jcs: null, output_schema_sha256_jcs_why: 'absent', annotations: { readOnlyHint: true } });
   assert.equal(surface.tools[1].description_sha256, null);
+  assert.equal(surface.tools[1].description_sha256_why, 'absent');
+  assert.equal(surface.tools[1].annotations, null);
+  assert.equal(surface.tools[1].annotations_why, 'absent');
   assert.equal(surface.tools[1].input_schema_sha256_jcs, surface.tools[0].input_schema_sha256_jcs, 'same schema, other key order: same digest');
   assert.equal(surface.tools[1].output_schema_sha256_jcs, sha256Jcs({ type: 'object' }));
   assert.equal(surface.tools_pages, 1);
@@ -266,6 +278,86 @@ test('D1: surfaceMeta: JCS hash of { initialize, tools }, server info, capabilit
   assert.match(odd.tools[0].input_schema_sha256_jcs_why, /lone surrogate/);
 });
 
+test('D1: the probe\'s output is untrusted: surfaceDoc and surfaceMeta type-check and bound every field', () => {
+  // A forged probe line: wrong types, huge numbers, a non-ISO time, extra keys.
+  const doc = surfaceDoc({ initialize: ['x'], tools: { tools: 'no' }, captured_at: { x: 1 }, pages: 1e300, initialize_error: 'e'.repeat(5000), transport: { exit: 'x'.repeat(100), evil: 1, over_cap: true } });
+  assert.equal(doc.initialize, null);
+  assert.equal(doc.tools, null);
+  assert.match(doc.captured_at, /^\d{4}-\d{2}-\d{2}T.*Z$/);
+  assert.equal(doc.pages, null);
+  assert.equal(doc.initialize_error.length, 500);
+  assert.deepEqual(doc.transport, { exit: 'x'.repeat(16), over_cap: true });
+  assert.equal(doc.protocol_offered, '2025-11-25');
+  // Pages, names, annotations, server info: bounded, else null with a reason.
+  const init = { protocolVersion: 'p'.repeat(65), capabilities: Object.fromEntries(Array.from({ length: 65 }, (_, i) => [`k${i}`, {}])), serverInfo: { name: 'n'.repeat(257), version: 3 } };
+  const many = Array.from({ length: 1005 }, (_, i) => ({ name: i === 0 ? 'x'.repeat(300) : `t${i}`, description: 7, annotations: { readOnlyHint: true, title: 'T', destructiveHint: 'yes', evil: { deep: 1 }, openWorldHint: false } }));
+  const m = surfaceMeta({ initialize: init, tools: { tools: many }, pages: 101 }).surface;
+  assert.equal(m.protocol_version, null);
+  assert.match(m.protocol_version_why, /over 64 characters/);
+  assert.equal(m.capabilities_keys, null);
+  assert.ok(m.capabilities_keys_why);
+  assert.deepEqual(m.server_info, { name: null, version: null, name_why: 'over 256 characters', version_why: 'not a string' });
+  assert.equal(m.tool_count, 1005);
+  assert.equal(m.tools.length, 1000);
+  assert.equal(m.tools_omitted, 5);
+  assert.equal(m.tools[0].name, null);
+  assert.equal(m.tools[0].name_why, 'over 256 characters');
+  assert.equal(m.tools[1].description_sha256, null);
+  assert.equal(m.tools[1].description_sha256_why, 'not a string');
+  assert.deepEqual(m.tools[1].annotations, { readOnlyHint: true, title: 'T', openWorldHint: false });
+  assert.equal(m.tools[1].annotations_dropped, 2);
+  assert.equal(m.tools_pages, null);
+  assert.ok(m.tools_pages_why);
+  assert.equal(surfaceMeta({ initialize: { capabilities: {} }, tools: { tools: [] }, pages: 3 }).surface.tools_pages, 3);
+  assert.deepEqual(boundAnnotations([1]), { annotations: null, annotations_why: 'not an object' });
+  assert.deepEqual(boundAnnotations({ title: 't'.repeat(257) }), { annotations: {}, annotations_dropped: 1 });
+});
+
+test('D4: the config-source listing is untrusted: entries are type-checked and bounded', () => {
+  const ok = { path: 'pkg/node_modules/x/package.json', sha256: 'a'.repeat(64), bytes: 3, rule: 'manifest' };
+  const m = configSourceMeta({ files: [ok, { ...ok, path: '../x' }, { ...ok, path: '/etc/x' }, { ...ok, rule: 'evil' }, { ...ok, bytes: -1 }, { ...ok, sha256: 'z' }, null, ...Array(50).fill(ok)],
+    skipped: [{ path: 'p', bytes: 'x', rule: 'config', why: 'w'.repeat(100) }, 'junk'], skipped_more: 1e300 });
+  assert.deepEqual(m.config_source[0], { ...ok, file: 'sandbox/config-source/pkg/node_modules/x/package.json' });
+  assert.ok(m.config_source.length <= 40);
+  assert.ok(m.config_source.every((f) => f.path === ok.path));
+  assert.deepEqual(m.config_source_skipped, [{ path: 'p', bytes: null, rule: 'config', why: 'w'.repeat(64) }]);
+  assert.equal(m.config_source_skipped_more, undefined);
+  assert.deepEqual(configSourceMeta(null, { exit: 1 }), { config_source: null, config_source_why: 'the config-source helper gave no listing (exit 1)' });
+  assert.equal(configSourceMeta({ files: [], why: 'not found' }).config_source_why, 'not found');
+});
+
+test('D1 / D5: results.json: only run.status (a short string) and run.writes (a finite number) are kept; a large file is not read', () => {
+  const d = mkdtempSync(join(tmpdir(), 'corpus-rf-'));
+  const f = (name, body) => { writeFileSync(join(d, name), body); return join(d, name); };
+  assert.deepEqual(readRunFields(f('a', JSON.stringify({ run: { status: 'complete', writes: 12 } }))), { too_large: false, status: 'complete', writes: 12 });
+  const bad = readRunFields(f('b', JSON.stringify({ run: { status: { nested: [1, 2] }, writes: '12' } })));
+  assert.equal(bad.status, null);
+  assert.ok(bad.status_why);
+  assert.equal(bad.writes, null);
+  assert.ok(bad.writes_why);
+  assert.equal(readRunFields(f('c', JSON.stringify({ run: { status: 's'.repeat(65), writes: 1 } }))).status, null);
+  assert.equal(readRunFields(f('d', 'not json')).why, 'no run object (not JSON, or no run)');
+  const big = readRunFields(f('e', JSON.stringify({ run: { status: 'complete' }, pad: 'x'.repeat(2000) })), 1000);
+  assert.deepEqual(big, { too_large: true, status: null, writes: null, why: 'over 1000 bytes: not read' });
+});
+
+test('D8: the shard\'s planned time must fit one job; the error names the target', () => {
+  assert.equal(SHARD_BUDGET_S, 330 * 60);
+  const full = { plan_hash: 'x', repeats: 3, timeout_s: 3600 };
+  assert.equal(checkShardBudget([{ id: 't01', timeout_s: 600, full }]), 600 + 3 * 3600);
+  assert.throws(() => checkShardBudget([{ id: 't01', timeout_s: 600, full }, { id: 't02', timeout_s: 600, full }]), /shard time budget: with t02 this shard plans 22800 s, over the 19800 s/);
+  assert.equal(checkShardBudget([{ id: 't01', full }, { id: 't02', full }], {}, new Map([['t02', 'refused']])), 11400, 'a refused target costs nothing');
+  assert.throws(() => checkShardBudget([{ id: 't01' }, { id: 't02' }], { timeout_s: 700 }, new Map(), 1000), /with t02/);
+});
+
+test('D5: the clean copy of /work is for our helpers only; its scripts keep links and special files as entries', () => {
+  assert.throws(() => sandboxRunArgs({ name: 'n', image: IMG, network: 'none', mounts: [{ src: 'corpus-x-clean', dst: '/clean' }], cmd: ['true'] }), /never mounts the clean copy/);
+  assert.match(CLEAN_COPY, /--exclude=\.\/out/);
+  assert.match(RESTORE_WORK, /\[ "\$e" = \/work\/out \] && continue/);
+  // tar without -h / --dereference stores a symlink as a link entry; nothing it points to is read.
+  for (const sc of [CLEAN_COPY, RESTORE_WORK]) for (const cmd of sc.match(/tar [^|;&]*/g)) assert.ok(!/(^| )(-[a-zA-Z]*h[a-zA-Z]*|--dereference)( |$)/.test(cmd), cmd);
+});
+
 test('D2: versions from inside the target container, image references, the entry bin', () => {
   assert.deepEqual(envVersions({ exit: 0, stdout: 'node v22.11.0\npython Python 3.12.7\n' }), { node_version: 'v22.11.0', python_version: '3.12.7' });
   assert.deepEqual(envVersions({ exit: 0, stdout: 'node v22.11.0\npython none\n' }), { node_version: 'v22.11.0', python_version: null, python_version_why: "python3 is not on the target container's PATH" });
@@ -273,6 +365,15 @@ test('D2: versions from inside the target container, image references, the entry
   assert.equal(failed.node_version, null);
   assert.match(failed.node_version_why, /did not run \(exit 125\)/);
   assert.match(envVersions({ exit: 0, stdout: 'node -\npython -\n' }).python_version_why, /python3 -V failed/);
+  // The probe's output can be forged by target code: only version-shaped strings of 64 characters at most.
+  for (const v of ['v22;rm', `v${'1'.repeat(64)}`, 'vX', '$(id)']) {
+    const r = envVersions({ exit: 0, stdout: `node ${v}\npython Python ${v.replace(/^v/, '')}\n` });
+    assert.equal(r.node_version, null, v);
+    assert.match(r.node_version_why, /nothing recognisable as a version/);
+    assert.equal(r.python_version, null, v);
+  }
+  assert.equal(envVersions({ exit: 0, stdout: `node v${'1'.repeat(63)}\n` }).node_version.length, 64);
+  assert.equal(envVersions({ exit: 0, stdout: 'python Python 3.13.0rc1+local\n' }).python_version, '3.13.0rc1+local');
   assert.match(VERSION_PROBE, /node -v/);
   assert.deepEqual(imageParts(`docker.io/library/postgres:17@sha256:${'c'.repeat(64)}`), { image_tag: 'docker.io/library/postgres:17', image_digest: `sha256:${'c'.repeat(64)}` });
   assert.deepEqual(imageParts('postgres:16'), { image_tag: 'postgres:16', image_digest: null });
@@ -355,7 +456,7 @@ test('D1 / D2 / D4 / D6: a catalog run records format /3, env, the surface, the 
   assert.equal(m.env.cli_commit, 'f'.repeat(40));
   assert.equal(m.env.cli_version, '0.0.0-test');
   assert.equal(m.env.spec_sha256, sha('# MWS (test)\n'));
-  assert.equal(m.env.spec_text, 'spec/0.9-review@0000000');
+  assert.equal(m.env.spec_ref, 'spec/0.9-review@0000000');
   assert.deepEqual(m.env.backends, []);
   assert.deepEqual(m.env.images, [{ role: 'runtime', image_tag: 'docker.io/library/node:22-bookworm-slim', image_digest: `sha256:${'a'.repeat(64)}` }]);
   // D1: surface.json is the probe's answer; meta.surface is computed from it.
@@ -403,7 +504,7 @@ test('D1 / D2 / D4: the probes run in the target\'s hardened sandbox: user 10001
 });
 
 test('D3 / D5: three repeats against fresh backends; results/full-<i>/; snapshots before the first and after the last (and each repeat)', () => {
-  const d = stand([{ id: 't01', backends: [pg()], full: fullOf({ repeats: 3 }) }]);
+  const d = stand([{ id: 't01', backends: [pg()], setup: ['touch {{tdir}}/seeded'], full: fullOf({ repeats: 3 }) }]);
   const { r, calls, meta, file } = drive(d);
   assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`);
   const m = meta('t01');
@@ -414,8 +515,22 @@ test('D3 / D5: three repeats against fresh backends; results/full-<i>/; snapshot
     [2, 'sandbox/results/full-2', 'completed', 0, HASH, 12, 'complete'],
     [3, 'sandbox/results/full-3', 'completed', 0, HASH, 13, 'complete'],
   ]);
-  assert.equal(m.full_runs[1].reset, 'backends started again from their images and seeded');
+  assert.equal(m.full_runs[1].reset, '/work restored from its clean copy; backends started again from their images and seeded; set-up run again');
+  assert.deepEqual(m.full_runs.map((f) => f.fresh_state), [true, true, true]);
   assert.equal(m.backends[0].resets, 2);
+  // /work: one clean copy after install, restored before repeats 2 and 3; the list's set-up ran three times.
+  const sh = (a) => a[a.length - 1];
+  assert.equal(calls.filter((a) => a[0] === 'run' && sh(a) === CLEAN_COPY).length, 1);
+  const restores = calls.filter((a) => a[0] === 'run' && sh(a) === RESTORE_WORK);
+  assert.equal(restores.length, 2);
+  for (const a of restores) {
+    assert.equal(a[a.indexOf('--user') + 1], '10001:10001');
+    assert.equal(a[a.indexOf('--network') + 1], 'none');
+    assert.ok(a.some((x) => /dst=\/clean,readonly$/.test(x)), a.join(' '));
+  }
+  assert.equal(calls.filter((a) => a[0] === 'run' && a.includes('touch /work/seeded')).length, 3);
+  // No target container ever mounts the clean copy.
+  for (const a of calls.filter((x) => x[0] === 'run' && x.includes('isokron.corpus.target=t01') && !/-h\d+$/.test(x[x.indexOf('--name') + 1]))) assert.ok(!a.some((x) => x.includes('dst=/clean')), a.join(' '));
   assert.ok(m.results.some((x) => x.folder === 'sandbox/results/full-2/run-2'));
   // Each repeat has its own results and state folders.
   const runs = calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/dist/src/cli/main.js') && a.includes('--plan-hash'));
@@ -512,6 +627,36 @@ test('D1 / D4 / D7: a failed probe, a config file changed after the copy, a drop
   const r2 = drive(d2).r;
   assert.equal(r2.stdout, `${LABEL}\nrun finished, exit 125\n`);
   assert.match(readFileSync(join(d2, 'out', '_shard', 'harness-error.txt'), 'utf8'), /dropped 0 \(t05\): dropped_at/);
+});
+
+test('D5: without a clean copy of /work a repeat runs, recorded as fresh_state: false with the reason', () => {
+  const d = stand([{ id: 't01', setup: ['touch {{tdir}}/seeded'], full: fullOf({ repeats: 2 }) }]);
+  const m = drive(d, { fake: { 'clean-fail': '1' } }).meta('t01');
+  assert.equal(m.status, 'completed', m.harness_error);
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.fresh_state]), [[1, 'completed', true], [2, 'completed', false]]);
+  assert.match(m.full_runs[1].fresh_state_why, /no clean copy of \/work: clean copy: exit 1/);
+  assert.equal(m.full_runs[1].reset, 'set-up run again');
+});
+
+test('D1 / D5: hostile answers cannot stop a target or the shard: a too-deep initialize, a results.json with an object status', () => {
+  const d = stand([{ id: 't01' }, { id: 't02' }]);
+  const deepStatus = JSON.stringify({ run: { status: JSON.parse(`${'['.repeat(100000)}${']'.repeat(100000)}`), writes: 1e400 } });
+  const { r, meta } = drive(d, { fake: { 'surface-deep': '100000', 'catalog-results': deepStatus } });
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\nrun finished, exit 0\n`);
+  for (const id of ['t01', 't02']) {
+    const m = meta(id);
+    assert.equal(m.status, 'completed', m.harness_error);
+    assert.equal(m.surface, null);
+    assert.match(m.surface_why, /could not be recorded|gave no answer/);
+    assert.equal(m.results[0].status, null);
+  }
+});
+
+test('D8: a list that plans more than one job allows is refused at load, naming the target', () => {
+  const d = stand([{ id: 't01', timeout_s: 600 }, { id: 't02', timeout_s: 600 }]);
+  const { r } = drive(d, { env: { CORPUS_SHARD_BUDGET_S: '1000' } });
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 125\n`);
+  assert.match(readFileSync(join(d, 'out', '_shard', 'harness-error.txt'), 'utf8'), /shard time budget: with t02 this shard plans 1200 s, over the 1000 s/);
 });
 
 test('D4: config source: nothing is read through a symlink anywhere on its path; a linked package root is refused', () => {

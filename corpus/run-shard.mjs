@@ -49,7 +49,7 @@
 
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { createWriteStream, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, createWriteStream, existsSync, lstatSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -68,7 +68,7 @@ const say = (line) => process.stdout.write(`${line}\n`);
 const here = dirname(fileURLToPath(import.meta.url));
 
 /** In-container paths. /work is the target's own volume; /opt/mwsc and /opt/tools are read-only. */
-export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home' };
+export const P = { work: '/work', out: '/work/out', cli: '/opt/mwsc', tools: '/opt/tools', home: '/work/home', clean: '/clean' };
 export const CLI_MAIN = `${P.cli}/dist/src/cli/main.js`;
 /** Our own in-container helpers (corpus/sandbox/), read-only beside the CLI. Never target code. */
 export const SANDBOX_TOOLS = `${P.cli}/_corpus`;
@@ -101,7 +101,9 @@ const COPY_OUT_MS = 600_000;
 const LOG_CAP = Number(process.env.CORPUS_LOG_CAP || 64 * 1024 * 1024);
 const BUF_CAP = Number(process.env.CORPUS_BUF_CAP || 16 * 1024 * 1024);
 /** results.json larger than this is recorded by size only, never read into memory. */
-const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 64 * 1024 * 1024);
+const JSON_CAP = Number(process.env.CORPUS_JSON_CAP || 32 * 1024 * 1024);
+/** results.json folders recorded per target at most (the folder names are target-writable). */
+const RESULTS_MAX = 200;
 /** Size cap of one set-up `fetch` tarball. */
 const FETCH_CAP = Number(process.env.CORPUS_FETCH_CAP || 256 * 1024 * 1024);
 if (!(Number.isSafeInteger(FETCH_CAP) && FETCH_CAP > 0)) throw new Error('CORPUS_FETCH_CAP must be a positive whole number of bytes');
@@ -119,11 +121,23 @@ export const SURFACE_PROTOCOL = '2025-11-25';
 const SURFACE_MS = Number(process.env.CORPUS_SURFACE_MS || 60_000);
 /** Time limit of the small informational steps: the version probe, the config-source copy, one snapshot. */
 const SMALL_STEP_MS = 120_000;
-/** `full.repeats` and `full.timeout_s` bounds (a GitHub-hosted job stops at 6 h whatever we allow). */
-export const MAX_REPEATS = 10;
-export const MAX_FULL_TIMEOUT_S = 21_600;
-/** A dropped entry may carry reused_by_grandfathered only if it was dropped before the never-reuse rule (17 Nov 2026). */
-export const NEVER_REUSE_SINCE = '2026-11-17';
+/** `full.repeats` and `full.timeout_s` bounds: three repeats of two hours fit one CI job (see SHARD_BUDGET_S). */
+export const MAX_REPEATS = 5;
+export const MAX_FULL_TIMEOUT_S = 7_200;
+/** A target's own `timeout_s` (install to catalog) at most. */
+export const MAX_TIMEOUT_S = 7_200;
+/**
+ * Lane ci: the planned time of one shard (the sum of its targets' limits, timeLimits().total_s) may not
+ * pass this. The corpus job stops at 360 minutes (`timeout-minutes`, GitHub's hosted maximum); 30 are
+ * left for checkout, build, set-up, copy-out, encryption and upload. CORPUS_SHARD_BUDGET_S overrides.
+ */
+export const SHARD_BUDGET_S = Number(process.env.CORPUS_SHARD_BUDGET_S || 330 * 60);
+/**
+ * The only ids that may be reused although they are in dropped[] (`reused_by_grandfathered: true`):
+ * t08 was given to another package on 16 Nov 2026, the day before the never-reuse rule. No other id
+ * may ever carry the flag; a dropped[] entry that does refuses the whole list.
+ */
+export const GRANDFATHERED_IDS = Object.freeze(['t08']);
 
 /** The public exit of one target (see the header). Pure; unit-tested. */
 export function publicExit(t) {
@@ -288,7 +302,11 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
     '--network', network,
     '--workdir', workdir,
   ];
-  for (const m of mounts) a.push('--mount', volumeMount(m));
+  for (const m of mounts) {
+    // The clean copy of /work (fresh state between full repeats) is for our helpers only.
+    if (m.dst === P.clean) throw new HarnessError('a target container never mounts the clean copy');
+    a.push('--mount', volumeMount(m));
+  }
   for (const [k, v] of Object.entries(env)) a.push('--env', `${k}=${v}`);
   if (stdin) a.push('--interactive');
   a.push(image, ...cmd);
@@ -298,7 +316,7 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
 /** Only named Docker volumes, by a name this script made; never a host path. */
 export function volumeMount({ src, dst, ro = false }) {
   if (!/^corpus-[a-z0-9-]+$/.test(src)) throw new HarnessError('only corpus volumes are mounted');
-  if (!/^\/(work|opt\/mwsc|opt\/tools)$/.test(dst)) throw new HarnessError(`unexpected mount point ${dst}`);
+  if (!/^\/(work|opt\/mwsc|opt\/tools|clean)$/.test(dst)) throw new HarnessError(`unexpected mount point ${dst}`);
   return `type=volume,src=${src},dst=${dst}${ro ? ',readonly' : ''}`;
 }
 
@@ -336,6 +354,7 @@ export function validateTarget(t, dropped = []) {
     checkFetch(s, `set-up ${k}`);
   }
   if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
+  if (t.timeout_s !== undefined && !(Number.isInteger(t.timeout_s) && t.timeout_s >= 1 && t.timeout_s <= MAX_TIMEOUT_S)) throw new HarnessError(`timeout_s must be a whole number of seconds from 1 to ${MAX_TIMEOUT_S}`);
   if (t.full !== undefined) checkFull(t.full);
 }
 
@@ -376,8 +395,8 @@ export function timeLimits(t, defaults = {}) {
 /**
  * The list's `dropped[]`: each entry `{ id, dropped_at, reused_by_grandfathered?, ... }`. Checked when
  * the list is loaded; an entry outside this shape refuses the whole list (the never-reuse rule cannot
- * be applied without it). `reused_by_grandfathered: true` is accepted only on an entry dropped before
- * NEVER_REUSE_SINCE (t08, reused once on 16 Nov 2026).
+ * be applied without it). `reused_by_grandfathered: true` is accepted only for an id in
+ * GRANDFATHERED_IDS (t08).
  */
 export function checkDropped(dropped) {
   if (dropped === undefined) return [];
@@ -387,9 +406,26 @@ export function checkDropped(dropped) {
     try { checkId(d.id); } catch { throw new HarnessError(`dropped ${i}: id must match [a-z0-9][a-z0-9-]{0,31}`); }
     if (typeof d.dropped_at !== 'string' || !/^\d{4}-\d{2}-\d{2}(T[0-9:.]+(Z|[+-]\d{2}:\d{2}))?$/.test(d.dropped_at)) throw new HarnessError(`dropped ${i} (${d.id}): dropped_at must be a date (YYYY-MM-DD or an ISO time)`);
     if (d.reused_by_grandfathered !== undefined && typeof d.reused_by_grandfathered !== 'boolean') throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered must be true or false`);
-    if (d.reused_by_grandfathered === true && d.dropped_at.slice(0, 10) >= NEVER_REUSE_SINCE) throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered is only for an id dropped before ${NEVER_REUSE_SINCE}`);
+    if (d.reused_by_grandfathered === true && !GRANDFATHERED_IDS.includes(d.id)) throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered is only for ${GRANDFATHERED_IDS.join(', ')}`);
   }
   return dropped;
+}
+
+/**
+ * Lane ci: the shard's planned time (the targets' timeLimits().total_s, in list order) against
+ * SHARD_BUDGET_S. Throws a harness error naming the first target that passes it, so a list cannot plan
+ * more than one job allows. Targets already refused at load (`invalid`) cost nothing.
+ */
+export function checkShardBudget(targets, defaults = {}, invalid = new Map(), budget = SHARD_BUDGET_S) {
+  let sum = 0;
+  for (const t of targets) {
+    if (invalid.has(t.id)) continue;
+    const s = timeLimits(t, defaults).total_s;
+    if (!Number.isFinite(s) || s < 0) throw new HarnessError(`shard time budget: ${t.id} has no usable time limit`);
+    sum += s;
+    if (sum > budget) throw new HarnessError(`shard time budget: with ${t.id} this shard plans ${sum} s, over the ${budget} s one job allows (timeout_s + repeats x full.timeout_s)`);
+  }
+  return sum;
 }
 
 /** Never reuse an id: a target whose id was dropped is refused, unless every such entry is grandfathered. */
@@ -421,9 +457,25 @@ export function imageParts(ref) {
   return m ? { image_tag: m[1], image_digest: m[2] } : { image_tag: ref ?? null, image_digest: null };
 }
 
+/**
+ * D5 fresh state, run by our helper as the sandbox user with no network. CLEAN_COPY: /work (read-only)
+ * into /clean, without /work/out, after install and before any set-up. RESTORE_WORK: everything in
+ * /work but out/ removed, then /clean copied back. tar keeps symlinks and special files as entries
+ * (never follows or opens them); a failed create is caught through its status file.
+ */
+export const CLEAN_COPY = '{ tar -C /work --sparse --exclude=./out -cf - . ; echo $? > /clean/.create-status; } | tar -C /clean -xpf - '
+  + '&& [ "$(cat /clean/.create-status)" = 0 ] && rm -f /clean/.create-status';
+export const RESTORE_WORK = 'chmod -R u+rwX /work 2>/dev/null; '
+  + 'for e in /work/* /work/.[!.]* /work/..?*; do { [ -e "$e" ] || [ -L "$e" ]; } || continue; [ "$e" = /work/out ] && continue; rm -rf "$e" || exit 1; done; '
+  + '{ tar -C /clean --sparse -cf - . ; echo $? > /work/out/.restore-status; } | tar -C /work -xpf - '
+  + '&& [ "$(cat /work/out/.restore-status)" = 0 ] && rm -f /work/out/.restore-status';
+
 /** The version probe: what `node` and `python3` the server under test would get (the same PATH). */
 export const VERSION_PROBE = 'v=$(node -v 2>/dev/null) && echo "node $v" || echo "node -"; '
   + 'if command -v python3 >/dev/null 2>&1; then v=$(python3 -V 2>&1) && echo "python $v" || echo "python -"; else echo "python none"; fi';
+
+/** A version string as recorded: 64 characters at most. */
+export const VERSION_STRING = /^v?\d[\w.+-]{0,62}$/;
 
 /** The versions the version probe printed inside the target container (null with a reason otherwise). */
 export function envVersions(r) {
@@ -431,12 +483,14 @@ export function envVersions(r) {
   const text = typeof r?.stdout === 'string' ? r.stdout : '';
   const failed = !r || r.timed_out || r.spawn_error || r.exit !== 0;
   const ran = `the version probe did not run (exit ${r?.exit ?? null}${r?.timed_out ? ', time limit' : ''})`;
-  const node = /^node (v\d+\.\d+\.\d+\S*)\s*$/m.exec(text);
-  out.node_version = node ? node[1] : null;
-  if (!node) out.node_version_why = failed ? ran : /^node -$/m.test(text) ? 'node -v failed in the target container' : 'node -v printed nothing recognisable';
-  const py = /^python Python (\d+\.\d+\.\d+\S*)\s*$/m.exec(text);
-  out.python_version = py ? py[1] : null;
-  if (!py) out.python_version_why = failed ? ran : /^python none$/m.test(text) ? "python3 is not on the target container's PATH" : /^python -$/m.test(text) ? 'python3 -V failed in the target container' : 'python3 -V printed nothing recognisable';
+  // The probe's container may run target code (a python3 the target ships), so its output is untrusted:
+  // a version is kept only when it looks like one, 64 characters at most.
+  const node = /^node (\S{1,64})\s*$/m.exec(text);
+  out.node_version = node && VERSION_STRING.test(node[1]) ? node[1] : null;
+  if (!out.node_version) out.node_version_why = failed ? ran : /^node -$/m.test(text) ? 'node -v failed in the target container' : 'node -v printed nothing recognisable as a version';
+  const py = /^python Python (\S{1,64})\s*$/m.exec(text);
+  out.python_version = py && VERSION_STRING.test(py[1]) ? py[1] : null;
+  if (!out.python_version) out.python_version_why = failed ? ran : /^python none$/m.test(text) ? "python3 is not on the target container's PATH" : /^python -$/m.test(text) ? 'python3 -V failed in the target container' : 'python3 -V printed nothing recognisable as a version';
   return out;
 }
 
@@ -445,50 +499,119 @@ const jcsOrWhy = (v) => {
 };
 
 /**
- * `meta.surface` from the probe's output (`s`: { initialize, tools, ... }). Pure; unit-tested.
- * sha256_jcs is over { initialize, tools } (RFC 8785), and only when both answered.
+ * surface.json from the probe's (untrusted) output: initialize and tools kept only as JSON objects,
+ * the other fields type-checked and bounded. The time of capture is the probe's only when it is an
+ * ISO time. Pure; unit-tested.
+ */
+export function surfaceDoc(p) {
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max) : null);
+  const transport = isObj(p.transport) ? Object.fromEntries(['stdout_bytes', 'non_json_lines', 'notifications', 'server_requests', 'exit', 'signal', 'over_cap']
+    .filter((k) => Object.hasOwn(p.transport, k)).map((k) => { const v = p.transport[k]; return [k, Number.isSafeInteger(v) || typeof v === 'boolean' ? v : typeof v === 'string' ? v.slice(0, 16) : null]; })) : null;
+  return {
+    initialize: isObj(p.initialize) ? p.initialize : null,
+    tools: isObj(p.tools) && Array.isArray(p.tools.tools) ? p.tools : null,
+    captured_at: typeof p.captured_at === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/.test(p.captured_at) ? p.captured_at : new Date().toISOString(),
+    protocol_offered: SURFACE_PROTOCOL,
+    initialize_error: str(p.initialize_error, 500),
+    tools_error: str(p.tools_error, 500),
+    pages: Number.isSafeInteger(p.pages) && p.pages >= 0 && p.pages <= SURFACE_BOUNDS.pages ? p.pages : null,
+    transport,
+  };
+}
+
+/** Annotation keys kept in meta.surface.tools[] (the MCP ToolAnnotations), with their value types. */
+export const ANNOTATION_KEYS = Object.freeze({ title: 'string', readOnlyHint: 'boolean', destructiveHint: 'boolean', idempotentHint: 'boolean', openWorldHint: 'boolean' });
+/** Bounds of what meta.surface keeps from the (untrusted) probe output. */
+export const SURFACE_BOUNDS = Object.freeze({ tools: 1000, text: 256, keys: 64, pages: 100 });
+
+const isObj = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+/** A string from the probe kept as is only when short: else null with a reason (never cut). */
+const shortStr = (v, max = SURFACE_BOUNDS.text) => (typeof v !== 'string' ? { v: null, why: v === undefined ? 'absent' : 'not a string' } : v.length > max ? { v: null, why: `over ${max} characters` } : { v });
+
+/** `annotations` reduced to the known keys with values of their type; what was left out is counted. */
+export function boundAnnotations(a) {
+  if (a === undefined || a === null) return { annotations: null, annotations_why: 'absent' };
+  if (!isObj(a)) return { annotations: null, annotations_why: 'not an object' };
+  const out = {};
+  let dropped = 0;
+  for (const k of Object.keys(a)) {
+    const type = Object.hasOwn(ANNOTATION_KEYS, k) ? ANNOTATION_KEYS[k] : null;
+    const v = a[k];
+    if (type && typeof v === type && (type !== 'string' || v.length <= SURFACE_BOUNDS.text)) out[k] = v;
+    else dropped++;
+  }
+  return { annotations: out, ...(dropped ? { annotations_dropped: dropped } : {}) };
+}
+
+/**
+ * `meta.surface` from the probe's output (`s`: { initialize, tools, pages, ... }). Pure; unit-tested.
+ * The probe's stdout is untrusted (the server under test shares its container and user, and can
+ * write to it through /proc), so every field is type-checked and bounded here; sha256_jcs is over
+ * { initialize, tools } (RFC 8785), and only when both answered.
  */
 export function surfaceMeta(s, file = 'surface.json') {
-  if (!s?.initialize) return { surface: null, surface_why: s?.initialize_error ? `initialize: ${String(s.initialize_error).slice(0, 300)}` : 'the surface probe gave no initialize result' };
+  if (!isObj(s) || !isObj(s.initialize)) {
+    const e = isObj(s) && typeof s.initialize_error === 'string' ? s.initialize_error.slice(0, 300) : null;
+    return { surface: null, surface_why: e ? `initialize: ${e}` : 'the surface probe gave no initialize result' };
+  }
   const init = s.initialize;
+  const toolsRes = isObj(s.tools) && Array.isArray(s.tools.tools) ? s.tools : null;
   const m = { file };
-  if (s.tools) {
-    const h = jcsOrWhy({ initialize: init, tools: s.tools });
+  if (toolsRes) {
+    const h = jcsOrWhy({ initialize: init, tools: toolsRes });
     m.sha256_jcs = h.hash;
     if (!h.hash) m.sha256_jcs_why = h.why;
   } else {
     m.sha256_jcs = null;
-    m.sha256_jcs_why = `tools/list did not answer: ${String(s.tools_error ?? 'no result').slice(0, 300)}`;
+    m.sha256_jcs_why = `tools/list did not answer: ${typeof s.tools_error === 'string' ? s.tools_error.slice(0, 300) : 'no result'}`;
   }
-  m.protocol_version = typeof init.protocolVersion === 'string' ? init.protocolVersion : null;
-  if (m.protocol_version === null) m.protocol_version_why = 'initialize gave no protocolVersion string';
-  const si = init.serverInfo && typeof init.serverInfo === 'object' && !Array.isArray(init.serverInfo) ? init.serverInfo : null;
-  m.server_info = si ? { name: typeof si.name === 'string' ? si.name : null, version: typeof si.version === 'string' ? si.version : null } : null;
-  if (!si) m.server_info_why = 'initialize gave no serverInfo';
-  const caps = init.capabilities && typeof init.capabilities === 'object' && !Array.isArray(init.capabilities) ? init.capabilities : null;
-  m.capabilities_keys = caps ? Object.keys(caps).sort() : null;
-  if (!caps) m.capabilities_keys_why = 'initialize gave no capabilities object';
+  const pv = shortStr(init.protocolVersion, 64);
+  m.protocol_version = pv.v;
+  if (pv.v === null) m.protocol_version_why = `initialize protocolVersion: ${pv.why}`;
+  if (isObj(init.serverInfo)) {
+    const n = shortStr(init.serverInfo.name);
+    const v = shortStr(init.serverInfo.version, 64);
+    m.server_info = { name: n.v, version: v.v, ...(n.v === null ? { name_why: n.why } : {}), ...(v.v === null ? { version_why: v.why } : {}) };
+  } else {
+    m.server_info = null;
+    m.server_info_why = 'initialize gave no serverInfo';
+  }
+  if (isObj(init.capabilities)) {
+    const keys = Object.keys(init.capabilities);
+    m.capabilities_keys = keys.length <= SURFACE_BOUNDS.keys && keys.every((k) => k.length <= 64) ? keys.sort() : null;
+    if (!m.capabilities_keys) m.capabilities_keys_why = `over ${SURFACE_BOUNDS.keys} keys or a key over 64 characters`;
+  } else {
+    m.capabilities_keys = null;
+    m.capabilities_keys_why = 'initialize gave no capabilities object';
+  }
   m.instructions_sha256 = typeof init.instructions === 'string' ? sha256Text(init.instructions) : null;
-  if (m.instructions_sha256 === null) m.instructions_sha256_why = 'the server gave no instructions';
-  const tools = Array.isArray(s.tools?.tools) ? s.tools.tools : null;
+  if (m.instructions_sha256 === null) m.instructions_sha256_why = init.instructions === undefined ? 'the server gave no instructions' : 'instructions is not a string';
+  const tools = toolsRes ? toolsRes.tools : null;
   m.tool_count = tools ? tools.length : null;
   if (!tools) m.tool_count_why = 'tools/list did not answer';
-  m.tools = tools ? tools.map((t) => {
-    const o = t && typeof t === 'object' && !Array.isArray(t) ? t : {};
+  m.tools = tools ? tools.slice(0, SURFACE_BOUNDS.tools).map((t) => {
+    const o = isObj(t) ? t : {};
     const schema = (v) => (v === undefined || v === null ? { hash: null, why: 'absent' } : jcsOrWhy(v));
+    const n = shortStr(o.name);
     const inS = schema(o.inputSchema);
     const outS = schema(o.outputSchema);
     return {
-      name: typeof o.name === 'string' ? o.name : null,
+      name: n.v,
+      ...(n.v === null ? { name_why: n.why } : {}),
       description_sha256: typeof o.description === 'string' ? sha256Text(o.description) : null,
+      ...(typeof o.description === 'string' ? {} : { description_sha256_why: o.description === undefined ? 'absent' : 'not a string' }),
       input_schema_sha256_jcs: inS.hash,
       ...(inS.hash ? {} : { input_schema_sha256_jcs_why: inS.why }),
       output_schema_sha256_jcs: outS.hash,
-      ...(outS.hash || outS.why === 'absent' ? {} : { output_schema_sha256_jcs_why: outS.why }),
-      annotations: o.annotations && typeof o.annotations === 'object' && !Array.isArray(o.annotations) ? o.annotations : null,
+      ...(outS.hash ? {} : { output_schema_sha256_jcs_why: outS.why }),
+      ...boundAnnotations(o.annotations),
     };
   }) : null;
-  if (s.pages !== undefined) m.tools_pages = s.pages;
+  if (tools && tools.length > SURFACE_BOUNDS.tools) m.tools_omitted = tools.length - SURFACE_BOUNDS.tools;
+  if (s.pages !== undefined) {
+    m.tools_pages = Number.isSafeInteger(s.pages) && s.pages >= 0 && s.pages <= SURFACE_BOUNDS.pages ? s.pages : null;
+    if (m.tools_pages === null) m.tools_pages_why = `not a whole number from 0 to ${SURFACE_BOUNDS.pages}`;
+  }
   return { surface: m };
 }
 
@@ -701,7 +824,32 @@ function args(argv) {
   return o;
 }
 
-const sha256File = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
+/** sha256 of a file, read in 1 MiB chunks (a target-written file can be as large as the copy-out cap). */
+function sha256File(f) {
+  const h = createHash('sha256');
+  const fd = openSync(f, 'r');
+  try {
+    const buf = Buffer.alloc(1024 * 1024);
+    for (let n; (n = readSync(fd, buf, 0, buf.length, null)) > 0;) h.update(buf.subarray(0, n));
+  } finally {
+    closeSync(fd);
+  }
+  return h.digest('hex');
+}
+
+/**
+ * The two fields the driver keeps from a (target-writable) results.json: `run.status` (a string of 64
+ * characters at most) and `run.writes` (a finite number), each null with a reason otherwise. A file
+ * over `cap` bytes is not read. The parsed document is dropped at once; nothing else of it is kept.
+ */
+export function readRunFields(f, cap = JSON_CAP) {
+  if (lstatSync(f).size > cap) return { too_large: true, status: null, writes: null, why: `over ${cap} bytes: not read` };
+  const run = (() => { const d = safeJson(readFileSync(f, 'utf8')); return d && typeof d === 'object' && d.run && typeof d.run === 'object' ? d.run : null; })();
+  if (!run) return { too_large: false, status: null, writes: null, why: 'no run object (not JSON, or no run)' };
+  const status = typeof run.status === 'string' && run.status.length <= 64 ? run.status : null;
+  const writes = typeof run.writes === 'number' && Number.isFinite(run.writes) ? run.writes : null;
+  return { too_large: false, status, writes, ...(status === null ? { status_why: 'run.status is not a string of 64 characters at most' } : {}), ...(writes === null ? { writes_why: 'results.json has no finite run.writes' } : {}) };
+}
 const sha256Text = (s) => createHash('sha256').update(s).digest('hex');
 const now = () => new Date().toISOString();
 
@@ -978,6 +1126,30 @@ export function entryBin(t, binDir, command0) {
   return { bin: null, from: null, why: 'neither bins[0] nor the server command names a file in the bin folder' };
 }
 
+/**
+ * `meta.config_source` from the helper's listing. The listing is read as untrusted input (its
+ * container holds the installed target's files): entries are type-checked and bounded, and an entry
+ * whose path could leave the folder is dropped.
+ */
+export function configSourceMeta(listing, step = {}) {
+  if (!listing || typeof listing !== 'object' || !Array.isArray(listing.files)) {
+    return { config_source: null, config_source_why: `the config-source helper gave no listing (exit ${step.exit ?? null}${step.timed_out ? ', time limit' : ''})` };
+  }
+  const rule = (r) => (['manifest', 'readme', 'license', 'entry', 'config'].includes(r) ? r : null);
+  const files = listing.files.slice(0, 40)
+    .filter((f) => f && safeRel(f.path) && typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/.test(f.sha256) && Number.isSafeInteger(f.bytes) && f.bytes >= 0 && rule(f.rule))
+    .map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, rule: f.rule, file: `sandbox/config-source/${f.path}` }));
+  if (!files.length && typeof listing.why === 'string') return { config_source: null, config_source_why: listing.why.slice(0, 300) };
+  const skipped = (Array.isArray(listing.skipped) ? listing.skipped : []).slice(0, 200).filter((x) => x && typeof x === 'object').map((x) => ({
+    path: typeof x.path === 'string' && x.path.length <= 4096 ? x.path : null,
+    bytes: Number.isSafeInteger(x.bytes) ? x.bytes : null,
+    rule: rule(x.rule),
+    why: typeof x.why === 'string' ? x.why.slice(0, 64) : null,
+  }));
+  const more = Number.isSafeInteger(listing.skipped_more) && listing.skipped_more > 0 ? listing.skipped_more : 0;
+  return { config_source: files, config_source_skipped: skipped, ...(more ? { config_source_skipped_more: more } : {}) };
+}
+
 /** A config-source listing entry's path: relative, inside the work folder, nothing to climb out with. */
 const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length < 4096 && !p.startsWith('/') && !p.split('/').some((x) => x === '..' || x === '' || x === '.') && !/[\0\n\r]/.test(p);
 
@@ -1045,6 +1217,7 @@ async function runTarget(t, o, ctx, dk) {
   const tag = `${ctx.runId}-${t.id}`;
   const backendName = (i) => `corpus-${tag}-b${i}`;
   let vol = null;
+  let cleanVol = null;
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
     validateTarget(t, ctx.dropped);
@@ -1073,7 +1246,7 @@ async function runTarget(t, o, ctx, dk) {
     const internal = await dk.network(`corpus-${tag}-run`, true, L('install'));
     meta.networks = { install: { internal: egress.internal }, run: { internal: internal.internal } };
     const mounts = [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }, ...(ctx.toolsVol ? [{ src: ctx.toolsVol, dst: P.tools, ro: true }] : [])];
-    const put = (path, buf, log) => must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', path] }, { log, input: buf, deadline }), `write ${path.split('/').pop()}`);
+    const put = (path, buf, log, d = deadline) => must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }], stdin: true, cmd: ['sh', '-c', 'mkdir -p "$(dirname "$1")" && cat > "$1"', 'sh', path] }, { log, input: buf, deadline: d }), `write ${path.split('/').pop()}`);
 
     // 3. Install, in sandbox containers. Only the `egress` steps have a network that leaves the host.
     for (const f of plan.files) await put(f.path, f.artifact ? dl.buf : Buffer.from(f.text), L('install'));
@@ -1109,19 +1282,26 @@ async function runTarget(t, o, ctx, dk) {
     const eb = entryBin(t, plan.bin, command0);
     const cs = await dk.sandbox({ log: L('config-source'), deadline: small(), network: 'none', mounts, env: sandboxEnv(plan.bin), target: t.id, keepStdout: true,
       cmd: ['node', `${SANDBOX_TOOLS}/config-source.mjs`, P.work, String(t.ecosystem), String(t.package ?? ''), plan.bin, eb.bin ?? '', `${P.out}/config-source`] });
-    const listing = safeJson(cs.stdout.trim().split('\n').pop() ?? '');
     delete meta.config_source_why;
     meta.config_source_entry = eb;
-    if (!listing || !Array.isArray(listing.files)) {
-      meta.config_source_why = `the config-source helper gave no listing (exit ${cs.exit}${cs.timed_out ? ', time limit' : ''})`;
-    } else if (listing.why && !listing.files.length) {
-      meta.config_source_why = String(listing.why).slice(0, 300);
-    } else {
-      meta.config_source = listing.files
-        .filter((f) => safeRel(f?.path) && /^[0-9a-f]{64}$/.test(f.sha256) && Number.isSafeInteger(f.bytes))
-        .map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, rule: String(f.rule), file: `sandbox/config-source/${f.path}` }));
-      meta.config_source_skipped = (Array.isArray(listing.skipped) ? listing.skipped : []).slice(0, 200);
-      if (listing.skipped_more) meta.config_source_skipped_more = Number(listing.skipped_more) || 0;
+    Object.assign(meta, configSourceMeta(safeJson(cs.stdout.trim().split('\n').pop() ?? ''), cs));
+
+    // 3c. D5: with repeats, a clean copy of /work as install left it (before any set-up or server
+    //     start), in a volume of its own that no target container mounts. Each later repeat starts
+    //     from it again (restoreWork). Our helper copies with tar as the sandbox user, no network,
+    //     symlinks and special files as they are (never followed or opened).
+    let clean = null;
+    if (lim.repeats > 1) {
+      try {
+        const cv = await dk.volume(`corpus-${tag}-clean`, L('fresh-state'));
+        cleanVol = cv;
+        await must(dk.helper({ target: t.id, chown: true, mounts: [{ src: cv, dst: P.clean }], cmd: ['sh', '-c', 'chmod 700 /clean && chown 10001:10001 /clean'] }, { log: L('fresh-state'), deadline: small() }), 'clean copy set-up');
+        await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work, ro: true }, { src: cv, dst: P.clean }], cmd: ['sh', '-c', CLEAN_COPY] }, { log: L('fresh-state'), deadline: Math.min(deadline, Date.now() + 600_000) }), 'clean copy');
+        clean = cv;
+      } catch (e) {
+        if (e.timeout) throw e;
+        meta.fresh_state_why = `no clean copy of /work: ${String(e.message).slice(0, 200)}`;
+      }
     }
 
     // 4. Backends: digest-pinned, on the internal network only, reachable as b0, b1, ... A backend is
@@ -1197,44 +1377,57 @@ async function runTarget(t, o, ctx, dk) {
     const command = fill(t.server.command, vars);
     const senv = fill(t.server.env ?? {}, vars);
     const envRun = sandboxEnv(plan.bin, senv);
-    for (const [k, line] of (t.setup ?? []).entries()) {
-      if (typeof line !== 'string') {
-        // B: a pinned tarball instead of a git step. Our helper fetches it on the install network
-        // (no target code runs meanwhile: every sandbox container of the target has exited) and
-        // verifies its sha256; only a verified file is unpacked, by tar in a sandbox container with
-        // no network, as data. The driver checks the helper's sha256 line against the pin as well.
-        const f = checkFetch(line, `set-up ${k}`);
-        const file = `${P.work}/.fetch/${k}.tgz`;
-        const caEnv = envInstall.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: envInstall.NODE_EXTRA_CA_CERTS } : {};
-        const r = await dk.helper({ target: t.id, user: SANDBOX_USER, network: egress.name, env: caEnv, mounts: [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }],
-          cmd: ['node', `${SANDBOX_TOOLS}/fetch.mjs`, f.url, f.sha256, file, String(FETCH_CAP)] }, { log: L('setup'), deadline, keepStdout: true });
-        if (r.timed_out) throw Object.assign(new HarnessError(`set-up ${k} fetch: time limit`), { timeout: true });
-        if (r.spawn_error || r.exit !== 0) throw new HarnessError(`set-up ${k} fetch: refused or failed (exit ${r.exit})`);
-        const got = /^sha256 ([0-9a-f]{64}) bytes (\d+)$/m.exec(r.stdout);
-        if (!got || got[1] !== f.sha256) throw new HarnessError(`set-up ${k} fetch: sha256 is not the pinned one`);
-        meta.setup_fetch.push({ step: k, url: f.url, sha256: got[1], bytes: Number(got[2]), dest: f.dest, strip_components: f.strip });
-        await must(dk.sandbox({ log: L('setup'), deadline, network: 'none', mounts, env: envRun, target: t.id,
-          cmd: ['sh', '-c', 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --no-same-owner --no-same-permissions --strip-components="$3" && rm -f "$1"', 'sh', file, `${P.work}/${f.dest}`, String(f.strip)] }), `set-up ${k} unpack`);
-        continue;
+    // runSetup runs the list's set-up steps; again before every full repeat after the first (D5).
+    const runSetup = async (d, first) => {
+      for (const [k, line] of (t.setup ?? []).entries()) {
+        if (typeof line !== 'string') {
+          // B: a pinned tarball instead of a git step. Our helper fetches it on the install network
+          // (no target code runs meanwhile: every sandbox container of the target has exited) and
+          // verifies its sha256; only a verified file is unpacked, by tar in a sandbox container with
+          // no network, as data. The driver checks the helper's sha256 line against the pin as well.
+          const f = checkFetch(line, `set-up ${k}`);
+          const file = `${P.work}/.fetch/${k}.tgz`;
+          const caEnv = envInstall.NODE_EXTRA_CA_CERTS ? { NODE_EXTRA_CA_CERTS: envInstall.NODE_EXTRA_CA_CERTS } : {};
+          const r = await dk.helper({ target: t.id, user: SANDBOX_USER, network: egress.name, env: caEnv, mounts: [{ src: vol, dst: P.work }, { src: ctx.cliVol, dst: P.cli, ro: true }],
+            cmd: ['node', `${SANDBOX_TOOLS}/fetch.mjs`, f.url, f.sha256, file, String(FETCH_CAP)] }, { log: L('setup'), deadline: d, keepStdout: true });
+          if (r.timed_out) throw Object.assign(new HarnessError(`set-up ${k} fetch: time limit`), { timeout: true });
+          if (r.spawn_error || r.exit !== 0) throw new HarnessError(`set-up ${k} fetch: refused or failed (exit ${r.exit})`);
+          const got = /^sha256 ([0-9a-f]{64}) bytes (\d+)$/m.exec(r.stdout);
+          if (!got || got[1] !== f.sha256) throw new HarnessError(`set-up ${k} fetch: sha256 is not the pinned one`);
+          if (first) meta.setup_fetch.push({ step: k, url: f.url, sha256: got[1], bytes: Number(got[2]), dest: f.dest, strip_components: f.strip });
+          await must(dk.sandbox({ log: L('setup'), deadline: d, network: 'none', mounts, env: envRun, target: t.id,
+            cmd: ['sh', '-c', 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --no-same-owner --no-same-permissions --strip-components="$3" && rm -f "$1"', 'sh', file, `${P.work}/${f.dest}`, String(f.strip)] }), `set-up ${k} unpack`);
+          continue;
+        }
+        await must(dk.sandbox({ log: L('setup'), deadline: d, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
       }
-      await must(dk.sandbox({ log: L('setup'), deadline, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
-    }
+    };
+    await runSetup(deadline, true);
 
     // 5b. D1: the server surface (initialize and tools/list, nothing else), by our probe in a sandbox
     //     container like the CLI's, starting the same server. For the record only; the probe's
     //     output is written by the host to surface.json and never printed.
     const sv = await dk.sandbox({ log: L('surface'), deadline: Math.min(deadline, Date.now() + SURFACE_MS + 30_000), network: internal.name, mounts, env: envRun, target: t.id, keepStdout: true, logStdout: false,
       cmd: ['node', `${SANDBOX_TOOLS}/surface.mjs`, SURFACE_PROTOCOL, String(SURFACE_MS), '--', ...command] });
-    const probe = safeJson(sv.stdout.trim().split('\n').pop() ?? '');
+    // The probe's stdout is untrusted (the server shares its container and user): surfaceDoc
+    // type-checks it, and nothing here may stop the target (a hostile, deeply nested answer that
+    // cannot be serialised gives surface: null with the reason).
     delete meta.surface_why;
-    if (!probe || typeof probe !== 'object') {
-      meta.surface_why = `the surface probe gave no answer (exit ${sv.exit}${sv.timed_out ? ', time limit' : ''}${sv.stdout_truncated ? ', output over the capture cap' : ''})`;
-    } else {
-      const doc = { initialize: probe.initialize ?? null, tools: probe.tools ?? null, captured_at: probe.captured_at ?? now(),
-        protocol_offered: SURFACE_PROTOCOL, initialize_error: probe.initialize_error ?? null, tools_error: probe.tools_error ?? null, pages: probe.pages ?? null, transport: probe.transport ?? null };
-      writeFileSync(join(odir, 'surface.json'), JSON.stringify(doc, null, 2) + '\n');
-      Object.assign(meta, surfaceMeta(doc, 'surface.json'));
-      if (meta.surface) meta.surface.step = { exit: sv.exit, ms: sv.ms, timed_out: sv.timed_out };
+    try {
+      const probe = safeJson(sv.stdout.trim().split('\n').pop() ?? '');
+      if (!probe || typeof probe !== 'object' || Array.isArray(probe)) {
+        meta.surface_why = `the surface probe gave no answer (exit ${sv.exit}${sv.timed_out ? ', time limit' : ''}${sv.stdout_truncated ? ', output over the capture cap' : ''})`;
+      } else {
+        const doc = surfaceDoc(probe);
+        const sm = surfaceMeta(doc, 'surface.json');
+        writeFileSync(join(odir, 'surface.json'), JSON.stringify(doc) + '\n');
+        Object.assign(meta, sm);
+        if (meta.surface) meta.surface.step = { exit: sv.exit, ms: sv.ms, timed_out: sv.timed_out };
+      }
+    } catch (e) {
+      rmSync(join(odir, 'surface.json'), { force: true });
+      meta.surface = null;
+      meta.surface_why = `the surface probe's answer could not be recorded: ${String(e?.message ?? e).slice(0, 200)}`;
     }
 
     // 6. The manifests: the init draft (archived as data), then the one the CLI runs.
@@ -1306,18 +1499,33 @@ async function runTarget(t, o, ctx, dk) {
         // hash is the accepted one (the same for every repeat).
         for (let i = 1; i <= lim.repeats; i++) {
           const rd = lim.full_s ? Date.now() + lim.full_s * 1000 : deadline;
-          const fr = { i, results_dir: `sandbox/results/full-${i}`, cli_exit: null, writes: null, status: null, plan_hash: null };
+          const fr = { i, results_dir: `sandbox/results/full-${i}`, cli_exit: null, writes: null, status: null, plan_hash: null, fresh_state: null };
           meta.full_runs.push(fr);
           if (i > 1) {
-            if (t.backends?.length) {
-              const changed = await resetBackends(rd);
-              fr.reset = 'backends started again from their images and seeded';
-              if (changed.length) {
-                fr.status = 'not_started';
-                fr.why = `a set-up capture changed after the reset (${changed.join(', ')})`;
-                break;
+            // Fresh state: /work back to its clean copy, the backends started again and seeded, the
+            // list's set-up run again, the manifest written again. A step that fails stops the target
+            // (harness error) and is named in this repeat's `why`.
+            try {
+              if (clean) await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: clean, dst: P.clean, ro: true }], cmd: ['sh', '-c', RESTORE_WORK] }, { log: L('fresh-state'), deadline: rd }), `restore /work for repeat ${i}`);
+              if (t.backends?.length) {
+                const changed = await resetBackends(rd);
+                if (changed.length) {
+                  fr.status = 'not_started';
+                  fr.fresh_state = false;
+                  fr.fresh_state_why = fr.why = `a set-up capture changed after the reset (${changed.join(', ')})`;
+                  break;
+                }
               }
-            } else fr.reset = 'none: the target has no backend';
+              await runSetup(rd, false);
+              await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L(`plan-${i}`), rd);
+            } catch (e) {
+              fr.fresh_state = false;
+              fr.why = `reset before repeat ${i}: ${String(e?.message ?? e).slice(0, 200)}`;
+              throw e;
+            }
+            fr.reset = [clean ? '/work restored from its clean copy' : null, t.backends?.length ? 'backends started again from their images and seeded' : null, t.setup?.length ? 'set-up run again' : null].filter(Boolean).join('; ') || 'nothing to reset';
+            fr.fresh_state = !!clean;
+            if (!clean) fr.fresh_state_why = meta.fresh_state_why ?? 'no clean copy of /work';
             const p = await cliStep(`plan-${i}`, ['plan', '-m', manifest], rd);
             fr.plan_hash = (/^plan hash: ([0-9a-f]{16})$/m.exec(p.r.stdout) ?? [])[1] ?? null;
             if (classifyCli(p.step) !== 'completed') {
@@ -1332,7 +1540,10 @@ async function runTarget(t, o, ctx, dk) {
               meta.plan_drift_repeat = { i, accepted: t.full.plan_hash, seen: fr.plan_hash };
               break;
             }
-          } else fr.plan_hash = meta.plan_hash;
+          } else {
+            fr.plan_hash = meta.plan_hash;
+            fr.fresh_state = true; // the state install, set-up and the seeds left; no full run before it
+          }
           await takeSnapshots('before', i, rd);
           const full = await cliStep(i === 1 ? 'full' : `full-${i}`, ['run', '-m', manifest, '--confirm-target', t.full.confirm, '--plan-hash', t.full.plan_hash, '--out', `${P.out}/results/full-${i}`, '--state', `${P.out}/state/full-${i}`], rd);
           decisive.push(full.step);
@@ -1372,6 +1583,7 @@ async function runTarget(t, o, ctx, dk) {
       if (fr.status !== null) continue;
       fr.status = 'not_started';
       fr.why ??= meta.harness_error ? `the target stopped: ${meta.status}` : 'the target stopped';
+      if (fr.fresh_state === null) fr.fresh_state_why ??= 'the repeat did not start';
     }
     try { await finishTarget(); } catch (e) {
       // One target's output must never stop the shard: record it and go on to the next target.
@@ -1380,9 +1592,32 @@ async function runTarget(t, o, ctx, dk) {
     }
     meta.public_exit = publicExit(meta);
     meta.ended = now();
-    writeFileSync(join(odir, 'meta.json'), JSON.stringify(meta, null, 2) + '\n');
+    writeMeta();
   }
   return meta;
+
+  /**
+   * meta.json, whatever is in it: a record that cannot be serialised or written turns this target into
+   * a harness error with a minimal record, and never stops the shard.
+   */
+  function writeMeta() {
+    let text;
+    try {
+      text = JSON.stringify(meta, null, 2) + '\n';
+    } catch (e) {
+      meta.status = 'harness_error';
+      meta.harness_error = `record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`;
+      meta.public_exit = publicExit(meta);
+      text = JSON.stringify({ format: meta.format, label: meta.label, target: { id: t.id }, status: meta.status, harness_error: meta.harness_error, public_exit: meta.public_exit, started: meta.started, ended: meta.ended }, null, 2) + '\n';
+    }
+    try {
+      writeFileSync(join(odir, 'meta.json'), text);
+    } catch (e) {
+      meta.status = 'harness_error';
+      meta.harness_error = `record: meta.json could not be written: ${String(e?.message ?? e).slice(0, 200)}`;
+      meta.public_exit = publicExit(meta);
+    }
+  }
 
   async function finishTarget() {
     const lg = L('teardown');
@@ -1403,6 +1638,9 @@ async function runTarget(t, o, ctx, dk) {
       }
       await dk.d(['volume', 'rm', '-f', vol], { log: lg });
     }
+    if (cleanVol) {
+      await dk.d(['volume', 'rm', '-f', cleanVol], { log: lg });
+    }
     for (const n of ['egress', 'run']) await dk.d(['network', 'rm', `corpus-${tag}-${n}`], { log: lg });
     // The server's stderr, as the stderr-tee kept it (sizes and hashes only in meta; the files stay
     // in sandbox/server-stderr/, in the encrypted bundle). Target-writable data like the rest.
@@ -1414,14 +1652,19 @@ async function runTarget(t, o, ctx, dk) {
     const draft = join(odir, 'sandbox', 'init-draft.yaml');
     if (existsSync(draft) && lstatSync(draft).isFile()) meta.init_draft_sha256 = sha256File(draft);
     // results/<run>/results.json, and one level deeper for the full repeats (results/full-<i>/<run>/).
-    const docs = new Map();
+    // Only run.status and run.writes are kept of each results.json (readRunFields), and at most
+    // RESULTS_MAX folders are recorded: the folders and files are target-writable.
+    const fields = new Map();
     const take = (rel) => {
       const f = join(odir, rel, 'results.json');
       if (!existsSync(f) || !lstatSync(f).isFile()) return false;
-      const big = lstatSync(f).size > JSON_CAP;
-      const doc = big ? null : safeJson(readFileSync(f, 'utf8'));
-      docs.set(rel, doc);
-      meta.results.push({ folder: rel, sha256: sha256File(f), status: big ? 'too large to read' : doc?.run?.status ?? null });
+      if (meta.results.length >= RESULTS_MAX) {
+        meta.results_omitted = (meta.results_omitted ?? 0) + 1;
+        return true;
+      }
+      const rf = readRunFields(f);
+      fields.set(rel, rf);
+      meta.results.push({ folder: rel, sha256: sha256File(f), status: rf.too_large ? 'too large to read' : rf.status });
       return true;
     };
     const rdir = join(odir, 'sandbox', 'results');
@@ -1439,11 +1682,11 @@ async function runTarget(t, o, ctx, dk) {
         fr.writes_why = mine.length ? 'more than one results folder' : 'no results.json';
         continue;
       }
-      const doc = docs.get(mine[0].folder);
+      const rf = fields.get(mine[0].folder);
       fr.results = mine[0].folder;
       fr.run_status = mine[0].status;
-      fr.writes = Number.isSafeInteger(doc?.run?.writes) ? doc.run.writes : null;
-      if (fr.writes === null) fr.writes_why = doc ? 'results.json has no run.writes' : 'results.json could not be read';
+      fr.writes = rf.writes;
+      if (fr.writes === null) fr.writes_why = rf.writes_why ?? rf.why;
     }
     // D4: each copied config-source file, as it came back (the server under test ran later with
     // /work writable, so a change after the copy is recorded, never hidden).
@@ -1511,7 +1754,8 @@ async function context(o) {
   const specFile = o.spec ? resolve(o.spec) : join(cliDir, '..', '..', 'spec', 'mws.md');
   const specOk = existsSync(specFile) && lstatSync(specFile).isFile();
   const reqJs = join(cliDir, 'dist', 'src', 'requirements.js');
-  const specText = existsSync(reqJs) ? (/SPEC_TEXT = ['"]([^'"\n]{1,200})['"]/.exec(readFileSync(reqJs, 'utf8')) ?? [])[1] ?? null : null;
+  // spec_ref: the reference the CLI build says it follows (SPEC_TEXT, e.g. spec/0.9-review@15f71e5).
+  const specRef = existsSync(reqJs) ? (/SPEC_TEXT = ['"]([\w./@:+-]{1,200})['"]/.exec(readFileSync(reqJs, 'utf8')) ?? [])[1] ?? null : null;
   const runner = {
     lane: o.lane,
     image_os: process.env.ImageOS ?? null,
@@ -1546,8 +1790,10 @@ async function context(o) {
       ...(/ \d+\.\d+\.\d+/.test(version) ? {} : { cli_version_why: 'the CLI printed no version' }),
       spec_sha256: specOk ? sha256File(specFile) : null,
       ...(specOk ? { spec_file: o.spec ? 'given with --spec' : 'spec/mws.md at the CLI commit' } : { spec_sha256_why: 'no spec document beside the CLI package (the CLI build itself carries none)' }),
-      spec_text: specText,
-      ...(specText ? {} : { spec_text_why: 'the CLI build names no SPEC_TEXT' }),
+      // Key on spec_ref (the text the CLI follows). spec_sha256 hashes spec/mws.md at the CLI commit,
+      // which can be a later text than spec_ref names.
+      spec_ref: specRef,
+      ...(specRef ? {} : { spec_ref_why: 'the CLI build names no SPEC_TEXT' }),
     },
     isolation: { kind: 'container', user: SANDBOX_USER, cap_drop: 'ALL', no_new_privileges: true, read_only_root: true, mounts: 'named volumes only', install_network: 'bridge (egress)', run_network: 'internal', cpus: null, backend_cap_allowlist: [...BACKEND_CAPS], server_stderr_cap: STDERR_CAP },
   };
@@ -1615,10 +1861,13 @@ async function main() {
     // one that fails is refused before anything of it is fetched or started; the others run.
     const { invalid, dropped } = validateList(list);
     const seed = process.env.CORPUS_ORDER_SEED || randomBytes(16).toString('hex');
-    const mine = shuffled(list.targets
+    const inShard = list.targets
       .filter((t) => (t.lane ?? 'ci') === o.lane && t.enabled !== false)
       .filter((t) => !o.only || o.only.includes(t.id))
-      .filter((_, i) => i % o.shards === o.shard - 1), seed);
+      .filter((_, i) => i % o.shards === o.shard - 1);
+    // D8: on the CI lane, the shard's planned time must fit one job (SHARD_BUDGET_S), before anything runs.
+    if (o.lane === 'ci') checkShardBudget(inShard, list.defaults ?? {}, invalid);
+    const mine = shuffled(inShard, seed);
     const ctx = await context(o);
     ctx.defaults = list.defaults ?? {};
     ctx.invalid = invalid;
@@ -1627,7 +1876,14 @@ async function main() {
     await prepareDocker(ctx, dk);
     const shard = { format: RUN_FORMAT, label: LABEL, lane: o.lane, shard: o.shard, shards: o.shards, targets_list_sha256: createHash('sha256').update(raw).digest('hex'), targets_list_updated: list.updated ?? null, order_seed: seed, order: mine.map((t) => t.id), cli: ctx.cli, spec: ctx.spec, runner: ctx.runner, images: ctx.imageInfo, sandbox_tools_sha256: ctx.sandboxTools, isolation: ctx.isolation, github: ctx.github, started: now(), targets: [] };
     for (const t of mine) {
-      const m = await runTarget(t, o, ctx, dk);
+      let m;
+      try {
+        m = await runTarget(t, o, ctx, dk);
+      } catch (e) {
+        // runTarget records and returns; should it ever throw, this target alone is lost, not the shard.
+        try { writeFileSync(join(o.out, '_shard', `target-error-${t.id}.txt`), `${now()}\n${e?.stack ?? e}\n`); } catch {}
+        m = { status: 'harness_error', cli_exit: null, public_exit: 125, results: [] };
+      }
       shard.targets.push({ id: t.id, status: m.status, cli_exit: m.cli_exit, public_exit: m.public_exit, results: m.results.map((r) => r.sha256) });
       say(`run finished, exit ${m.public_exit}`);
       if (m.public_exit !== 0) failed = true;

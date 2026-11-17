@@ -68,7 +68,8 @@ jobs:
     # CORPUS_TARGETS_KEY lives only in this environment, whose deployment branches are limited to
     # main: a branch with an edited copy of this workflow (dispatch or push) cannot read it.
     environment: corpus
-    timeout-minutes: 120
+    # GitHub's hosted maximum; the driver keeps a shard's planned time under 330 minutes (SHARD_BUDGET_S).
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:

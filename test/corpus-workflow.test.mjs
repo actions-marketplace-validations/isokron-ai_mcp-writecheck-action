@@ -134,3 +134,12 @@ test('batches: the check runs: good IDs pass, and a newline, a separator or too 
     assert.equal(r.env, '', JSON.stringify(bad));
   }
 });
+
+test('D8: the job may run 360 minutes, the hosted maximum, which the driver\'s shard budget stays under', async () => {
+  const m = /^ {4}timeout-minutes: (\d+)$/m.exec(wf);
+  assert.equal(Number(m?.[1]), 360);
+  const { SHARD_BUDGET_S } = await import('../corpus/run-shard.mjs');
+  assert.ok(SHARD_BUDGET_S <= (360 - 30) * 60, 'at least 30 minutes left for checkout, build, encryption and upload');
+  // The spec document comes from the same CLI commit, beside the package.
+  assert.match(wf, /sparse-checkout: \|\n\s+\/packages\/writecheck\/\n\s+\/spec\/mws\.md\n\s+sparse-checkout-cone-mode: false/);
+});

@@ -107,12 +107,20 @@ if (script.includes('cd /work/out')) {
   const sha = existsSync(join(root, 'fetch-sha')) ? readFileSync(join(root, 'fetch-sha'), 'utf8').trim() : c[3];
   const code = existsSync(join(root, 'fetch-exit')) ? Number(readFileSync(join(root, 'fetch-exit'), 'utf8')) : 0;
   done(code, code === 0 ? `sha256 ${sha} bytes 10\n` : '');
+} else if (script.includes('/clean/.create-status')) {
+  // The clean copy of /work (FAKE root `clean-fail`: it fails).
+  done(existsSync(join(root, 'clean-fail')) ? 1 : 0);
 } else if (script.includes('node -v')) {
   // The version probe (VERSION_PROBE), as the runtime image would answer it.
   done(0, 'node v22.11.0\npython none\n');
 } else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/surface.mjs') {
   // The surface probe: what it would print for a two-tool server (FAKE root `surface-fail`: initialize fails).
   if (existsSync(join(root, 'surface-fail'))) done(1, JSON.stringify({ initialize: null, initialize_error: 'the server exited (exit 1 signal null)', tools: null }) + '\n');
+  // A hostile answer: an initialize nested deeper than JSON.stringify can follow, and forged fields.
+  if (existsSync(join(root, 'surface-deep'))) {
+    const n = Number(readFileSync(join(root, 'surface-deep'), 'utf8'));
+    done(0, `{"initialize":{"protocolVersion":"x","capabilities":{},"deep":${'['.repeat(n)}${']'.repeat(n)}},"tools":{"tools":[]},"pages":1e300,"captured_at":{"x":1}}\n`);
+  }
   done(0, JSON.stringify({
     protocol_offered: c[2], initialize: { protocolVersion: c[2], capabilities: { tools: {}, logging: {} }, serverInfo: { name: NAME, version: '1.0.0' }, instructions: 'Use get first.' },
     tools: { tools: [{ name: 'get', description: 'Read one.', inputSchema: { type: 'object', properties: { id: { type: 'string' } } }, annotations: { readOnlyHint: true } },
@@ -147,7 +155,8 @@ if (script.includes('cd /work/out')) {
     writeFileSync(inVol('/work/out/server-stderr/01-7.log'), `${NAME} server stderr: missing setting\n# server exit 1 signal null\n`);
     const r = inVol(join(c[c.indexOf('--out') + 1], 'catalog-x'));
     mkdirSync(r, { recursive: true });
-    writeFileSync(join(r, 'results.json'), JSON.stringify({ format: 'mws-results/1', run: { status: 'complete' }, results: [{ requirement: 'MWS-ANN-4', verdict: 'violated' }] }));
+    const custom = join(root, 'catalog-results');
+    writeFileSync(join(r, 'results.json'), existsSync(custom) ? readFileSync(custom) : JSON.stringify({ format: 'mws-results/1', run: { status: 'complete' }, results: [{ requirement: 'MWS-ANN-4', verdict: 'violated' }] }));
     done(Number(readFileSync(join(root, 'cli-exit'), 'utf8')));
   }
   done(4);

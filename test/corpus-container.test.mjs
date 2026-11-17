@@ -346,6 +346,8 @@ test('D smoke: surface, versions, config source, snapshots and repeats in the re
   const a = { url: pathToFileURL(art).href, file: 's.tgz', sha256: createHash('sha256').update(readFileSync(art)).digest('hex') };
   const t = { id: 'd01', lane: 'ci', ecosystem: 'binary', package: 'x', version: '1', init: false, artifact: { 'linux-x64': a, 'linux-arm64': a },
     server: { command: ['{{bin}}/srv'] },
+    // Set-up appends to a file in /work: with /work restored before repeat 2 it holds one line again.
+    setup: ['echo s >> {{tdir}}/state.txt && cp {{tdir}}/state.txt {{tdir}}/out/state-copy.txt'],
     backends: [{ image: images.runtime, port: 7000, args: ['node', '-e', "require('net').createServer((s) => { s.on('error', () => {}); s.end('pong'); }).listen(7000)"],
       wait: ['node', '-e', "require('net').connect(7000, '127.0.0.1').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"],
       setup: [{ exec: ['sh', '-c', 'echo seeded >> /tmp/state'] }],
@@ -366,6 +368,8 @@ test('D smoke: surface, versions, config source, snapshots and repeats in the re
   for (const f of m.config_source) assert.equal(createHash('sha256').update(readFileSync(join(out, 'd01', f.file))).digest('hex'), f.sha256);
   assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.plan_hash]), [[1, 'completed', '0123456789abcdef'], [2, 'completed', '0123456789abcdef']]);
   assert.equal(m.backends[0].resets, 1);
+  assert.deepEqual(m.full_runs.map((f) => f.fresh_state), [true, true]);
+  assert.equal(readFileSync(join(out, 'd01', 'sandbox', 'state-copy.txt'), 'utf8'), 's\n', '/work was restored from its clean copy before the set-up ran again');
   // Fresh state: the backend was started again, so the seed ran once into an empty /tmp each time.
   assert.equal(readFileSync(join(out, 'd01', 'backend-0-before.txt'), 'utf8'), 'seeded\n');
   assert.equal(readFileSync(join(out, 'd01', 'backend-0-after.txt'), 'utf8'), 'seeded\n');
