@@ -17,7 +17,7 @@ import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
   boundAnnotations, checkDropped, checkFull, checkShardBudget, checkSnapshot, CLEAN_COPY, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
-  validateTarget, VERSION_PROBE, checkId, RESERVED_ID,
+  validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures,
 } from '../corpus/run-shard.mjs';
 import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
@@ -829,4 +829,55 @@ test('evidence before the repeats: config source, init draft and catalog results
   const m3 = drive(d3).meta('t01');
   assert.deepEqual(m3.evidence.map((e) => e.step), ['config-source', 'init', 'catalog']);
   assert.deepEqual(m3.evidence[1].missing, ['init-draft.yaml']);
+});
+
+// ------------------------------------------------------------------------------------------------
+// Volatile set-up captures (a backend that mints a new token on every start)
+// ------------------------------------------------------------------------------------------------
+
+const mint = (extra = {}) => ({ exec: ['mint', 'CAPTURE'], capture: 'tok', volatile: true, ...extra });
+
+test('volatile: only on a step with capture; its name may reach server.env only, never server.command or full.manifest', () => {
+  const tgt = (setup, more = {}) => ({ id: 't23', backends: [{ image: IMG, port: 3000, setup }], server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}' } }, ...more });
+  assert.deepEqual([...volatileCaptures(tgt([{ exec: ['seed'] }, mint()]))], ['tok']);
+  assert.doesNotThrow(() => validateTarget(tgt([mint()])));
+  assert.doesNotThrow(() => validateTarget(tgt([mint({ volatile: false })])));
+  assert.throws(() => validateTarget(tgt([{ exec: ['mint'], volatile: true }])), /backend 0 set-up 0: volatile is only for a step with capture/);
+  assert.throws(() => validateTarget(tgt([mint({ volatile: 'yes' })])), /volatile must be true or false/);
+  assert.throws(() => validateTarget(tgt([mint(), { exec: ['x'], capture: 'tok' }])), /capture tok is volatile in one set-up step and not in another/);
+  // In server.command or full.manifest it would change the manifest (and the plan hash) on every repeat.
+  assert.throws(() => validateTarget(tgt([mint()], { server: { command: ['{{bin}}/srv', '--token={{tok}}'] } })), /volatile capture tok is used in server\.command: a volatile value may reach server\.env only, so that the manifest and its plan hash stay the same on every repeat/);
+  assert.throws(() => validateTarget(tgt([mint()], { full: { manifest: 'server:\n  env: { T: "{{tok}}" }\n', plan_hash: HASH, confirm: 'x' } })), /volatile capture tok is used in full\.manifest/);
+  // A non-volatile capture may still be used anywhere, as before.
+  assert.doesNotThrow(() => validateTarget(tgt([{ exec: ['seed'], capture: 'tok' }], { full: { manifest: 'x: "{{tok}}"', plan_hash: HASH, confirm: 'x' } })));
+  // Refused at load: nothing of the target runs, the others do.
+  const { invalid } = validateList({ format: TARGETS_FORMAT, targets: [tgt([{ exec: ['mint'], volatile: true }]), { id: 't01' }] });
+  assert.deepEqual([...invalid.keys()], ['t23']);
+});
+
+test('volatile: a token minted again on every reset refreshes the server env; 3 repeats complete; the values are never in meta', () => {
+  const d = stand([{ id: 't23', backends: [pg({ setup: [{ exec: ['seed'] }, mint()] })], server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}' } }, full: fullOf({ repeats: 3 }) }]);
+  const { r, calls, meta, file } = drive(d, { fake: { 'capture-values': 'tok-AAA1\ntok-BBB2\ntok-CCC3\n' } });
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`);
+  const m = meta('t23');
+  assert.equal(m.status, 'completed', m.harness_error);
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.plan_hash]), [[1, 'completed', HASH], [2, 'completed', HASH], [3, 'completed', HASH]]);
+  assert.deepEqual(m.full_runs.map((f) => f.volatile_refreshed ?? null), [null, ['tok'], ['tok']]);
+  // Each repeat's plan and run get that repeat's token in the server env.
+  const tokenOf = (a) => a.find((x) => x.startsWith('GIT_TOKEN='));
+  const step = (sub, i) => calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/dist/src/cli/main.js') && a.includes(sub)).map(tokenOf)[i];
+  assert.deepEqual([0, 1, 2].map((i) => step('--plan-hash', i)), ['GIT_TOKEN=tok-AAA1', 'GIT_TOKEN=tok-BBB2', 'GIT_TOKEN=tok-CCC3']);
+  assert.deepEqual(calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/dist/src/cli/main.js') && a.includes('plan')).map(tokenOf), ['GIT_TOKEN=tok-AAA1', 'GIT_TOKEN=tok-BBB2', 'GIT_TOKEN=tok-CCC3']);
+  // The manifest is the same on every repeat (written again from the same text).
+  const manifests = calls.filter((a) => a[0] === 'run' && a.join(' ').includes('cat > "$1"') && a.at(-1) === '/work/writecheck.yaml');
+  assert.equal(manifests.length, 3);
+  // Names only: no value in meta.json, and the capture's output is not copied into the backend's log.
+  const text = file('t23', 'meta.json');
+  for (const v of ['tok-AAA1', 'tok-BBB2', 'tok-CCC3']) assert.ok(!text.includes(v), v);
+  assert.doesNotMatch(file('t23', 'logs/backend-0.log').replace(/GIT_TOKEN=\S+/g, ''), /tok-(AAA1|BBB2|CCC3)/);
+  // A non-volatile capture that changes still refuses the repeat, as before.
+  const d2 = stand([{ id: 't23', backends: [pg({ setup: [mint({ volatile: false })] })], server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}' } }, full: fullOf({ repeats: 3 }) }]);
+  const m2 = drive(d2, { fake: { 'capture-values': 'a\nb\n' } }).meta('t23');
+  assert.deepEqual(m2.full_runs.map((f) => f.status), ['completed', 'not_started']);
+  assert.match(m2.full_runs[1].why, /set-up capture changed after the reset \(tok\)/);
 });

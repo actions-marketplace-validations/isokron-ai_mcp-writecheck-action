@@ -366,6 +366,35 @@ export function validateTarget(t, dropped = []) {
   if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
   if (t.timeout_s !== undefined && !(Number.isInteger(t.timeout_s) && t.timeout_s >= 1 && t.timeout_s <= MAX_TIMEOUT_S)) throw new HarnessError(`timeout_s must be a whole number of seconds from 1 to ${MAX_TIMEOUT_S}`);
   if (t.full !== undefined) checkFull(t.full);
+  volatileCaptures(t);
+}
+
+/**
+ * `backends[].setup[].volatile: true`: a set-up capture whose value is new on every backend start (a
+ * service that mints an access token, say). Allowed only on a step with `capture`, and the name may
+ * reach `server.env` only: never `server.command` or `full.manifest`, so that the manifest, and so the
+ * plan hash, is the same on every full repeat. Returns the volatile names; refuses a target otherwise.
+ */
+export function volatileCaptures(t) {
+  const vol = new Set();
+  const plain = new Set();
+  for (const [i, b] of (Array.isArray(t.backends) ? t.backends : []).entries()) {
+    for (const [k, s] of (Array.isArray(b?.setup) ? b.setup : []).entries()) {
+      if (s?.volatile !== undefined && typeof s.volatile !== 'boolean') throw new HarnessError(`backend ${i} set-up ${k}: volatile must be true or false`);
+      if (s?.volatile === true && (typeof s.capture !== 'string' || !s.capture)) throw new HarnessError(`backend ${i} set-up ${k}: volatile is only for a step with capture`);
+      if (typeof s?.capture === 'string' && s.capture) (s.volatile === true ? vol : plain).add(s.capture);
+    }
+  }
+  for (const n of vol) if (plain.has(n)) throw new HarnessError(`capture ${n} is volatile in one set-up step and not in another`);
+  const names = (v) => new Set([...String(v).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((m) => m[1]));
+  const where = [['full.manifest', typeof t.full?.manifest === 'string' ? t.full.manifest : ''], ['server.command', Array.isArray(t.server?.command) ? t.server.command.join('\n') : '']];
+  for (const [field, text] of where) {
+    const used = names(text);
+    for (const n of vol) {
+      if (used.has(n)) throw new HarnessError(`volatile capture ${n} is used in ${field}: a volatile value may reach server.env only, so that the manifest and its plan hash stay the same on every repeat`);
+    }
+  }
+  return vol;
 }
 
 /**
@@ -1243,6 +1272,7 @@ async function runTarget(t, o, ctx, dk) {
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
     validateTarget(t, ctx.dropped);
+    const volatile = volatileCaptures(t);
     checkLane(t, o.lane);
     // D3: one record per backend with a snapshot, filled when the snapshots are taken.
     const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
@@ -1405,7 +1435,8 @@ async function runTarget(t, o, ctx, dk) {
       if (!ok) await backendFailed(`backend ${i} not ready`);
       const captured = {};
       for (const s of b.setup ?? []) {
-        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture });
+        // A volatile capture (a minted token, say) is not copied into the log.
+        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture, logStdout: s.volatile !== true });
         if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
         if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
         if (s.capture) v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
@@ -1428,26 +1459,39 @@ async function runTarget(t, o, ctx, dk) {
      * D5: fresh state between full repeats. Re-running a seed against the used database could fail
      * (CREATE TABLE twice) or leave the last repeat's rows, so each backend is removed with its
      * anonymous volumes and started again from its pinned image, waited for, and seeded by the same
-     * `setup` steps. Returns the names of set-up captures whose value changed: the manifest was filled
-     * with the first values, so a repeat with other values would not test the same fixture.
+     * `setup` steps. Returns the names of set-up captures whose value changed (`changed`): the manifest
+     * was filled with the first values, so a repeat with other values would not test the same fixture.
+     * A volatile capture that changed is not one of them: its new value replaces the old in `vars`
+     * (it may reach server.env only) and its name is returned in `refreshed`.
      */
     const resetBackends = async (d) => {
       const v = { ...vars };
       const changed = [];
+      const refreshed = [];
       for (const [i, b] of (t.backends ?? []).entries()) {
         await dk.d(['rm', '-f', '-v', backendName(i)], { log: L(`backend-${i}`), deadline: d });
         const bm = meta.backends[i];
         bm.resets = (bm.resets ?? 0) + 1;
         const got = await startBackend(i, b, bm, d, v);
-        for (const [k, x] of Object.entries(got)) if (x !== vars[k]) changed.push(k);
+        for (const [k, x] of Object.entries(got)) {
+          if (x === vars[k]) continue;
+          if (volatile.has(k)) refreshed.push(k);
+          else changed.push(k);
+        }
       }
-      return changed;
+      if (!changed.length) for (const k of refreshed) vars[k] = v[k];
+      return { changed, refreshed };
     };
 
     // 5. Set-up in the target's work folder, in a sandbox container on the internal network.
     const command = fill(t.server.command, vars);
-    const senv = fill(t.server.env ?? {}, vars);
-    const envRun = sandboxEnv(plan.bin, senv);
+    // `let`: a volatile capture refreshed between full repeats fills the server env again (refreshEnv).
+    let senv = fill(t.server.env ?? {}, vars);
+    let envRun = sandboxEnv(plan.bin, senv);
+    const refreshEnv = () => {
+      senv = fill(t.server.env ?? {}, vars);
+      envRun = sandboxEnv(plan.bin, senv);
+    };
     // runSetup runs the list's set-up steps; again before every full repeat after the first (D5).
     const runSetup = async (d, first) => {
       for (const [k, line] of (t.setup ?? []).entries()) {
@@ -1583,7 +1627,12 @@ async function runTarget(t, o, ctx, dk) {
             try {
               if (clean) await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: clean, dst: P.clean, ro: true }], cmd: ['bash', '-c', RESTORE_WORK] }, { log: L('fresh-state'), deadline: Math.min(rd, Date.now() + CLEAN_MS) }), `restore /work for repeat ${i}`);
               if (t.backends?.length) {
-                const changed = await resetBackends(rd);
+                const { changed, refreshed } = await resetBackends(rd);
+                if (refreshed.length && !changed.length) {
+                  // Names only: the values may be secrets.
+                  fr.volatile_refreshed = refreshed;
+                  refreshEnv();
+                }
                 if (changed.length) {
                   fr.status = 'not_started';
                   fr.fresh_state = false;
