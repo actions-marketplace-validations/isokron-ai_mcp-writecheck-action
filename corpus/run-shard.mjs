@@ -756,7 +756,9 @@ export function installPlan(t, plat) {
     files.push({ path: `${P.work}/pkg/artifact.tgz`, artifact: true });
     files.push({ path: `${P.work}/pkg/package.json`, text: t.lock.package_json });
     files.push({ path: `${P.work}/pkg/package-lock.json`, text: t.lock.package_lock });
-    steps.push({ name: 'install', net: 'egress', workdir: `${P.work}/pkg`, cmd: ['npm', 'ci', '--no-audit', '--no-fund', '--loglevel=error', ...(t.install_scripts ? [] : ['--ignore-scripts'])] });
+    // why: npm itself sometimes hangs and quits with "Exit handler never called!" (batch 1, 17 Nov); `npm ci` starts from a
+    // clean node_modules, so one more try is safe. A time limit is never retried.
+    steps.push({ name: 'install', net: 'egress', workdir: `${P.work}/pkg`, retry: 1, cmd: ['npm', 'ci', '--no-audit', '--no-fund', '--loglevel=error', ...(t.install_scripts ? [] : ['--ignore-scripts'])] });
     steps.push({ name: 'deps', net: 'none', workdir: `${P.work}/pkg`, cmd: ['npm', 'ls', '--all', '--json'], capture: 'deps.json', mayFail: true });
     return { files, steps, bin: `${P.work}/pkg/node_modules/.bin`, pkgdir: `${P.work}/pkg/node_modules/${t.package}` };
   }
@@ -930,6 +932,20 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' || raw ? buf : buf.toString('utf8'), stdout_truncated: keepStdout !== 'buffer' && !!keepStdout && seen > buffered });
     });
   });
+}
+
+/**
+ * Runs an install step, and once more per `s.retry` if it failed by its own exit (never after a time limit or a
+ * spawn error, never for a step allowed to fail, never past the deadline). Each retry is recorded in
+ * `meta.install_retries`.
+ */
+export async function withRetry(runOnce, s, meta, deadline, now = Date.now) {
+  let r = await runOnce();
+  for (let k = 0; k < (s.retry ?? 0) && !s.mayFail && !r.timed_out && !r.spawn_error && r.exit !== 0 && now() < deadline; k++) {
+    (meta.install_retries ??= []).push({ step: s.name, first_exit: r.exit, first_signal: r.signal ?? null, first_ms: r.ms ?? null });
+    r = await runOnce();
+  }
+  return r;
 }
 
 async function must(step, what) {
@@ -1328,7 +1344,7 @@ async function runTarget(t, o, ctx, dk) {
     }
     for (const s of plan.steps) {
       const net = s.net === 'egress' ? egress.name : 'none';
-      const r = await dk.sandbox({ log: L(s.capture ? 'deps' : 'install'), deadline, network: net, mounts, env: envInstall, workdir: s.workdir ?? P.work, cmd: s.cmd, keepStdout: !!s.capture, target: t.id });
+      const r = await withRetry(() => dk.sandbox({ log: L(s.capture ? 'deps' : 'install'), deadline, network: net, mounts, env: envInstall, workdir: s.workdir ?? P.work, cmd: s.cmd, keepStdout: !!s.capture, target: t.id }), s, meta, deadline);
       if (s.capture) {
         writeFileSync(join(odir, s.capture), r.stdout);
         meta.deps = { file: s.capture, sha256: sha256Text(r.stdout) };
