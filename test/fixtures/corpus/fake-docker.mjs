@@ -9,6 +9,7 @@
  * The real thing is tested by test/corpus-container.test.mjs (CORPUS_DOCKER_TESTS=1).
  */
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -22,6 +23,20 @@ const nets = existsSync(netFile) ? JSON.parse(readFileSync(netFile, 'utf8')) : {
 const done = (code = 0, out = '') => {
   if (out) process.stdout.write(out);
   process.exit(code);
+};
+/** A counter kept in a FAKE root file, for answers that change from one call to the next. */
+const count = (name) => {
+  const f = join(root, `${name}-count`);
+  const n = (existsSync(f) ? Number(readFileSync(f, 'utf8')) : 0) + 1;
+  writeFileSync(f, String(n));
+  return n;
+};
+/** The n-th line of a FAKE root file (the last one once they run out), or null without the file. */
+const nth = (name, n) => {
+  const f = join(root, name);
+  if (!existsSync(f)) return null;
+  const lines = readFileSync(f, 'utf8').trim().split('\n');
+  return lines[Math.min(n, lines.length) - 1];
 };
 const stdin = () => new Promise((r) => {
   const c = [];
@@ -45,8 +60,16 @@ if (cmd === 'network') {
   if (rest[0] === 'inspect') done(0, `${nets[rest.at(-1)] ? 'true' : 'false'}\n`);
   done(0);
 }
-// A backend that never gets ready (wait fails) and what its logs say (FAKE root files).
-if (cmd === 'exec') done(existsSync(join(root, 'backend-not-ready')) ? 1 : 0);
+// A backend that never gets ready (wait fails) and what its logs say (FAKE root files). A snapshot
+// exec (an argument SNAPSHOT) prints a numbered state; a capture exec (CAPTURE) prints `capture-values`' n-th line.
+if (cmd === 'exec') {
+  if (rest.includes('SNAPSHOT')) {
+    const n = count('snapshot');
+    done(existsSync(join(root, 'snapshot-exit')) ? Number(readFileSync(join(root, 'snapshot-exit'), 'utf8')) : 0, `${NAME} rows: state ${n}\n`);
+  }
+  if (rest.includes('CAPTURE')) done(0, `${nth('capture-values', count('capture')) ?? 'cap'}\n`);
+  done(existsSync(join(root, 'backend-not-ready')) ? 1 : 0);
+}
 if (cmd === 'logs') {
   const n = existsSync(join(root, 'backend-log-bytes')) ? Number(readFileSync(join(root, 'backend-log-bytes'), 'utf8')) : 0;
   process.stderr.write(`${NAME} backend: setresuid failed: Operation not permitted\n`);
@@ -84,11 +107,40 @@ if (script.includes('cd /work/out')) {
   const sha = existsSync(join(root, 'fetch-sha')) ? readFileSync(join(root, 'fetch-sha'), 'utf8').trim() : c[3];
   const code = existsSync(join(root, 'fetch-exit')) ? Number(readFileSync(join(root, 'fetch-exit'), 'utf8')) : 0;
   done(code, code === 0 ? `sha256 ${sha} bytes 10\n` : '');
+} else if (script.includes('node -v')) {
+  // The version probe (VERSION_PROBE), as the runtime image would answer it.
+  done(0, 'node v22.11.0\npython none\n');
+} else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/surface.mjs') {
+  // The surface probe: what it would print for a two-tool server (FAKE root `surface-fail`: initialize fails).
+  if (existsSync(join(root, 'surface-fail'))) done(1, JSON.stringify({ initialize: null, initialize_error: 'the server exited (exit 1 signal null)', tools: null }) + '\n');
+  done(0, JSON.stringify({
+    protocol_offered: c[2], initialize: { protocolVersion: c[2], capabilities: { tools: {}, logging: {} }, serverInfo: { name: NAME, version: '1.0.0' }, instructions: 'Use get first.' },
+    tools: { tools: [{ name: 'get', description: 'Read one.', inputSchema: { type: 'object', properties: { id: { type: 'string' } } }, annotations: { readOnlyHint: true } },
+      { name: 'put', inputSchema: { properties: { id: { type: 'string' } }, type: 'object' }, outputSchema: { type: 'object' } }] },
+    pages: 1, initialize_error: null, tools_error: null, transport: { exit: null }, captured_at: '2026-11-17T00:00:00.000Z',
+  }) + '\n');
+} else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/config-source.mjs') {
+  // The config-source helper: one file copied into /work/out/config-source and its listing.
+  const body = Buffer.from(`{"name":"${NAME}"}\n`);
+  const rel = 'pkg/node_modules/x/package.json';
+  mkdirSync(dirname(inVol(join(c[7], rel))), { recursive: true });
+  writeFileSync(inVol(join(c[7], rel)), existsSync(join(root, 'config-tamper')) ? 'changed' : body);
+  done(0, JSON.stringify({ root: '/work/pkg/node_modules/x', files: [{ path: rel, sha256: createHash('sha256').update(body).digest('hex'), bytes: body.length, rule: 'manifest' }, { path: '../escape', sha256: 'a'.repeat(64), bytes: 1, rule: 'config' }], skipped: [{ path: 'pkg/big', bytes: 9, rule: 'config', why: 'size limit' }], skipped_more: 0, total_bytes: body.length, why: null }) + '\n');
 } else if (c[1] === '/opt/mwsc/dist/src/cli/main.js') {
   const sub = c[2];
   process.stdout.write(`${NAME} violated MWS-ANN-1 ::error::nope\n`);
   process.stderr.write(`${NAME} on stderr\n`);
-  if (sub === 'plan') done(0, 'plan hash: 0123456789abcdef\n');
+  if (sub === 'plan') done(0, `plan hash: ${nth('plan-hashes', count('plan')) ?? '0123456789abcdef'}\n`);
+  if (sub === 'run') {
+    // A full run: a results folder with its write count; FAKE root `run-sleep-ms` holds it past a time limit.
+    const n = count('run');
+    const sleep = existsSync(join(root, 'run-sleep-ms')) ? Number(readFileSync(join(root, 'run-sleep-ms'), 'utf8')) : 0;
+    if (sleep) await new Promise((r) => setTimeout(r, sleep));
+    const r = inVol(join(c[c.indexOf('--out') + 1], `run-${n}`));
+    mkdirSync(r, { recursive: true });
+    writeFileSync(join(r, 'results.json'), JSON.stringify({ format: 'mws-results/1', run: { status: 'complete', writes: 10 + n }, results: [] }));
+    done(Number(nth('run-exits', n) ?? 0));
+  }
   if (sub === 'catalog') {
     // What the stderr-tee would have kept of the server's stderr (it runs inside the real container).
     mkdirSync(inVol('/work/out/server-stderr'), { recursive: true });

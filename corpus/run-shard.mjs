@@ -6,7 +6,7 @@
  *
  *   node corpus/run-shard.mjs --targets T.json --cli DIR --out DIR [--work DIR] [--lane ci|mac]
  *                             [--shard N --shards M] [--only ID,ID] [--cli-commit SHA]
- *                             [--consume-targets] [--images corpus/images.json]
+ *                             [--consume-targets] [--images corpus/images.json] [--spec FILE]
  *
  * Isolation (every target is untrusted). No target code runs on the host. Each target's install,
  * set-up, CLI and server run in containers of a digest-pinned image (corpus/images.json), started
@@ -54,10 +54,11 @@ import { arch, platform, release } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { sha256Jcs } from './jcs.mjs';
 import { checkListedUrl } from './sandbox/fetch.mjs';
 
 export const LABEL = 'automated candidate, unreviewed: not a finding';
-export const RUN_FORMAT = 'isokron-corpus-run/2';
+export const RUN_FORMAT = 'isokron-corpus-run/3';
 export const TARGETS_FORMAT = 'isokron-corpus-targets/2';
 export const SANDBOX_USER = '10001:10001';
 const CLI_DOCUMENTED = new Set([0, 1, 2, 3, 4, 130]);
@@ -112,6 +113,12 @@ export const CPUS = 2;
 export const DOCKER_MIN = [26, 0, 0];
 /** The only registry a hash-locked npm dependency may come from. */
 export const NPM_REGISTRY = 'https://registry.npmjs.org/';
+/** The protocol revision the surface probe offers in `initialize` (the CLI's own PROTOCOL_VERSION at main 30fdddb). */
+export const SURFACE_PROTOCOL = '2025-11-25';
+/** Time limit of the surface probe (initialize and every tools/list page). */
+const SURFACE_MS = Number(process.env.CORPUS_SURFACE_MS || 60_000);
+/** Time limit of the small informational steps: the version probe, the config-source copy, one snapshot. */
+const SMALL_STEP_MS = 120_000;
 /** `full.repeats` and `full.timeout_s` bounds (a GitHub-hosted job stops at 6 h whatever we allow). */
 export const MAX_REPEATS = 10;
 export const MAX_FULL_TIMEOUT_S = 21_600;
@@ -408,6 +415,83 @@ export function validateList(list) {
   return { invalid, dropped };
 }
 
+/** `name[:tag]@sha256:<hex>` into its tag part and digest; the digest is null for an unpinned reference. */
+export function imageParts(ref) {
+  const m = /^(.*)@(sha256:[0-9a-f]{64})$/.exec(String(ref ?? ''));
+  return m ? { image_tag: m[1], image_digest: m[2] } : { image_tag: ref ?? null, image_digest: null };
+}
+
+/** The version probe: what `node` and `python3` the server under test would get (the same PATH). */
+export const VERSION_PROBE = 'v=$(node -v 2>/dev/null) && echo "node $v" || echo "node -"; '
+  + 'if command -v python3 >/dev/null 2>&1; then v=$(python3 -V 2>&1) && echo "python $v" || echo "python -"; else echo "python none"; fi';
+
+/** The versions the version probe printed inside the target container (null with a reason otherwise). */
+export function envVersions(r) {
+  const out = {};
+  const text = typeof r?.stdout === 'string' ? r.stdout : '';
+  const failed = !r || r.timed_out || r.spawn_error || r.exit !== 0;
+  const ran = `the version probe did not run (exit ${r?.exit ?? null}${r?.timed_out ? ', time limit' : ''})`;
+  const node = /^node (v\d+\.\d+\.\d+\S*)\s*$/m.exec(text);
+  out.node_version = node ? node[1] : null;
+  if (!node) out.node_version_why = failed ? ran : /^node -$/m.test(text) ? 'node -v failed in the target container' : 'node -v printed nothing recognisable';
+  const py = /^python Python (\d+\.\d+\.\d+\S*)\s*$/m.exec(text);
+  out.python_version = py ? py[1] : null;
+  if (!py) out.python_version_why = failed ? ran : /^python none$/m.test(text) ? "python3 is not on the target container's PATH" : /^python -$/m.test(text) ? 'python3 -V failed in the target container' : 'python3 -V printed nothing recognisable';
+  return out;
+}
+
+const jcsOrWhy = (v) => {
+  try { return { hash: sha256Jcs(v) }; } catch (e) { return { hash: null, why: e.message }; }
+};
+
+/**
+ * `meta.surface` from the probe's output (`s`: { initialize, tools, ... }). Pure; unit-tested.
+ * sha256_jcs is over { initialize, tools } (RFC 8785), and only when both answered.
+ */
+export function surfaceMeta(s, file = 'surface.json') {
+  if (!s?.initialize) return { surface: null, surface_why: s?.initialize_error ? `initialize: ${String(s.initialize_error).slice(0, 300)}` : 'the surface probe gave no initialize result' };
+  const init = s.initialize;
+  const m = { file };
+  if (s.tools) {
+    const h = jcsOrWhy({ initialize: init, tools: s.tools });
+    m.sha256_jcs = h.hash;
+    if (!h.hash) m.sha256_jcs_why = h.why;
+  } else {
+    m.sha256_jcs = null;
+    m.sha256_jcs_why = `tools/list did not answer: ${String(s.tools_error ?? 'no result').slice(0, 300)}`;
+  }
+  m.protocol_version = typeof init.protocolVersion === 'string' ? init.protocolVersion : null;
+  if (m.protocol_version === null) m.protocol_version_why = 'initialize gave no protocolVersion string';
+  const si = init.serverInfo && typeof init.serverInfo === 'object' && !Array.isArray(init.serverInfo) ? init.serverInfo : null;
+  m.server_info = si ? { name: typeof si.name === 'string' ? si.name : null, version: typeof si.version === 'string' ? si.version : null } : null;
+  if (!si) m.server_info_why = 'initialize gave no serverInfo';
+  const caps = init.capabilities && typeof init.capabilities === 'object' && !Array.isArray(init.capabilities) ? init.capabilities : null;
+  m.capabilities_keys = caps ? Object.keys(caps).sort() : null;
+  if (!caps) m.capabilities_keys_why = 'initialize gave no capabilities object';
+  m.instructions_sha256 = typeof init.instructions === 'string' ? sha256Text(init.instructions) : null;
+  if (m.instructions_sha256 === null) m.instructions_sha256_why = 'the server gave no instructions';
+  const tools = Array.isArray(s.tools?.tools) ? s.tools.tools : null;
+  m.tool_count = tools ? tools.length : null;
+  if (!tools) m.tool_count_why = 'tools/list did not answer';
+  m.tools = tools ? tools.map((t) => {
+    const o = t && typeof t === 'object' && !Array.isArray(t) ? t : {};
+    const schema = (v) => (v === undefined || v === null ? { hash: null, why: 'absent' } : jcsOrWhy(v));
+    const inS = schema(o.inputSchema);
+    const outS = schema(o.outputSchema);
+    return {
+      name: typeof o.name === 'string' ? o.name : null,
+      description_sha256: typeof o.description === 'string' ? sha256Text(o.description) : null,
+      input_schema_sha256_jcs: inS.hash,
+      ...(inS.hash ? {} : { input_schema_sha256_jcs_why: inS.why }),
+      output_schema_sha256_jcs: outS.hash,
+      ...(outS.hash || outS.why === 'absent' ? {} : { output_schema_sha256_jcs_why: outS.why }),
+      annotations: o.annotations && typeof o.annotations === 'object' && !Array.isArray(o.annotations) ? o.annotations : null,
+    };
+  }) : null;
+  if (s.pages !== undefined) m.tools_pages = s.pages;
+  return { surface: m };
+}
+
 /**
  * A set-up step of the `fetch` form: `{ fetch: { url, sha256, dest?, strip_components? } }`. The
  * tarball is fetched by our helper (allowlisted https hosts, every redirect checked), verified
@@ -609,6 +693,7 @@ function args(argv) {
     else if (a === '--cli-commit') o.cliCommit = v();
     else if (a === '--consume-targets') o.consumeTargets = true;
     else if (a === '--images') o.images = v();
+    else if (a === '--spec') o.spec = v();
     else throw new HarnessError(`unknown option ${a}`);
   }
   for (const k of ['targets', 'cli', 'out']) if (!o[k]) throw new HarnessError(`--${k} is required`);
@@ -626,7 +711,7 @@ const now = () => new Date().toISOString();
  * `onTimeout` runs once when the deadline passes (a container is removed there: killing the docker
  * client alone would leave the container running). `keepStdout: 'buffer'` keeps raw bytes.
  */
-function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null }) {
+function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false }) {
   return new Promise((done) => {
     const t0 = Date.now();
     const out = createWriteStream(log, { flags: 'a' });
@@ -635,6 +720,7 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
     let logged = 0;
     let buffered = 0;
     let dropped = 0;
+    let seen = 0;
     // Up to the cap and then nothing: a cut chunk keeps its head, so the log stays one prefix.
     const toLog = (c) => {
       const keep = Math.max(0, Math.min(c.length, LOG_CAP - logged));
@@ -653,6 +739,7 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       child.stdin.end(input);
     }
     child.stdout.on('data', (c) => {
+      seen += c.length;
       // 'buffer' is ours only (docker cp of a pinned image's file); text captures of target steps are capped.
       if (keepStdout === 'buffer') chunks.push(c);
       else if (keepStdout && buffered < BUF_CAP) {
@@ -660,7 +747,8 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
         buffered += keep;
         chunks.push(keep === c.length ? c : c.subarray(0, keep));
       }
-      if (keepStdout !== 'buffer') toLog(c);
+      // A capture written to its own file (surface, snapshot) is not copied into the log as well.
+      if (keepStdout !== 'buffer' && logStdout) toLog(c);
     });
     child.stderr.on('data', (c) => toLog(c));
     let timedOut = false;
@@ -678,9 +766,9 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       // Anything the step left behind in its process group dies with it: an orphan would outlive
       // the job and the runner prints its process name in the public log.
       try { process.kill(-child.pid, 'SIGKILL'); } catch {}
-      out.end(`${dropped ? `\n# ${dropped} bytes of output dropped (log cap)\n` : ''}# exit ${code} signal ${signal}${timedOut ? ' (time limit)' : ''} after ${Date.now() - t0} ms\n`);
+      out.end(`${dropped ? `\n# ${dropped} bytes of output dropped (log cap)\n` : ''}${logStdout ? '' : `# ${seen} bytes of stdout captured, not logged\n`}# exit ${code} signal ${signal}${timedOut ? ' (time limit)' : ''} after ${Date.now() - t0} ms\n`);
       const buf = Buffer.concat(chunks);
-      done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' ? buf : buf.toString('utf8') });
+      done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' || raw ? buf : buf.toString('utf8'), stdout_truncated: keepStdout !== 'buffer' && !!keepStdout && seen > buffered });
     });
   });
 }
@@ -723,7 +811,7 @@ class Docker {
   }
 
   d(argv, opts = {}) {
-    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null });
+    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false });
   }
 
   /** Remove a container now, without waiting (at a time limit: killing the client leaves it running). */
@@ -744,11 +832,11 @@ class Docker {
   }
 
   /** A sandbox container running `cmd`; removed (with its processes) at the deadline. */
-  async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, target }) {
+  async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, target }) {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
     const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd });
     const r = await run('docker', argv, {
-      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input,
+      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input, logStdout,
       onTimeout: () => this.kill(name),
     });
     if (r.timed_out) await this.d(['rm', '-f', name], { log });
@@ -879,13 +967,28 @@ function copyOut(dk, vol, dest, log, target) {
   });
 }
 
+/**
+ * The bin whose entry point the config-source copy follows: `bins[0]` from the list when it is a
+ * plain file name, else the server command's first word when it names a file in the bin folder.
+ */
+export function entryBin(t, binDir, command0) {
+  const ok = (n) => typeof n === 'string' && /^[A-Za-z0-9@._+-]{1,214}$/.test(n) && n !== '.' && n !== '..';
+  if (Array.isArray(t.bins) && ok(t.bins[0])) return { bin: t.bins[0], from: 'bins[0]' };
+  if (typeof command0 === 'string' && command0.startsWith(`${binDir}/`) && ok(command0.slice(binDir.length + 1))) return { bin: command0.slice(binDir.length + 1), from: 'server.command[0]' };
+  return { bin: null, from: null, why: 'neither bins[0] nor the server command names a file in the bin folder' };
+}
+
+/** A config-source listing entry's path: relative, inside the work folder, nothing to climb out with. */
+const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length < 4096 && !p.startsWith('/') && !p.split('/').some((x) => x === '..' || x === '' || x === '.') && !/[\0\n\r]/.test(p);
+
 /** One target. Returns its metadata record; never throws. */
 async function runTarget(t, o, ctx, dk) {
   const odir = resolve(o.out, t.id);
   mkdirSync(join(odir, 'logs'), { recursive: true });
   const L = (n) => join(odir, 'logs', `${n}.log`);
-  const timeoutS = t.timeout_s ?? ctx.defaults.timeout_s ?? 600;
-  const deadline = Date.now() + timeoutS * 1000;
+  const lim = timeLimits(t, ctx.defaults);
+  const deadline = Date.now() + lim.base_s * 1000;
+  const notYet = (what) => `not ${what} (the target stopped before it)`;
   const meta = {
     format: RUN_FORMAT,
     label: LABEL,
@@ -905,7 +1008,9 @@ async function runTarget(t, o, ctx, dk) {
     lane: o.lane,
     started: now(),
     ended: null,
-    timeout_s: timeoutS,
+    // The whole target's limit; `time_limits` says how it is made up (D8).
+    timeout_s: lim.total_s,
+    time_limits: lim,
     artifact_sha256_verified: null,
     networks: {},
     backends: [],
@@ -919,15 +1024,43 @@ async function runTarget(t, o, ctx, dk) {
     harness_error: null,
     copy_out: null,
     results: [],
+    canary: t.canary ?? null,
+    env: {
+      node_version: null, node_version_why: notYet('probed'),
+      python_version: null, python_version_why: notYet('probed'),
+      ...ctx.env,
+      backends: (Array.isArray(t.backends) ? t.backends : []).map((b) => {
+        const p = imageParts(b?.image);
+        return { image_tag: typeof b?.image_tag === 'string' ? b.image_tag : p.image_tag, image_digest: p.image_digest, ...(p.image_digest ? {} : { image_digest_why: 'the image is not pinned by digest' }) };
+      }),
+      images: [{ role: 'runtime', ...imageParts(ctx.images.runtime) }],
+    },
+    surface: null,
+    surface_why: notYet('probed'),
+    config_source: null,
+    config_source_why: notYet('collected'),
+    backend_state: [],
+    full_runs: [],
   };
   const tag = `${ctx.runId}-${t.id}`;
+  const backendName = (i) => `corpus-${tag}-b${i}`;
   let vol = null;
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
     validateTarget(t, ctx.dropped);
     checkLane(t, o.lane);
+    // D3: one record per backend with a snapshot, filled when the snapshots are taken.
+    const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
+    const states = new Map();
+    for (const [i] of snapping) {
+      const e = { backend: i, before: null, before_why: 'no CLI step that writes ran', after: null, after_why: 'no CLI step that writes ran' };
+      if (lim.repeats > 1) e.repeats = [];
+      meta.backend_state.push(e);
+      states.set(i, e);
+    }
     // 1. The artifact, on the host: downloaded and checked against the pinned sha256. Never run here.
     const plan = installPlan(t, ctx.plat);
+    if (plan.needsUv) meta.env.images.push({ role: 'uv', ...imageParts(ctx.images.uv) });
     const art = artifactFor(t, ctx.plat);
     const dl = await download(art.url, art.sha256, L('install'));
     meta.artifact_sha256_verified = dl.sha256;
@@ -963,18 +1096,41 @@ async function runTarget(t, o, ctx, dk) {
     const vars = { tdir: P.work, bin: plan.bin, host: '127.0.0.1' };
     if (plan.pkgdir) vars.pkgdir = plan.pkgdir;
 
-    // 4. Backends: digest-pinned, on the internal network only, reachable as b0, b1, ...
-    for (const [i, b] of (t.backends ?? []).entries()) {
-      const name = `corpus-${tag}-b${i}`;
+    // 3b. D2 and D4, for the record only (neither decides the status): the node and python3 the
+    //     server under test gets, and the installed package's configuration source. Both run in a
+    //     sandbox container of this target with no network, after install and before any set-up.
+    const small = () => Math.min(deadline, Date.now() + SMALL_STEP_MS);
+    const ev = await dk.sandbox({ log: L('env'), deadline: small(), network: 'none', mounts, env: sandboxEnv(plan.bin), cmd: ['sh', '-c', VERSION_PROBE], keepStdout: true, target: t.id });
+    delete meta.env.node_version_why;
+    delete meta.env.python_version_why;
+    Object.assign(meta.env, envVersions(ev));
+    let command0;
+    try { command0 = fill(t.server?.command?.[0], vars); } catch {}
+    const eb = entryBin(t, plan.bin, command0);
+    const cs = await dk.sandbox({ log: L('config-source'), deadline: small(), network: 'none', mounts, env: sandboxEnv(plan.bin), target: t.id, keepStdout: true,
+      cmd: ['node', `${SANDBOX_TOOLS}/config-source.mjs`, P.work, String(t.ecosystem), String(t.package ?? ''), plan.bin, eb.bin ?? '', `${P.out}/config-source`] });
+    const listing = safeJson(cs.stdout.trim().split('\n').pop() ?? '');
+    delete meta.config_source_why;
+    meta.config_source_entry = eb;
+    if (!listing || !Array.isArray(listing.files)) {
+      meta.config_source_why = `the config-source helper gave no listing (exit ${cs.exit}${cs.timed_out ? ', time limit' : ''})`;
+    } else if (listing.why && !listing.files.length) {
+      meta.config_source_why = String(listing.why).slice(0, 300);
+    } else {
+      meta.config_source = listing.files
+        .filter((f) => safeRel(f?.path) && /^[0-9a-f]{64}$/.test(f.sha256) && Number.isSafeInteger(f.bytes))
+        .map((f) => ({ path: f.path, sha256: f.sha256, bytes: f.bytes, rule: String(f.rule), file: `sandbox/config-source/${f.path}` }));
+      meta.config_source_skipped = (Array.isArray(listing.skipped) ? listing.skipped : []).slice(0, 200);
+      if (listing.skipped_more) meta.config_source_skipped_more = Number(listing.skipped_more) || 0;
+    }
+
+    // 4. Backends: digest-pinned, on the internal network only, reachable as b0, b1, ... A backend is
+    //    started (and, between full repeats, started again from its image) by startBackend.
+    const startBackend = async (i, b, bm, d, v) => {
+      const name = backendName(i);
       const image = checkPinned(b.image, `backend ${i}`);
-      const imageId = await dk.image(image, L(`backend-${i}`), `backend ${i}`);
-      vars[`host${i}`] = `b${i}`;
-      vars[`port${i}`] = String(b.port);
-      if (i === 0) vars.host = 'b0';
       const capAdd = backendCaps(b, `backend ${i}`);
-      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, vars), args: fill(b.args ?? [], vars), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
-      const bm = { image, image_id: imageId, container_port: b.port, cap_add: capAdd, cap_add_default: b.cap_add === undefined, ready: null };
-      meta.backends.push(bm);
+      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, v), args: fill(b.args ?? [], v), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
       const blog = L(`backend-${i}`);
       // A backend that did not come up: its own output (docker logs, capped like every command's log)
       // and its state go into backend-N.log, in the encrypted bundle, before the teardown removes it.
@@ -985,25 +1141,57 @@ async function runTarget(t, o, ctx, dk) {
         bm.log = `logs/backend-${i}.log`;
         throw new HarnessError(why);
       };
-      const started = await dk.d(argv, { log: blog, deadline });
+      const started = await dk.d(argv, { log: blog, deadline: d });
       if (started.timed_out) throw Object.assign(new HarnessError(`backend ${i} start: time limit`), { timeout: true });
       if (started.spawn_error || started.exit !== 0) await backendFailed(`backend ${i} start: exit ${started.exit}`);
-      const waitUntil = Math.min(deadline, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
+      const waitUntil = Math.min(d, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
       let ok = !b.wait;
       while (!ok && Date.now() < waitUntil) {
-        const w = await dk.d(['exec', name, ...fill(b.wait, vars)], { log: blog, deadline });
+        const w = await dk.d(['exec', name, ...fill(b.wait, v)], { log: blog, deadline: d });
         ok = w.exit === 0;
         if (!ok) await new Promise((r) => setTimeout(r, 2000));
       }
       if (!ok) await backendFailed(`backend ${i} not ready`);
+      const captured = {};
       for (const s of b.setup ?? []) {
-        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, vars)], { log: blog, deadline, keepStdout: !!s.capture });
+        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture });
         if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
         if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
-        if (s.capture) vars[s.capture] = r.stdout.trim().split('\n').pop();
+        if (s.capture) v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
       }
       bm.ready = true;
+      return captured;
+    };
+    for (const [i, b] of (t.backends ?? []).entries()) {
+      const image = checkPinned(b.image, `backend ${i}`);
+      const imageId = await dk.image(image, L(`backend-${i}`), `backend ${i}`);
+      vars[`host${i}`] = `b${i}`;
+      vars[`port${i}`] = String(b.port);
+      if (i === 0) vars.host = 'b0';
+      const capAdd = backendCaps(b, `backend ${i}`);
+      const bm = { image, image_id: imageId, container_port: b.port, cap_add: capAdd, cap_add_default: b.cap_add === undefined, ready: null };
+      meta.backends.push(bm);
+      await startBackend(i, b, bm, deadline, vars);
     }
+    /**
+     * D5: fresh state between full repeats. Re-running a seed against the used database could fail
+     * (CREATE TABLE twice) or leave the last repeat's rows, so each backend is removed with its
+     * anonymous volumes and started again from its pinned image, waited for, and seeded by the same
+     * `setup` steps. Returns the names of set-up captures whose value changed: the manifest was filled
+     * with the first values, so a repeat with other values would not test the same fixture.
+     */
+    const resetBackends = async (d) => {
+      const v = { ...vars };
+      const changed = [];
+      for (const [i, b] of (t.backends ?? []).entries()) {
+        await dk.d(['rm', '-f', '-v', backendName(i)], { log: L(`backend-${i}`), deadline: d });
+        const bm = meta.backends[i];
+        bm.resets = (bm.resets ?? 0) + 1;
+        const got = await startBackend(i, b, bm, d, v);
+        for (const [k, x] of Object.entries(got)) if (x !== vars[k]) changed.push(k);
+      }
+      return changed;
+    };
 
     // 5. Set-up in the target's work folder, in a sandbox container on the internal network.
     const command = fill(t.server.command, vars);
@@ -1032,9 +1220,26 @@ async function runTarget(t, o, ctx, dk) {
       await must(dk.sandbox({ log: L('setup'), deadline, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
     }
 
+    // 5b. D1: the server surface (initialize and tools/list, nothing else), by our probe in a sandbox
+    //     container like the CLI's, starting the same server. For the record only; the probe's
+    //     output is written by the host to surface.json and never printed.
+    const sv = await dk.sandbox({ log: L('surface'), deadline: Math.min(deadline, Date.now() + SURFACE_MS + 30_000), network: internal.name, mounts, env: envRun, target: t.id, keepStdout: true, logStdout: false,
+      cmd: ['node', `${SANDBOX_TOOLS}/surface.mjs`, SURFACE_PROTOCOL, String(SURFACE_MS), '--', ...command] });
+    const probe = safeJson(sv.stdout.trim().split('\n').pop() ?? '');
+    delete meta.surface_why;
+    if (!probe || typeof probe !== 'object') {
+      meta.surface_why = `the surface probe gave no answer (exit ${sv.exit}${sv.timed_out ? ', time limit' : ''}${sv.stdout_truncated ? ', output over the capture cap' : ''})`;
+    } else {
+      const doc = { initialize: probe.initialize ?? null, tools: probe.tools ?? null, captured_at: probe.captured_at ?? now(),
+        protocol_offered: SURFACE_PROTOCOL, initialize_error: probe.initialize_error ?? null, tools_error: probe.tools_error ?? null, pages: probe.pages ?? null, transport: probe.transport ?? null };
+      writeFileSync(join(odir, 'surface.json'), JSON.stringify(doc, null, 2) + '\n');
+      Object.assign(meta, surfaceMeta(doc, 'surface.json'));
+      if (meta.surface) meta.surface.step = { exit: sv.exit, ms: sv.ms, timed_out: sv.timed_out };
+    }
+
     // 6. The manifests: the init draft (archived as data), then the one the CLI runs.
-    const cliStep = async (name, argv) => {
-      const r = await dk.sandbox({ log: L(name), deadline, network: internal.name, mounts, env: envRun, cmd: ['node', CLI_MAIN, ...argv], keepStdout: true, target: t.id });
+    const cliStep = async (name, argv, d = deadline) => {
+      const r = await dk.sandbox({ log: L(name), deadline: d, network: internal.name, mounts, env: envRun, cmd: ['node', CLI_MAIN, ...argv], keepStdout: true, target: t.id });
       const step = { step: name, exit: r.exit, signal: r.signal, timed_out: r.timed_out, spawn_error: r.spawn_error, container: true, ms: r.ms };
       meta.steps.push(step);
       return { r, step };
@@ -1051,6 +1256,39 @@ async function runTarget(t, o, ctx, dk) {
     meta.manifest_sha256 = sha256Text(manifestText);
     const manifest = `${P.work}/writecheck.yaml`;
 
+    // D3: the backends' state as text, before the first CLI step that writes and after the last.
+    // With repeats, also before and after each repeat (backend-N-full-I-before.txt / -after.txt).
+    const takeSnapshots = async (when, rep, d) => {
+      for (const [i, b] of snapping) {
+        const e = states.get(i);
+        const r = await dk.d(['exec', ...(b.snapshot.user ? ['-u', b.snapshot.user] : []), backendName(i), ...fill(b.snapshot.exec, vars)],
+          { log: L(`backend-${i}`), deadline: Math.min(d, Date.now() + SMALL_STEP_MS), keepStdout: true, logStdout: false, raw: true });
+        const ok = !r.timed_out && !r.spawn_error && r.exit === 0;
+        const why = ok ? null : `snapshot exec: exit ${r.exit}${r.timed_out ? ' (time limit)' : ''}`;
+        const rec = (file) => {
+          writeFileSync(join(odir, file), r.stdout);
+          return { file, sha256: createHash('sha256').update(r.stdout).digest('hex'), bytes: r.stdout.length, ...(r.stdout_truncated ? { truncated: true } : {}) };
+        };
+        const contract = `backend-${i}-${when}.txt`;
+        if (when === 'after' || rep === 1) {
+          if (ok) {
+            e[when] = rec(contract);
+            delete e[`${when}_why`];
+          } else {
+            rmSync(join(odir, contract), { force: true });
+            e[when] = null;
+            e[`${when}_why`] = why;
+          }
+        }
+        if (e.repeats) {
+          let er = e.repeats.find((x) => x.i === rep);
+          if (!er) e.repeats.push((er = { i: rep }));
+          er[when] = ok ? rec(`backend-${i}-full-${rep}-${when}.txt`) : null;
+          if (!ok) er[`${when}_why`] = why;
+        }
+      }
+    };
+
     // 7. plan, catalog, and full where a person accepted the plan hash. The first CLI step that does
     //    not complete decides the target's status; later steps still run when they can.
     const decisive = [];
@@ -1063,8 +1301,46 @@ async function runTarget(t, o, ctx, dk) {
       if (meta.plan_hash !== t.full.plan_hash) {
         meta.plan_drift = { accepted: t.full.plan_hash, seen: meta.plan_hash };
       } else {
-        const full = await cliStep('full', ['run', '-m', manifest, '--confirm-target', t.full.confirm, '--plan-hash', t.full.plan_hash, '--out', `${P.out}/results`, '--state', `${P.out}/state`]);
-        decisive.push(full.step);
+        // D5: `full.repeats` runs against fresh state, each into results/full-<i>/ with its own state
+        // folder. Every repeat after the first is planned again first and refused unless its plan
+        // hash is the accepted one (the same for every repeat).
+        for (let i = 1; i <= lim.repeats; i++) {
+          const rd = lim.full_s ? Date.now() + lim.full_s * 1000 : deadline;
+          const fr = { i, results_dir: `sandbox/results/full-${i}`, cli_exit: null, writes: null, status: null, plan_hash: null };
+          meta.full_runs.push(fr);
+          if (i > 1) {
+            if (t.backends?.length) {
+              const changed = await resetBackends(rd);
+              fr.reset = 'backends started again from their images and seeded';
+              if (changed.length) {
+                fr.status = 'not_started';
+                fr.why = `a set-up capture changed after the reset (${changed.join(', ')})`;
+                break;
+              }
+            } else fr.reset = 'none: the target has no backend';
+            const p = await cliStep(`plan-${i}`, ['plan', '-m', manifest], rd);
+            fr.plan_hash = (/^plan hash: ([0-9a-f]{16})$/m.exec(p.r.stdout) ?? [])[1] ?? null;
+            if (classifyCli(p.step) !== 'completed') {
+              decisive.push(p.step);
+              fr.status = 'not_started';
+              fr.why = `plan-${i} did not complete`;
+              break;
+            }
+            if (fr.plan_hash !== t.full.plan_hash) {
+              fr.status = 'not_started';
+              fr.why = 'the plan hash is not the accepted one; no later repeat runs';
+              meta.plan_drift_repeat = { i, accepted: t.full.plan_hash, seen: fr.plan_hash };
+              break;
+            }
+          } else fr.plan_hash = meta.plan_hash;
+          await takeSnapshots('before', i, rd);
+          const full = await cliStep(i === 1 ? 'full' : `full-${i}`, ['run', '-m', manifest, '--confirm-target', t.full.confirm, '--plan-hash', t.full.plan_hash, '--out', `${P.out}/results/full-${i}`, '--state', `${P.out}/state/full-${i}`], rd);
+          decisive.push(full.step);
+          fr.cli_exit = full.step.exit;
+          fr.status = classifyCli(full.step);
+          fr.ms = full.step.ms;
+          await takeSnapshots('after', i, rd);
+        }
       }
     }
     for (const s of decisive) {
@@ -1092,6 +1368,11 @@ async function runTarget(t, o, ctx, dk) {
     meta.status = e.timeout ? 'timeout' : 'harness_error';
     meta.harness_error = String(e.message ?? e);
   } finally {
+    for (const fr of meta.full_runs) {
+      if (fr.status !== null) continue;
+      fr.status = 'not_started';
+      fr.why ??= meta.harness_error ? `the target stopped: ${meta.status}` : 'the target stopped';
+    }
     try { await finishTarget(); } catch (e) {
       // One target's output must never stop the shard: record it and go on to the next target.
       meta.status = 'harness_error';
@@ -1106,7 +1387,7 @@ async function runTarget(t, o, ctx, dk) {
   async function finishTarget() {
     const lg = L('teardown');
     for (const [i] of (t.backends ?? []).entries()) {
-      await dk.d(['logs', `corpus-${tag}-b${i}`], { log: lg, deadline: Date.now() + 60_000 });
+      await dk.d(['logs', backendName(i)], { log: lg, deadline: Date.now() + 60_000 });
     }
     // Every container of this target (backends, and any sandbox still running) goes first, so the
     // copy below reads a volume nothing can write any more.
@@ -1132,13 +1413,47 @@ async function runTarget(t, o, ctx, dk) {
     }
     const draft = join(odir, 'sandbox', 'init-draft.yaml');
     if (existsSync(draft) && lstatSync(draft).isFile()) meta.init_draft_sha256 = sha256File(draft);
+    // results/<run>/results.json, and one level deeper for the full repeats (results/full-<i>/<run>/).
+    const docs = new Map();
+    const take = (rel) => {
+      const f = join(odir, rel, 'results.json');
+      if (!existsSync(f) || !lstatSync(f).isFile()) return false;
+      const big = lstatSync(f).size > JSON_CAP;
+      const doc = big ? null : safeJson(readFileSync(f, 'utf8'));
+      docs.set(rel, doc);
+      meta.results.push({ folder: rel, sha256: sha256File(f), status: big ? 'too large to read' : doc?.run?.status ?? null });
+      return true;
+    };
     const rdir = join(odir, 'sandbox', 'results');
     if (existsSync(rdir) && lstatSync(rdir).isDirectory()) {
       for (const r of readdirSync(rdir)) {
-        const f = join(rdir, r, 'results.json');
-        if (!existsSync(f) || !lstatSync(f).isFile()) continue;
-        const big = lstatSync(f).size > JSON_CAP;
-        meta.results.push({ folder: `sandbox/results/${r}`, sha256: sha256File(f), status: big ? 'too large to read' : safeJson(readFileSync(f, 'utf8'))?.run?.status ?? null });
+        if (take(`sandbox/results/${r}`)) continue;
+        const sub = join(rdir, r);
+        if (/^full-\d+$/.test(r) && lstatSync(sub).isDirectory()) for (const x of readdirSync(sub).sort()) take(`sandbox/results/${r}/${x}`);
+      }
+    }
+    for (const fr of meta.full_runs) {
+      const mine = meta.results.filter((x) => x.folder.startsWith(`${fr.results_dir}/`));
+      if (mine.length !== 1) {
+        fr.writes = null;
+        fr.writes_why = mine.length ? 'more than one results folder' : 'no results.json';
+        continue;
+      }
+      const doc = docs.get(mine[0].folder);
+      fr.results = mine[0].folder;
+      fr.run_status = mine[0].status;
+      fr.writes = Number.isSafeInteger(doc?.run?.writes) ? doc.run.writes : null;
+      if (fr.writes === null) fr.writes_why = doc ? 'results.json has no run.writes' : 'results.json could not be read';
+    }
+    // D4: each copied config-source file, as it came back (the server under test ran later with
+    // /work writable, so a change after the copy is recorded, never hidden).
+    for (const f of meta.config_source ?? []) {
+      const p = join(odir, 'sandbox', 'config-source', ...f.path.split('/'));
+      let now256 = null;
+      try { if (lstatSync(p).isFile()) now256 = sha256File(p); } catch {}
+      if (now256 !== f.sha256) {
+        f.changed_after_copy = true;
+        f.sha256_in_bundle = now256;
       }
     }
   }
@@ -1190,6 +1505,13 @@ async function context(o) {
   if (!commit) commit = (await q('git', ['-C', cliDir, 'rev-parse', 'HEAD'])) || null;
   const images = JSON.parse(readFileSync(o.images, 'utf8'));
   for (const k of ['runtime', 'uv']) checkPinned(images[k], `images.json ${k}`);
+  // D2: the CLI build carries no spec document, only the name of the text it follows (SPEC_TEXT in
+  // its requirements module). The workflow checks out spec/mws.md from the same CLI commit, beside
+  // the package; its sha256 is recorded (--spec names another file).
+  const specFile = o.spec ? resolve(o.spec) : join(cliDir, '..', '..', 'spec', 'mws.md');
+  const specOk = existsSync(specFile) && lstatSync(specFile).isFile();
+  const reqJs = join(cliDir, 'dist', 'src', 'requirements.js');
+  const specText = existsSync(reqJs) ? (/SPEC_TEXT = ['"]([^'"\n]{1,200})['"]/.exec(readFileSync(reqJs, 'utf8')) ?? [])[1] ?? null : null;
   const runner = {
     lane: o.lane,
     image_os: process.env.ImageOS ?? null,
@@ -1213,6 +1535,20 @@ async function context(o) {
       ? { repository: process.env.GITHUB_REPOSITORY, run_id: process.env.GITHUB_RUN_ID, run_attempt: process.env.GITHUB_RUN_ATTEMPT, sha: process.env.GITHUB_SHA, workflow: process.env.GITHUB_WORKFLOW, event: process.env.GITHUB_EVENT_NAME }
       : null,
     runId: ((process.env.GITHUB_RUN_ID ?? `l${Date.now().toString(36)}`) + `s${o.shard}`).toLowerCase().replace(/[^a-z0-9]/g, ''),
+    env: {
+      docker_server_version: runner.docker || null,
+      ...(runner.docker ? {} : { docker_server_version_why: 'docker version printed nothing' }),
+      runner_image: runner.image_os && runner.image_version ? `${runner.image_os}/${runner.image_version}` : null,
+      ...(runner.image_os && runner.image_version ? {} : { runner_image_why: 'not a GitHub-hosted runner (ImageOS and ImageVersion are not set)' }),
+      cli_commit: commit ?? null,
+      ...(commit ? {} : { cli_commit_why: 'no --cli-commit and the CLI folder is not a git checkout' }),
+      cli_version: (/ (\d+\.\d+\.\d+[^\s)]*)/.exec(version) ?? [])[1] ?? null,
+      ...(/ \d+\.\d+\.\d+/.test(version) ? {} : { cli_version_why: 'the CLI printed no version' }),
+      spec_sha256: specOk ? sha256File(specFile) : null,
+      ...(specOk ? { spec_file: o.spec ? 'given with --spec' : 'spec/mws.md at the CLI commit' } : { spec_sha256_why: 'no spec document beside the CLI package (the CLI build itself carries none)' }),
+      spec_text: specText,
+      ...(specText ? {} : { spec_text_why: 'the CLI build names no SPEC_TEXT' }),
+    },
     isolation: { kind: 'container', user: SANDBOX_USER, cap_drop: 'ALL', no_new_privileges: true, read_only_root: true, mounts: 'named volumes only', install_network: 'bridge (egress)', run_network: 'internal', cpus: null, backend_cap_allowlist: [...BACKEND_CAPS], server_stderr_cap: STDERR_CAP },
   };
 }
