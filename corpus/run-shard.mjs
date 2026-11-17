@@ -112,6 +112,11 @@ export const CPUS = 2;
 export const DOCKER_MIN = [26, 0, 0];
 /** The only registry a hash-locked npm dependency may come from. */
 export const NPM_REGISTRY = 'https://registry.npmjs.org/';
+/** `full.repeats` and `full.timeout_s` bounds (a GitHub-hosted job stops at 6 h whatever we allow). */
+export const MAX_REPEATS = 10;
+export const MAX_FULL_TIMEOUT_S = 21_600;
+/** A dropped entry may carry reused_by_grandfathered only if it was dropped before the never-reuse rule (17 Nov 2026). */
+export const NEVER_REUSE_SINCE = '2026-11-17';
 
 /** The public exit of one target (see the header). Pure; unit-tested. */
 export function publicExit(t) {
@@ -310,15 +315,97 @@ export function backendCaps(b, what = 'backend') {
  * Checks of one target entry that need no network and start nothing, run for every entry when the
  * list is loaded: a target that fails them is refused before anything of it is fetched or started.
  */
-export function validateTarget(t) {
+export function validateTarget(t, dropped = []) {
   checkId(t?.id);
+  checkReuse(t.id, dropped);
   if (t.backends !== undefined && !Array.isArray(t.backends)) throw new HarnessError('backends must be a list');
-  for (const [i, b] of (t.backends ?? []).entries()) backendCaps(b, `backend ${i}`);
+  for (const [i, b] of (t.backends ?? []).entries()) {
+    backendCaps(b, `backend ${i}`);
+    if (b?.snapshot !== undefined) checkSnapshot(b.snapshot, `backend ${i}`);
+  }
   if (t.setup !== undefined && !Array.isArray(t.setup)) throw new HarnessError('setup must be a list');
   for (const [k, s] of (t.setup ?? []).entries()) {
     if (typeof s === 'string') continue;
     checkFetch(s, `set-up ${k}`);
   }
+  if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
+  if (t.full !== undefined) checkFull(t.full);
+}
+
+/**
+ * `backends[].snapshot`: `{ exec: [argv...], user? }`, run with `docker exec` in the backend (like a
+ * set-up step) before the first CLI step that writes and after the last; it prints the fixture's
+ * state as text. Templates are filled like set-up's.
+ */
+export function checkSnapshot(s, what = 'backend') {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) throw new HarnessError(`${what}: snapshot is { exec: [...], user? }`);
+  for (const k of Object.keys(s)) if (k !== 'exec' && k !== 'user') throw new HarnessError(`${what}: snapshot has an unknown field`);
+  if (!Array.isArray(s.exec) || !s.exec.length || s.exec.some((x) => typeof x !== 'string')) throw new HarnessError(`${what}: snapshot.exec must be a non-empty list of strings`);
+  if (s.user !== undefined && (typeof s.user !== 'string' || !/^[A-Za-z0-9_.-]{1,32}(:[A-Za-z0-9_.-]{1,32})?$/.test(s.user))) throw new HarnessError(`${what}: snapshot.user`);
+  return s;
+}
+
+/** `full.repeats` (1 to MAX_REPEATS, default 1) and `full.timeout_s` (seconds per repeat, 1 to MAX_FULL_TIMEOUT_S). */
+export function checkFull(f) {
+  if (!f || typeof f !== 'object' || Array.isArray(f)) throw new HarnessError('full must be an object');
+  if (f.repeats !== undefined && !(Number.isInteger(f.repeats) && f.repeats >= 1 && f.repeats <= MAX_REPEATS)) throw new HarnessError(`full.repeats must be a whole number from 1 to ${MAX_REPEATS}`);
+  if (f.timeout_s !== undefined && !(Number.isInteger(f.timeout_s) && f.timeout_s >= 1 && f.timeout_s <= MAX_FULL_TIMEOUT_S)) throw new HarnessError(`full.timeout_s must be a whole number of seconds from 1 to ${MAX_FULL_TIMEOUT_S}`);
+  return f;
+}
+
+/**
+ * The time limits of one target. `timeout_s` (or the list default, or 600) covers install, backends,
+ * set-up and the init, plan and catalog steps. With `full.timeout_s`, each full repeat (its reset,
+ * re-plan, snapshots and run) gets that many seconds of its own, so the whole target may take
+ * timeout_s + repeats x full.timeout_s; without it, the repeats share what is left of timeout_s.
+ */
+export function timeLimits(t, defaults = {}) {
+  const base = t.timeout_s ?? defaults.timeout_s ?? 600;
+  const repeats = t.full?.plan_hash ? (t.full.repeats ?? 1) : 0;
+  const full = t.full?.timeout_s ?? null;
+  return { base_s: base, full_s: full, repeats, total_s: base + (full ? repeats * full : 0) };
+}
+
+/**
+ * The list's `dropped[]`: each entry `{ id, dropped_at, reused_by_grandfathered?, ... }`. Checked when
+ * the list is loaded; an entry outside this shape refuses the whole list (the never-reuse rule cannot
+ * be applied without it). `reused_by_grandfathered: true` is accepted only on an entry dropped before
+ * NEVER_REUSE_SINCE (t08, reused once on 16 Nov 2026).
+ */
+export function checkDropped(dropped) {
+  if (dropped === undefined) return [];
+  if (!Array.isArray(dropped)) throw new HarnessError('dropped must be a list');
+  for (const [i, d] of dropped.entries()) {
+    if (!d || typeof d !== 'object' || Array.isArray(d)) throw new HarnessError(`dropped ${i}: not an object`);
+    try { checkId(d.id); } catch { throw new HarnessError(`dropped ${i}: id must match [a-z0-9][a-z0-9-]{0,31}`); }
+    if (typeof d.dropped_at !== 'string' || !/^\d{4}-\d{2}-\d{2}(T[0-9:.]+(Z|[+-]\d{2}:\d{2}))?$/.test(d.dropped_at)) throw new HarnessError(`dropped ${i} (${d.id}): dropped_at must be a date (YYYY-MM-DD or an ISO time)`);
+    if (d.reused_by_grandfathered !== undefined && typeof d.reused_by_grandfathered !== 'boolean') throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered must be true or false`);
+    if (d.reused_by_grandfathered === true && d.dropped_at.slice(0, 10) >= NEVER_REUSE_SINCE) throw new HarnessError(`dropped ${i} (${d.id}): reused_by_grandfathered is only for an id dropped before ${NEVER_REUSE_SINCE}`);
+  }
+  return dropped;
+}
+
+/** Never reuse an id: a target whose id was dropped is refused, unless every such entry is grandfathered. */
+export function checkReuse(id, dropped = []) {
+  const hits = dropped.filter((d) => d?.id === id);
+  if (hits.some((d) => d.reused_by_grandfathered !== true)) throw new HarnessError(`id ${id} was dropped and is never reused`);
+}
+
+/**
+ * List-level checks at load: the format, the targets list, dropped[], and every id's shape (a bad id
+ * or dropped[] refuses the whole list). Each entry is then checked on its own: one that fails is
+ * returned in `invalid` and refused, and the others run.
+ */
+export function validateList(list) {
+  if (list?.format !== TARGETS_FORMAT) throw new HarnessError('the target list has another format');
+  if (!Array.isArray(list.targets)) throw new HarnessError('the target list has no targets');
+  const dropped = checkDropped(list.dropped);
+  const invalid = new Map();
+  for (const t of list.targets) {
+    checkId(t?.id); // an id names folders and containers: a bad one refuses the whole list
+    try { validateTarget(t, dropped); } catch (e) { invalid.set(t.id, `refused at load: ${e.message}`); }
+  }
+  return { invalid, dropped };
 }
 
 /**
@@ -837,7 +924,7 @@ async function runTarget(t, o, ctx, dk) {
   let vol = null;
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
-    validateTarget(t);
+    validateTarget(t, ctx.dropped);
     checkLane(t, o.lane);
     // 1. The artifact, on the host: downloaded and checked against the pinned sha256. Never run here.
     const plan = installPlan(t, ctx.plat);
@@ -1188,15 +1275,9 @@ async function main() {
     const raw = readFileSync(o.targets);
     if (o.consumeTargets) rmSync(o.targets, { force: true }); // no clear-text list on disk while targets run
     const list = JSON.parse(raw.toString('utf8'));
-    if (list.format !== TARGETS_FORMAT) throw new HarnessError('the target list has another format');
-    if (!Array.isArray(list.targets)) throw new HarnessError('the target list has no targets');
-    // Every entry is checked at load (capabilities, set-up forms, ids): one that fails is refused
-    // before anything of it is fetched or started; the others run.
-    const invalid = new Map();
-    for (const t of list.targets) {
-      checkId(t?.id); // an id names folders and containers: a bad one refuses the whole list
-      try { validateTarget(t); } catch (e) { invalid.set(t.id, `refused at load: ${e.message}`); }
-    }
+    // Every entry is checked at load (capabilities, set-up forms, snapshots, repeats, a dropped id):
+    // one that fails is refused before anything of it is fetched or started; the others run.
+    const { invalid, dropped } = validateList(list);
     const seed = process.env.CORPUS_ORDER_SEED || randomBytes(16).toString('hex');
     const mine = shuffled(list.targets
       .filter((t) => (t.lane ?? 'ci') === o.lane && t.enabled !== false)
@@ -1205,6 +1286,7 @@ async function main() {
     const ctx = await context(o);
     ctx.defaults = list.defaults ?? {};
     ctx.invalid = invalid;
+    ctx.dropped = dropped;
     dk = new Docker(ctx, join(o.out, '_shard', 'docker.log'));
     await prepareDocker(ctx, dk);
     const shard = { format: RUN_FORMAT, label: LABEL, lane: o.lane, shard: o.shard, shards: o.shards, targets_list_sha256: createHash('sha256').update(raw).digest('hex'), targets_list_updated: list.updated ?? null, order_seed: seed, order: mine.map((t) => t.id), cli: ctx.cli, spec: ctx.spec, runner: ctx.runner, images: ctx.imageInfo, sandbox_tools_sha256: ctx.sandboxTools, isolation: ctx.isolation, github: ctx.github, started: now(), targets: [] };

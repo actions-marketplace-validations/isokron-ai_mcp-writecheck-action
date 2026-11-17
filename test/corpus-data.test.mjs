@@ -13,6 +13,9 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import {
+  checkDropped, checkFull, checkSnapshot, HarnessError, MAX_FULL_TIMEOUT_S, MAX_REPEATS, NEVER_REUSE_SINCE, TARGETS_FORMAT, timeLimits, validateList, validateTarget,
+} from '../corpus/run-shard.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -163,3 +166,59 @@ test('D4: config source for a PyPI package: METADATA, the RECORD\'s files, the c
   ]);
 });
 
+
+// ------------------------------------------------------------------------------------------------
+// The target list's checks
+// ------------------------------------------------------------------------------------------------
+
+test('D3: backends[].snapshot is { exec: [strings], user? } and is checked at load', () => {
+  assert.doesNotThrow(() => checkSnapshot({ exec: ['psql', '-U', 'mwsc', '-c', 'SELECT * FROM mwsc_items ORDER BY id'] }));
+  assert.doesNotThrow(() => checkSnapshot({ exec: ['redis-cli', 'KEYS', '*'], user: 'redis' }));
+  for (const bad of ['psql', [], {}, { exec: [] }, { exec: 'psql -c x' }, { exec: ['x', 1] }, { exec: ['x'], user: 'a b' }, { exec: ['x'], capture: 'y' }]) {
+    assert.throws(() => checkSnapshot(bad), HarnessError, JSON.stringify(bad));
+  }
+  assert.throws(() => validateTarget({ id: 't01', backends: [{ image: 'x', snapshot: { exec: [] } }] }), /backend 0: snapshot\.exec/);
+  assert.doesNotThrow(() => validateTarget({ id: 't01', backends: [{ image: 'x', snapshot: { exec: ['true'] } }] }));
+});
+
+test('D5 / D8: full.repeats and full.timeout_s are checked; the time limit grows by repeats x full.timeout_s', () => {
+  for (const repeats of [0, 11, 1.5, '3', null]) assert.throws(() => checkFull({ repeats }), /full\.repeats/, String(repeats));
+  for (const timeout_s of [0, MAX_FULL_TIMEOUT_S + 1, 2.5, '600']) assert.throws(() => checkFull({ timeout_s }), /full\.timeout_s/, String(timeout_s));
+  assert.doesNotThrow(() => checkFull({ repeats: MAX_REPEATS, timeout_s: MAX_FULL_TIMEOUT_S }));
+  assert.equal(MAX_REPEATS >= 3, true, 'the complete profile uses 3');
+  const full = { plan_hash: '0123456789abcdef', repeats: 3, timeout_s: 1800 };
+  assert.deepEqual(timeLimits({ timeout_s: 600, full }), { base_s: 600, full_s: 1800, repeats: 3, total_s: 6000 });
+  assert.deepEqual(timeLimits({ full: { ...full, timeout_s: undefined } }, { timeout_s: 900 }), { base_s: 900, full_s: null, repeats: 3, total_s: 900 }, 'without full.timeout_s the repeats share timeout_s');
+  assert.deepEqual(timeLimits({ full: { plan_hash: 'x' } }), { base_s: 600, full_s: null, repeats: 1, total_s: 600 });
+  assert.equal(timeLimits({ full: { repeats: 3, timeout_s: 60 } }).repeats, 0, 'no accepted plan hash: no full run');
+  assert.throws(() => validateTarget({ id: 't01', full: { repeats: 0 } }), /full\.repeats/);
+});
+
+test('D6: canary is "good" or "bad"', () => {
+  assert.doesNotThrow(() => validateTarget({ id: 't01', canary: 'good' }));
+  assert.doesNotThrow(() => validateTarget({ id: 't01', canary: 'bad' }));
+  assert.throws(() => validateTarget({ id: 't01', canary: 'ugly' }), /canary/);
+});
+
+test('D7: a dropped id is never reused, except t08 (grandfathered: reused on 16 Nov, before the rule)', () => {
+  const list = (dropped, ids) => ({ format: TARGETS_FORMAT, dropped, targets: ids.map((id) => ({ id })) });
+  const dropped = [
+    { id: 't08', dropped_at: '2026-11-16', reason: 'package withdrawn', reused_by_grandfathered: true },
+    { id: 't05', dropped_at: '2026-11-17T09:00:00Z', reason: 'licence' },
+  ];
+  const { invalid } = validateList(list(dropped, ['t05', 't06', 't08']));
+  assert.deepEqual([...invalid.keys()], ['t05']);
+  assert.match(invalid.get('t05'), /refused at load: id t05 was dropped and is never reused/);
+  // t08 dropped a second time (no grandfather on that entry): refused like any other.
+  assert.ok(validateList(list([...dropped, { id: 't08', dropped_at: '2026-12-01' }], ['t08'])).invalid.has('t08'));
+  // validateTarget alone applies the same rule.
+  assert.throws(() => validateTarget({ id: 't05' }, dropped), /never reused/);
+  assert.doesNotThrow(() => validateTarget({ id: 't08' }, dropped));
+  // The grandfather flag cannot be used for an id dropped on or after the rule's date.
+  assert.throws(() => checkDropped([{ id: 't09', dropped_at: NEVER_REUSE_SINCE, reused_by_grandfathered: true }]), /only for an id dropped before/);
+  // dropped[] outside its shape refuses the whole list.
+  for (const bad of ['t05', [{ id: 't05' }], [{ id: 'T 5', dropped_at: '2026-11-17' }], [{ id: 't05', dropped_at: '17 Nov' }], [{ id: 't05', dropped_at: '2026-11-17', reused_by_grandfathered: 'yes' }], [null]]) {
+    assert.throws(() => validateList(list(bad, ['t01'])), HarnessError, JSON.stringify(bad));
+  }
+  assert.equal(validateList(list(undefined, ['t01'])).invalid.size, 0, 'a list without dropped[] reads as before');
+});
