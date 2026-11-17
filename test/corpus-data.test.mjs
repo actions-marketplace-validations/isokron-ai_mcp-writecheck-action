@@ -18,7 +18,7 @@ import {
   checkDropped, checkFull, checkSnapshot, entryBin, envVersions, HarnessError, imageParts, LABEL, MAX_FULL_TIMEOUT_S, MAX_REPEATS, NEVER_REUSE_SINCE,
   surfaceMeta, TARGETS_FORMAT, timeLimits, validateList, validateTarget, VERSION_PROBE,
 } from '../corpus/run-shard.mjs';
-import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect } from '../corpus/sandbox/config-source.mjs';
+import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const sha = (b) => createHash('sha256').update(b).digest('hex');
@@ -512,4 +512,39 @@ test('D1 / D4 / D7: a failed probe, a config file changed after the copy, a drop
   const r2 = drive(d2).r;
   assert.equal(r2.stdout, `${LABEL}\nrun finished, exit 125\n`);
   assert.match(readFileSync(join(d2, 'out', '_shard', 'harness-error.txt'), 'utf8'), /dropped 0 \(t05\): dropped_at/);
+});
+
+test('D4: config source: nothing is read through a symlink anywhere on its path; a linked package root is refused', () => {
+  const work = mkdtempSync(join(tmpdir(), 'corpus-cs-ln-'));
+  const real = join(work, 'elsewhere');
+  mkdirSync(join(real, 'lib'), { recursive: true });
+  writeFileSync(join(real, 'package.json'), '{}');
+  writeFileSync(join(real, 'lib', 'config.js'), 'x');
+  mkdirSync(join(work, 'pkg', 'node_modules'), { recursive: true });
+  symlinkSync(real, join(work, 'pkg', 'node_modules', 'linked'));
+  const r1 = collect({ work, ecosystem: 'npm', pkg: 'linked', binDir: join(work, 'bin'), bin: '', outDir: join(work, 'o1') });
+  assert.deepEqual(r1.files, []);
+  assert.match(r1.why, /symlink/);
+  // A symlinked folder above the package (pkg/node_modules itself).
+  const w2 = mkdtempSync(join(tmpdir(), 'corpus-cs-ln2-'));
+  mkdirSync(join(w2, 'real-nm', 'p'), { recursive: true });
+  writeFileSync(join(w2, 'real-nm', 'p', 'package.json'), '{}');
+  mkdirSync(join(w2, 'pkg'));
+  symlinkSync(join(w2, 'real-nm'), join(w2, 'pkg', 'node_modules'));
+  assert.match(collect({ work: w2, ecosystem: 'npm', pkg: 'p', binDir: join(w2, 'bin'), bin: '', outDir: join(w2, 'o') }).why, /symlink/);
+  // A PyPI RECORD path through a symlinked folder inside site-packages is skipped, not followed.
+  const w3 = mkdtempSync(join(tmpdir(), 'corpus-cs-ln3-'));
+  const site = join(w3, 'venv', 'lib', 'python3.12', 'site-packages');
+  mkdirSync(join(site, 'p-1.0.dist-info'), { recursive: true });
+  mkdirSync(join(w3, 'outside'));
+  writeFileSync(join(w3, 'outside', 'config.py'), 'secret');
+  symlinkSync(join(w3, 'outside'), join(site, 'p'));
+  writeFileSync(join(site, 'p-1.0.dist-info', 'METADATA'), 'Name: p\n');
+  writeFileSync(join(site, 'p-1.0.dist-info', 'RECORD'), 'p/config.py,,\np-1.0.dist-info/METADATA,,\n');
+  const r3 = collect({ work: w3, ecosystem: 'pypi', pkg: 'p', binDir: join(w3, 'venv', 'bin'), bin: '', outDir: join(w3, 'o') });
+  assert.deepEqual(r3.files.map((f) => f.rule), ['manifest']);
+  assert.ok(!r3.files.some((f) => f.path.endsWith('config.py')));
+  assert.equal(noLinks(w3, join(site, 'p', 'config.py')), false);
+  assert.equal(noLinks(w3, join(site, 'p-1.0.dist-info', 'METADATA')), true);
+  assert.equal(noLinks(w3, '/etc/hosts'), false);
 });

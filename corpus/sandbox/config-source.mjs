@@ -21,7 +21,7 @@
  */
 import { createHash } from 'node:crypto';
 import { closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readdirSync, readSync, realpathSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, relative } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative } from 'node:path';
 
 export const MAX_FILES = 40;
 export const MAX_TOTAL = 4 * 1024 * 1024;
@@ -77,17 +77,33 @@ function walk(root, skip = () => false) {
   return out;
 }
 
+/**
+ * True when `abs` lies inside `work` and no component of it below `work` is a symlink (each one is
+ * lstat-ed, not only the last): nothing reached through a link the target planted is read.
+ */
+export function noLinks(work, abs) {
+  const rel = relative(work, abs);
+  if (rel === '') return true;
+  if (rel.startsWith('..') || isAbsolute(rel)) return false;
+  let cur = work;
+  for (const c of rel.split('/')) {
+    cur = join(cur, c);
+    try { if (lstatSync(cur).isSymbolicLink()) return false; } catch { return false; }
+  }
+  return true;
+}
+
 const norm = (s) => String(s).toLowerCase().replace(/[-_.]+/g, '-');
 
 /** The PyPI package's dist-info folder and site-packages (in the venv the install made). */
 function pypiDist(work, pkg) {
   const lib = join(work, 'venv', 'lib');
-  if (!existsSync(lib)) return null;
+  if (!existsSync(lib) || !noLinks(work, lib)) return null;
   for (const py of readdirSync(lib).sort()) {
     const site = join(lib, py, 'site-packages');
-    if (!existsSync(site)) continue;
+    if (!existsSync(site) || !noLinks(work, site)) continue;
     for (const d of readdirSync(site).sort()) {
-      if (!d.endsWith('.dist-info')) continue;
+      if (!d.endsWith('.dist-info') || !noLinks(work, join(site, d))) continue;
       const meta = readRegular(join(site, d, 'METADATA'), CONFIG_MAX * 16);
       const name = meta.buf ? /^Name:\s*(.+)$/m.exec(meta.buf.toString('utf8'))?.[1]?.trim() : null;
       if (name && norm(name) === norm(pkg)) return { site, dist: join(site, d) };
@@ -145,6 +161,15 @@ export function collect({ work: workIn, ecosystem, pkg, binDir: binIn, bin, outD
     res.why = `unknown ecosystem ${ecosystem}`;
     return res;
   }
+  // The package root itself: its real path must be itself, inside the work folder, with no symlink
+  // on the way (a planted link would make us copy from elsewhere).
+  let real = null;
+  try { real = realpathSync(res.root); } catch {}
+  if (real !== res.root || !inWork(real) || !noLinks(work, res.root)) {
+    res.files = [];
+    res.why = 'the package folder is a symlink, or lies under one, or is outside the work folder';
+    return res;
+  }
 
   const relRoot = (abs) => relative(res.root, abs);
   const picks = []; // { abs, rule, max }
@@ -186,6 +211,7 @@ export function collect({ work: workIn, ecosystem, pkg, binDir: binIn, bin, outD
     done.add(p.abs);
     const path = relative(work, p.abs);
     if (!path || path.startsWith('..') || path.startsWith('/')) continue;
+    if (!noLinks(work, p.abs)) { skip({ path, bytes: null, rule: p.rule, why: 'a symlink in its path' }); continue; }
     if (res.files.length >= MAX_FILES) { skip({ path, bytes: null, rule: p.rule, why: 'file limit' }); continue; }
     const r = readRegular(p.abs, Math.min(p.max ?? Infinity, MAX_TOTAL - res.total_bytes));
     if (!r.buf) {
