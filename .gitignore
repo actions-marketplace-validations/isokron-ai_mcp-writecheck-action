@@ -1,0 +1,3 @@
+# A plaintext target list must never be committed (corpus/README.md, local runs).
+targets.json
+corpus/targets.json
