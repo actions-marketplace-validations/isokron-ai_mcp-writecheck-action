@@ -19,7 +19,9 @@ const argv = process.argv.slice(2);
 const root = process.env.FAKE_DOCKER_ROOT;
 const NAME = 'zz-secret-target-name';
 const env = JSON.parse(process.env.FAKE_DOCKER_SEEN_ENV ?? '[]');
-appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({ argv, env }) + '\n');
+// The values of secret-like names the docker client was given in its own environment (`--env NAME`).
+const secrets = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FAKE_') && /(TOKEN|SECRET|PASS|PWD|KEY|AUTH|CRED|_URL$|_URI$|DSN)/i.test(k)));
+appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({ argv, env, secrets }) + '\n');
 const netFile = join(root, 'networks.json');
 const nets = existsSync(netFile) ? JSON.parse(readFileSync(netFile, 'utf8')) : {};
 const done = (code = 0, out = '') => {
@@ -70,6 +72,8 @@ if (cmd === 'network') {
 // A backend that never gets ready (wait fails) and what its logs say (FAKE root files). A snapshot
 // exec (an argument SNAPSHOT) prints a numbered state; a capture exec (CAPTURE) prints `capture-values`' n-th line.
 if (cmd === 'exec') {
+  // FAKE root `exec-echo`: every exec says what it ran on stderr (output the driver logs, line by line).
+  if (existsSync(join(root, 'exec-echo'))) process.stderr.write(`ran: ${rest.join(' ')}\nand again: ${rest.slice(1).join(' ')}\n`);
   if (rest.includes('SNAPSHOT')) {
     const n = count('snapshot');
     done(existsSync(join(root, 'snapshot-exit')) ? Number(readFileSync(join(root, 'snapshot-exit'), 'utf8')) : 0, `${NAME} rows: state ${n}\n`);
@@ -131,6 +135,8 @@ if (script.includes('find . -mindepth 1')) {
   done(0, 'node v22.11.0\npython none\n');
 } else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/surface.mjs') {
   // The surface probe: what it would print for a two-tool server (FAKE root `surface-fail`: initialize fails).
+  // FAKE root `surface-json`: the probe's answer as given.
+  if (existsSync(join(root, 'surface-json'))) done(0, `${readFileSync(join(root, 'surface-json'), 'utf8').trim()}\n`);
   if (existsSync(join(root, 'surface-fail'))) done(1, JSON.stringify({ initialize: null, initialize_error: 'the server exited (exit 1 signal null)', tools: null }) + '\n');
   // A hostile answer: an initialize nested deeper than JSON.stringify can follow, and forged fields.
   if (existsSync(join(root, 'surface-deep'))) {

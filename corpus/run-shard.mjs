@@ -55,6 +55,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sha256Jcs } from './jcs.mjs';
+import { errorText, isSecretName, LineScrubber, redactArgv, Scrubber, scrubFreeText, SECRET_ENV_NAME } from './scrub.mjs';
+export { redactArgv, Scrubber, SECRET_ENV_NAME } from './scrub.mjs';
 import { listTree } from './sandbox/evidence.mjs';
 import { checkListedUrl } from './sandbox/fetch.mjs';
 
@@ -289,11 +291,24 @@ export function sandboxEnv(binDir, extra = {}) {
   };
 }
 
+/** Names the docker client reads itself: never set from a target's env. */
+const DOCKER_CLIENT_NAME = /^(DOCKER_|BUILDKIT_|COMPOSE_|BUILDX_)|^(PATH|HOME|LANG|LC_ALL|TZ|TMPDIR)$/;
+
+/**
+ * The secret-named values of a container's env (SECRET_ENV_NAME), to be given to the docker client
+ * process instead of its command line: `hide` lists the names, `env` their values. A name the docker
+ * client reads itself (DOCKER_*, PATH, HOME, ...) is never moved there.
+ */
+export function clientEnvFor(env) {
+  const hide = Object.keys(env ?? {}).filter((k) => SECRET_ENV_NAME.test(k) && !DOCKER_CLIENT_NAME.test(k) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+  return { hide, env: Object.fromEntries(hide.map((k) => [k, String(env[k])])) };
+}
+
 /**
  * `docker run` arguments for a container that runs target-controlled code. The flags are fixed here
  * and unit-tested; only volumes (never a bind mount), the network, the env and the command vary.
  */
-export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels = {}, workdir = P.work, stdin = false, cpus = CPUS, cmd }) {
+export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels = {}, workdir = P.work, stdin = false, cpus = CPUS, cmd, hideEnv = [] }) {
   checkPinned(image, 'sandbox');
   const a = [
     'run', '--rm', '--name', name,
@@ -317,7 +332,9 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
     if (m.dst === P.evidence) throw new HarnessError('a target container never mounts the evidence volume');
     a.push('--mount', volumeMount(m));
   }
-  for (const [k, v] of Object.entries(env)) a.push('--env', `${k}=${v}`);
+  // A hidden name is passed as `--env NAME`: Docker takes its value from the client's environment, so it
+  // is not on the docker command line (see clientEnvFor).
+  for (const [k, v] of Object.entries(env)) a.push('--env', hideEnv.includes(k) ? k : `${k}=${v}`);
   if (stdin) a.push('--interactive');
   a.push(image, ...cmd);
   return a;
@@ -366,6 +383,44 @@ export function validateTarget(t, dropped = []) {
   if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
   if (t.timeout_s !== undefined && !(Number.isInteger(t.timeout_s) && t.timeout_s >= 1 && t.timeout_s <= MAX_TIMEOUT_S)) throw new HarnessError(`timeout_s must be a whole number of seconds from 1 to ${MAX_TIMEOUT_S}`);
   if (t.full !== undefined) checkFull(t.full);
+  volatileCaptures(t);
+}
+
+/**
+ * `backends[].setup[].volatile: true`: a set-up capture whose value is new on every backend start (a
+ * service that mints an access token, say). Allowed only on a step with `capture`, and the name may
+ * reach `server.env` only: never `server.command` or `full.manifest`, so that the manifest, and so the
+ * plan hash, is the same on every full repeat. Returns the volatile names; refuses a target otherwise.
+ */
+export function volatileCaptures(t) {
+  const vol = new Set();
+  const plain = new Set();
+  const names = (v) => new Set([...String(v).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((m) => m[1]));
+  // In order (a step can only use captures made before it): a capture whose exec uses a volatile name
+  // (`echo postgres://u:{{tok}}@b0` -> dsn) is volatile too.
+  for (const [i, b] of (Array.isArray(t.backends) ? t.backends : []).entries()) {
+    for (const [k, s] of (Array.isArray(b?.setup) ? b.setup : []).entries()) {
+      if (s?.volatile !== undefined && typeof s.volatile !== 'boolean') throw new HarnessError(`backend ${i} set-up ${k}: volatile must be true or false`);
+      if (s?.volatile === true && (typeof s.capture !== 'string' || !s.capture)) throw new HarnessError(`backend ${i} set-up ${k}: volatile is only for a step with capture`);
+      if (typeof s?.capture !== 'string' || !s.capture) continue;
+      // Derived too: an exec that reads a secret-named variable ($POSTGRES_PASSWORD, ${API_TOKEN}).
+      const execText = Array.isArray(s.exec) ? s.exec.join('\n') : '';
+      const derived = [...names(execText)].some((n) => vol.has(n))
+        || [...execText.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]{0,127})\}?/g)].some((m) => isSecretName(m[1]));
+      (s.volatile === true || derived ? vol : plain).add(s.capture);
+    }
+  }
+  for (const n of vol) if (plain.has(n)) throw new HarnessError(`capture ${n} is volatile in one set-up step and not in another`);
+  // The manifest's CLI template names are never filled by the driver (fillManifest), so a volatile
+  // capture of the same name does not reach it; server.command is filled with every name.
+  const where = [['full.manifest', typeof t.full?.manifest === 'string' ? t.full.manifest : '', CLI_TEMPLATE_NAMES], ['server.command', Array.isArray(t.server?.command) ? t.server.command.join('\n') : '', []]];
+  for (const [field, text, skip] of where) {
+    const used = names(text);
+    for (const n of vol) {
+      if (used.has(n) && !skip.includes(n)) throw new HarnessError(`volatile capture ${n} is used in ${field}: a volatile value may reach server.env only, so that the manifest and its plan hash stay the same on every repeat`);
+    }
+  }
+  return vol;
 }
 
 /**
@@ -651,7 +706,7 @@ export function checkFetch(s, what = 'set-up') {
 }
 
 /** `docker run -d` arguments for one backend: digest-pinned, on the target's internal network only. */
-export function backendRunArgs({ name, image, network, alias, env = {}, args = [], capAdd = [], labels = {}, cpus = CPUS }) {
+export function backendRunArgs({ name, image, network, alias, env = {}, args = [], capAdd = [], labels = {}, cpus = CPUS, hideEnv = [] }) {
   checkPinned(image, 'backend');
   for (const c of capAdd) if (!BACKEND_CAPS.has(c)) throw new HarnessError(`backend capability ${c} is not allowed`);
   return [
@@ -662,7 +717,7 @@ export function backendRunArgs({ name, image, network, alias, env = {}, args = [
     '--security-opt', 'no-new-privileges',
     '--cap-drop', 'ALL', ...capAdd.flatMap((c) => ['--cap-add', c]),
     '--pids-limit', '1024', '--memory', '2g', '--cpus', String(cpus),
-    ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
+    ...Object.entries(env).flatMap(([k, v]) => ['--env', hideEnv.includes(k) ? k : `${k}=${v}`]),
     image, ...args,
   ];
 }
@@ -872,11 +927,16 @@ const now = () => new Date().toISOString();
  * `onTimeout` runs once when the deadline passes (a container is removed there: killing the docker
  * client alone would leave the container running). `keepStdout: 'buffer'` keeps raw bytes.
  */
-function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false }) {
+function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false, scrubber = null }) {
   return new Promise((done) => {
     const t0 = Date.now();
     const out = createWriteStream(log, { flags: 'a' });
-    out.write(`\n$ ${[cmd, ...argv].join(' ')}\n# at ${now()}\n`);
+    // Only what is logged is scrubbed (the command line, and its output line by line); the command
+    // runs with `argv` as given and its captured stdout is the real one.
+    const sc = scrubber ?? new Scrubber();
+    out.write(`\n$ ${[cmd, ...sc.argv(argv)].join(' ')}\n# at ${now()}\n`);
+    const outLines = new LineScrubber(sc);
+    const errLines = new LineScrubber(sc);
     const chunks = [];
     let logged = 0;
     let buffered = 0;
@@ -892,7 +952,7 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
     try {
       child = spawn(cmd, argv, { cwd, env, stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'], detached: true });
     } catch (e) {
-      out.end(`# spawn error: ${e.message}\n`);
+      out.end(`# spawn error: ${sc.text(e.message)}\n`);
       return done({ exit: null, signal: null, timed_out: false, spawn_error: e.message, ms: 0, stdout: '' });
     }
     if (input !== null) {
@@ -909,9 +969,9 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
         chunks.push(keep === c.length ? c : c.subarray(0, keep));
       }
       // A capture written to its own file (surface, snapshot) is not copied into the log as well.
-      if (keepStdout !== 'buffer' && logStdout) toLog(c);
+      if (keepStdout !== 'buffer' && logStdout) toLog(outLines.push(c));
     });
-    child.stderr.on('data', (c) => toLog(c));
+    child.stderr.on('data', (c) => toLog(errLines.push(c)));
     let timedOut = false;
     const left = Math.max(1000, deadline - Date.now());
     const timer = setTimeout(() => {
@@ -927,6 +987,8 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       // Anything the step left behind in its process group dies with it: an orphan would outlive
       // the job and the runner prints its process name in the public log.
       try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      toLog(outLines.end());
+      toLog(errLines.end());
       out.end(`${dropped ? `\n# ${dropped} bytes of output dropped (log cap)\n` : ''}${logStdout ? '' : `# ${seen} bytes of stdout captured, not logged\n`}# exit ${code} signal ${signal}${timedOut ? ' (time limit)' : ''} after ${Date.now() - t0} ms\n`);
       const buf = Buffer.concat(chunks);
       done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' || raw ? buf : buf.toString('utf8'), stdout_truncated: keepStdout !== 'buffer' && !!keepStdout && seen > buffered });
@@ -955,7 +1017,7 @@ async function must(step, what) {
   return r;
 }
 
-async function download(url, sha256, log) {
+async function download(url, sha256, log, scrub = new Scrubber()) {
   let buf;
   if (url.startsWith('file://')) buf = readFileSync(new URL(url)); // local artifacts (tests, a mirror)
   else if (url.startsWith('https://')) {
@@ -964,7 +1026,7 @@ async function download(url, sha256, log) {
     buf = Buffer.from(await res.arrayBuffer());
   } else throw new HarnessError('download: only https:// and file:// artifacts');
   const got = createHash('sha256').update(buf).digest('hex');
-  writeFileSync(log, `download ${url}\nsha256 ${got}\n`, { flag: 'a' });
+  writeFileSync(log, `download ${scrub.text(url)}\nsha256 ${got}\n`, { flag: 'a' });
   if (got !== sha256) throw new HarnessError(`checksum: artifact sha256 ${got} is not the pinned ${sha256}`);
   return { buf, sha256: got };
 }
@@ -979,6 +1041,8 @@ class Docker {
     this.env = dockerEnvFrom(process.env);
     this.log = log;
     this.n = 0;
+    /** Secret values seen so far (list secrets, filled env values, volatile captures): scrubbed from every log. */
+    this.scrub = new Scrubber();
   }
 
   labels(extra = {}) {
@@ -986,7 +1050,7 @@ class Docker {
   }
 
   d(argv, opts = {}) {
-    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false });
+    return run('docker', argv, { cwd: this.ctx.out, env: opts.clientEnv ? { ...this.env, ...opts.clientEnv } : this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false, scrubber: this.scrub });
   }
 
   /** Remove a container now, without waiting (at a time limit: killing the client leaves it running). */
@@ -1009,9 +1073,10 @@ class Docker {
   /** A sandbox container running `cmd`; removed (with its processes) at the deadline. */
   async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, target }) {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
-    const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd });
+    const ce = clientEnvFor(env);
+    const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd, hideEnv: ce.hide });
     const r = await run('docker', argv, {
-      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input, logStdout,
+      cwd: this.ctx.out, env: { ...this.env, ...ce.env }, log, deadline, keepStdout, input, logStdout, scrubber: this.scrub,
       onTimeout: () => this.kill(name),
     });
     if (r.timed_out) await this.d(['rm', '-f', name], { log });
@@ -1115,7 +1180,7 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
   });
   return new Promise((done) => {
     const lg = createWriteStream(log, { flags: 'a' });
-    lg.write(`\n$ docker ${argv.join(' ')} | tar -x\n`);
+    lg.write(`\n$ docker ${dk.scrub.argv(argv).join(' ')} | tar -x\n`);
     const src = spawn('docker', argv, { env: dk.env, stdio: ['ignore', 'pipe', 'pipe'] });
     const tar = spawn('tar', ['-x', '-f', '-', '--no-same-owner', '--no-same-permissions', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
     let bytes = 0;
@@ -1123,8 +1188,10 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
     let timedOut = false;
     // The helper reads only regular files and folders, but a stuck one is removed (R2-10).
     const timer = setTimeout(() => { timedOut = true; dk.kill(name); src.kill('SIGKILL'); tar.stdin.destroy(); }, COPY_OUT_MS);
-    src.stderr.on('data', (c) => lg.write(c));
-    tar.stderr.on('data', (c) => lg.write(c));
+    const srcErr = new LineScrubber(dk.scrub);
+    const tarErr = new LineScrubber(dk.scrub);
+    src.stderr.on('data', (c) => lg.write(srcErr.push(c)));
+    tar.stderr.on('data', (c) => lg.write(tarErr.push(c)));
     tar.stdin.on('error', () => {});
     src.stdout.on('data', (c) => {
       bytes += c.length;
@@ -1142,6 +1209,8 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
       if (++n < 2) return;
       clearTimeout(timer);
       const removed = keepRegular(dest);
+      lg.write(srcErr.end());
+      lg.write(tarErr.end());
       lg.end(`# copy-out ${bytes} bytes, helper exit ${srcExit}, tar exit ${tarExit}${capped ? ', over the cap' : ''}${timedOut ? ', time limit' : ''}, ${removed} non-regular removed\n`);
       done({ bytes, capped, timed_out: timedOut, ok: srcExit === 0 && tarExit === 0 && !capped && !timedOut, removed });
     };
@@ -1191,6 +1260,8 @@ const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length < 4096 
 
 /** One target. Returns its metadata record; never throws. */
 async function runTarget(t, o, ctx, dk) {
+  // One scrubber per target: no target's secrets (or false positives) touch another's records.
+  dk.scrub = new Scrubber();
   const odir = resolve(o.out, t.id);
   mkdirSync(join(odir, 'logs'), { recursive: true });
   const L = (n) => join(odir, 'logs', `${n}.log`);
@@ -1233,6 +1304,8 @@ async function runTarget(t, o, ctx, dk) {
     copy_out: null,
     results: [],
     canary: t.canary ?? null,
+    // The server env's names (never its values), so the record keeps which settings were set.
+    env_names: t.server?.env && typeof t.server.env === 'object' && !Array.isArray(t.server.env) ? Object.keys(t.server.env).sort() : [],
     env: {
       node_version: null, node_version_why: notYet('probed'),
       python_version: null, python_version_why: notYet('probed'),
@@ -1259,6 +1332,10 @@ async function runTarget(t, o, ctx, dk) {
   try {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
     validateTarget(t, ctx.dropped);
+    const volatile = volatileCaptures(t);
+    // Every secret the list gives for this target (env values under secret-like names, URL passwords)
+    // is scrubbed from everything logged from here on.
+    dk.scrub.addList(t);
     checkLane(t, o.lane);
     // D3: one record per backend with a snapshot, filled when the snapshots are taken.
     const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
@@ -1273,7 +1350,7 @@ async function runTarget(t, o, ctx, dk) {
     const plan = installPlan(t, ctx.plat);
     if (plan.needsUv) meta.env.images.push({ role: 'uv', ...imageParts(ctx.images.uv) });
     const art = artifactFor(t, ctx.plat);
-    const dl = await download(art.url, art.sha256, L('install'));
+    const dl = await download(art.url, art.sha256, L('install'), dk.scrub);
     meta.artifact_sha256_verified = dl.sha256;
     if (plan.needsUv) await ctx.ensureTools();
 
@@ -1397,7 +1474,10 @@ async function runTarget(t, o, ctx, dk) {
       const name = backendName(i);
       const image = checkPinned(b.image, `backend ${i}`);
       const capAdd = backendCaps(b, `backend ${i}`);
-      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, v), args: fill(b.args ?? [], v), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
+      const benv = fill(b.env ?? {}, v);
+      dk.scrub.addEnv(benv);
+      const bce = clientEnvFor(benv);
+      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: benv, args: fill(b.args ?? [], v), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus, hideEnv: bce.hide });
       const blog = L(`backend-${i}`);
       // A backend that did not come up: its own output (docker logs, capped like every command's log)
       // and its state go into backend-N.log, in the encrypted bundle, before the teardown removes it.
@@ -1408,7 +1488,7 @@ async function runTarget(t, o, ctx, dk) {
         bm.log = `logs/backend-${i}.log`;
         throw new HarnessError(why);
       };
-      const started = await dk.d(argv, { log: blog, deadline: d });
+      const started = await dk.d(argv, { log: blog, deadline: d, clientEnv: bce.env });
       if (started.timed_out) throw Object.assign(new HarnessError(`backend ${i} start: time limit`), { timeout: true });
       if (started.spawn_error || started.exit !== 0) await backendFailed(`backend ${i} start: exit ${started.exit}`);
       const waitUntil = Math.min(d, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
@@ -1421,10 +1501,12 @@ async function runTarget(t, o, ctx, dk) {
       if (!ok) await backendFailed(`backend ${i} not ready`);
       const captured = {};
       for (const s of b.setup ?? []) {
-        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture });
+        // A volatile capture (a minted token, say) is not copied into the log.
+        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture, logStdout: !volatile.has(s.capture) });
         if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
         if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
         if (s.capture) v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
+        if (s.capture && volatile.has(s.capture)) dk.scrub.add(s.capture, v[s.capture]);
       }
       bm.ready = true;
       return captured;
@@ -1444,26 +1526,41 @@ async function runTarget(t, o, ctx, dk) {
      * D5: fresh state between full repeats. Re-running a seed against the used database could fail
      * (CREATE TABLE twice) or leave the last repeat's rows, so each backend is removed with its
      * anonymous volumes and started again from its pinned image, waited for, and seeded by the same
-     * `setup` steps. Returns the names of set-up captures whose value changed: the manifest was filled
-     * with the first values, so a repeat with other values would not test the same fixture.
+     * `setup` steps. Returns the names of set-up captures whose value changed (`changed`): the manifest
+     * was filled with the first values, so a repeat with other values would not test the same fixture.
+     * A volatile capture that changed is not one of them: its new value replaces the old in `vars`
+     * (it may reach server.env only) and its name is returned in `refreshed`.
      */
     const resetBackends = async (d) => {
       const v = { ...vars };
       const changed = [];
+      const refreshed = [];
       for (const [i, b] of (t.backends ?? []).entries()) {
         await dk.d(['rm', '-f', '-v', backendName(i)], { log: L(`backend-${i}`), deadline: d });
         const bm = meta.backends[i];
         bm.resets = (bm.resets ?? 0) + 1;
         const got = await startBackend(i, b, bm, d, v);
-        for (const [k, x] of Object.entries(got)) if (x !== vars[k]) changed.push(k);
+        for (const [k, x] of Object.entries(got)) {
+          if (x === vars[k]) continue;
+          if (volatile.has(k)) refreshed.push(k);
+          else changed.push(k);
+        }
       }
-      return changed;
+      if (!changed.length) for (const k of refreshed) vars[k] = v[k];
+      return { changed, refreshed };
     };
 
     // 5. Set-up in the target's work folder, in a sandbox container on the internal network.
     const command = fill(t.server.command, vars);
-    const senv = fill(t.server.env ?? {}, vars);
-    const envRun = sandboxEnv(plan.bin, senv);
+    // `let`: a volatile capture refreshed between full repeats fills the server env again (refreshEnv).
+    let senv = fill(t.server.env ?? {}, vars);
+    dk.scrub.addEnv(senv);
+    let envRun = sandboxEnv(plan.bin, senv);
+    const refreshEnv = () => {
+      senv = fill(t.server.env ?? {}, vars);
+      dk.scrub.addEnv(senv);
+      envRun = sandboxEnv(plan.bin, senv);
+    };
     // runSetup runs the list's set-up steps; again before every full repeat after the first (D5).
     const runSetup = async (d, first) => {
       for (const [k, line] of (t.setup ?? []).entries()) {
@@ -1533,7 +1630,11 @@ async function runTarget(t, o, ctx, dk) {
     }
     const manifestText = t.full?.manifest ? fillManifest(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
     await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L('plan'));
-    writeFileSync(join(odir, 'writecheck.yaml'), manifestText);
+    // The archived copy is scrubbed (a hand manifest can carry a fixture password); the CLI gets the real
+    // text, and manifest_sha256 is of the real text.
+    const archived = dk.scrub.text(manifestText);
+    writeFileSync(join(odir, 'writecheck.yaml'), archived);
+    if (archived !== manifestText) meta.manifest_redacted = true;
     meta.manifest_sha256 = sha256Text(manifestText);
     const manifest = `${P.work}/writecheck.yaml`;
 
@@ -1599,7 +1700,12 @@ async function runTarget(t, o, ctx, dk) {
             try {
               if (clean) await must(dk.helper({ target: t.id, user: SANDBOX_USER, mounts: [{ src: vol, dst: P.work }, { src: clean, dst: P.clean, ro: true }], cmd: ['bash', '-c', RESTORE_WORK] }, { log: L('fresh-state'), deadline: Math.min(rd, Date.now() + CLEAN_MS) }), `restore /work for repeat ${i}`);
               if (t.backends?.length) {
-                const changed = await resetBackends(rd);
+                const { changed, refreshed } = await resetBackends(rd);
+                if (refreshed.length && !changed.length) {
+                  // Names only: the values may be secrets.
+                  fr.volatile_refreshed = refreshed;
+                  refreshEnv();
+                }
                 if (changed.length) {
                   fr.status = 'not_started';
                   fr.fresh_state = false;
@@ -1695,10 +1801,14 @@ async function runTarget(t, o, ctx, dk) {
   function writeMeta() {
     let text;
     try {
-      text = JSON.stringify(meta, null, 2) + '\n';
+      // Free-text fields only (harness_error, *_why, error messages: they can quote a set-up line);
+      // structured data (the surface, tool names, the source, versions, hashes) is never touched.
+      const sc = scrubFreeText(meta, dk.scrub);
+      if (sc.paths.length) sc.value.meta_redacted = sc.paths;
+      text = JSON.stringify(sc.value, null, 2) + '\n';
     } catch (e) {
       meta.status = 'harness_error';
-      meta.harness_error = `record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`;
+      meta.harness_error = dk.scrub.text(`record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`);
       meta.public_exit = publicExit(meta);
       text = JSON.stringify({ format: meta.format, label: meta.label, target: { id: t.id }, status: meta.status, harness_error: meta.harness_error, public_exit: meta.public_exit, started: meta.started, ended: meta.ended }, null, 2) + '\n';
     }
@@ -2002,6 +2112,8 @@ async function main() {
   let o;
   let failed = false;
   let dk = null;
+  // For the shard's own error files: every target's list secrets (a stack can quote one).
+  const shardScrub = new Scrubber();
   say(LABEL);
   try {
     o = args(process.argv.slice(2));
@@ -2009,6 +2121,7 @@ async function main() {
     const raw = readFileSync(o.targets);
     if (o.consumeTargets) rmSync(o.targets, { force: true }); // no clear-text list on disk while targets run
     const list = JSON.parse(raw.toString('utf8'));
+    for (const t of Array.isArray(list?.targets) ? list.targets : []) shardScrub.addList(t);
     // Every entry is checked at load (capabilities, set-up forms, snapshots, repeats, a dropped id):
     // one that fails is refused before anything of it is fetched or started; the others run.
     const { invalid, dropped } = validateList(list);
@@ -2033,7 +2146,7 @@ async function main() {
         m = await runTarget(t, o, ctx, dk);
       } catch (e) {
         // runTarget records and returns; should it ever throw, this target alone is lost, not the shard.
-        try { writeFileSync(join(o.out, '_shard', `target-error-${t.id}.txt`), `${now()}\n${e?.stack ?? e}\n`); } catch {}
+        try { writeFileSync(join(o.out, '_shard', `target-error-${t.id}.txt`), `${now()}\n${errorText(e, shardScrub)}\n`); } catch {}
         m = { status: 'harness_error', cli_exit: null, public_exit: 125, results: [] };
       }
       shard.targets.push({ id: t.id, status: m.status, cli_exit: m.cli_exit, public_exit: m.public_exit, results: m.results.map((r) => r.sha256) });
@@ -2047,11 +2160,12 @@ async function main() {
     try {
       const out = o?.out ?? '.';
       mkdirSync(join(out, '_shard'), { recursive: true });
-      writeFileSync(join(out, '_shard', 'harness-error.txt'), `${now()}\n${e?.stack ?? e}\n`);
+      writeFileSync(join(out, '_shard', 'harness-error.txt'), `${now()}\n${errorText(e, shardScrub)}\n`);
     } catch {}
     say('run finished, exit 125');
     failed = true;
   } finally {
+    if (dk) dk.scrub = new Scrubber();
     if (dk) await dk.sweep(join(o.out, '_shard', 'docker.log')).catch(() => {});
   }
   process.exitCode = failed ? 1 : 0;
