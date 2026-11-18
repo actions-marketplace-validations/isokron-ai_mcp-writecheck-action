@@ -30,12 +30,26 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   Docker socket. Files go in through stdin; results come out through a helper that copies regular
   files and folders only, under a size cap. Our helper containers carry the target's label and a
   time limit, so one stuck on something the target planted is removed with it.
-- Command lines are redacted where they are logged, never where they run: in every logged `docker run`
-  or `docker exec` line, the values of volatile captures, the values of `--env NAME=VALUE` whose NAME
-  looks like a secret (TOKEN, SECRET, PASSWORD, PASSWD, PWD, KEY, CREDENTIAL, AUTH, COOKIE, SESSION, DSN,
-  DATABASE_URL, CONNECTION_STRING, `*_URL`, `*_URI`; for a URL-like name given as a plain URL, only its
-  `user:password@`) and the password of any `scheme://user:password@` URL become `<redacted:NAME>`.
-  Docker gets the real values. `meta.env_names` keeps the server env's names.
+- Secrets are scrubbed from everything the driver writes down, never from what runs (`corpus/scrub.mjs`).
+  The scrubber knows every value the list gives under a secret-like env name (TOKEN, SECRET, PASSWORD,
+  PASSWD, PWD, KEY, CREDENTIAL, CREDS, AUTH, COOKIE, SESSION, DSN, DATABASE_URL, CONNECTION_STRING,
+  PRIVATE, SIGNING, `*_PASS`, `*_PW`, `*_PAT`, `*_URL`, `*_URI`) in any `env` object of the entry
+  (backends, server, set-up), before and after its templates are filled, the password and secret query
+  parameters of every URL in any string of the entry, and every volatile capture (and capture made from
+  one). A value of 6 characters or more is replaced wherever it appears, a shorter one only as a whole
+  token. Pattern rules catch the rest: `NAME=VALUE` with a secret-like NAME (`--env`, `--env=`, `-e`, or
+  free text such as `PGPASSWORD=x psql`), `scheme://user:password@` (up to the last `@` before the
+  host), `password=` / `pwd=` / `pass=` / `token=` / `key=` query parameters, `--requirepass x`,
+  `--password x`, mysql's `-px`, SQL `PASSWORD 'x'` / `IDENTIFIED BY 'x'`, curl's `-u user:x` and
+  `Authorization: Bearer|Basic x`. Each becomes `<redacted:NAME>`. It applies to every logged command
+  line and to every line of output the driver logs (set-up, wait, backend set-up, `docker logs`, the
+  CLI's steps), scrubbed line by line as it streams, to the archived `writecheck.yaml`
+  (`manifest_redacted`; `manifest_sha256` stays the hash of the real text the CLI ran) and to every
+  string in `meta.json`. Secret-named env values are not on the docker command line at all: they go
+  as `--env NAME`, with the value in the docker client's own environment (never a name the client
+  reads itself, such as `DOCKER_*` or `PATH`). `meta.env_names` keeps the server env's names. Files
+  that are data rather than logs (snapshots, results, the server's stderr) are kept as they are, in
+  the encrypted bundle.
 - Output is bounded: each command's log keeps 64 MiB, captured output 16 MiB, and a `results.json`
   over 4 MiB is recorded by sha256 and size only (parsing tens of MiB of nested JSON costs about a
   gigabyte of heap). Of a `results.json` the driver keeps only
@@ -125,7 +139,7 @@ capabilities instead of none.
 | `full.manifest` templates | In a hand-written manifest the driver fills only its own names: `{{tdir}}`, `{{bin}}`, `{{pkgdir}}`, `{{host}}`, `{{hostN}}`, `{{portN}}` and the backends' set-up captures. The CLI's own names (`{{id}}`, `{{field}}`, `{{value}}`, `{{version}}`, ... as `RESERVED_VARS` in the CLI's `manifest.ts`) are never filled, even by a capture of the same name, and any other `{{...}}` is left as written for the CLI, which fails loudly on a name it does not know. A driver name the target does not set (`{{host1}}` with one backend) is a harness error. In commands, env and set-up every unknown name is still a harness error |
 | `setup[]` as `{ "fetch": { "url", "sha256", "dest", "strip_components" } }` | A set-up step may be this object instead of a shell line, so an entry needs no git (the images have none, and set-up has no egress). `url`: https on `github.com`, `codeload.github.com`, `registry.npmjs.org` or `files.pythonhosted.org`, no credentials, port, query or fragment; a GitHub archive must name a 40-hex commit. `sha256`: required, 64 lower-case hex. `dest`: a folder under `/work` (default `src`; not `out`, `home`, `dl`, `pkg`, `venv`, `bin`, `python` or `.fetch`). `strip_components`: 0 to 5 (default 0). Our helper (`sandbox/fetch.mjs`, read-only in the CLI volume; user 10001, no capability, read-only root) fetches it on the install network while no target code runs, follows redirects only to the same hosts, caps it at 256 MiB (`CORPUS_FETCH_CAP`) and checks the sha256; the driver checks the helper's sha256 line against the pin too. Only then is it unpacked by `tar` in a sandbox container with no network. A mismatch or refusal is a harness error and nothing is unpacked. Shell lines and fetch steps run in the order listed; `meta.json` records each fetch (`setup_fetch`) |
 | `backends[].snapshot` | Optional `{ "exec": [argv...], "user"? }`, run with `docker exec` in the backend like a set-up step (same templates). It prints the fixture's state as text, e.g. `psql ... -c "SELECT * FROM mwsc_items ORDER BY id"`. It runs before the first CLI step that writes (the first full run) and after the last; see `backend_state` below. Anything else refuses the target at load |
-| `backends[].setup[].volatile` | Optional `true` on a set-up step with `capture`: its value is new on every backend start (a service that mints an access token). Its name may be used in `server.env` only; in `server.command` or `full.manifest` it refuses the target at load, so the manifest and its plan hash stay the same on every repeat. Between full repeats a changed volatile capture does not refuse the repeat: the new value replaces the old and the server env is filled again before the repeat's set-up and CLI steps; `full_runs[].volatile_refreshed` names it (never the value, which may be a secret), and its output is not copied into the backend's log. A non-volatile capture that changes still refuses the repeat |
+| `backends[].setup[].volatile` | Optional `true` on a set-up step with `capture`: its value is new on every backend start (a service that mints an access token). A capture whose exec uses a volatile name (`echo postgres://u:{{tok}}@b0`) is volatile too. Its name may be used in `server.env` (and in the list's set-up and other backends, which run again on every repeat), never in `server.command`, nor in `full.manifest` except as one of the CLI's own template names, which the driver never fills; in `server.command` or `full.manifest` it refuses the target at load, so the manifest and its plan hash stay the same on every repeat. Between full repeats a changed volatile capture does not refuse the repeat: the new value replaces the old and the server env is filled again before the repeat's set-up and CLI steps; `full_runs[].volatile_refreshed` names it (never the value, which may be a secret), and its output is not copied into the backend's log. A non-volatile capture that changes still refuses the repeat |
 | `full.repeats` | Optional, 1 to 5 (default 1). The full run is made that many times against fresh state; see `full_runs` below |
 | `full.timeout_s` | Optional, seconds per full repeat (1 to 7200). Each repeat (its reset, re-plan, snapshots and run) then has that limit of its own, and the target's limit is `timeout_s + repeats x full.timeout_s`. Without it, the repeats share what is left of `timeout_s` |
 | `timeout_s` | Optional, seconds for install to catalog (1 to 7200; default 600, or the list's `defaults.timeout_s`). On the CI lane the sum of a shard's target limits may not pass 330 minutes (the job stops at 360, GitHub's hosted maximum): a list that plans more is refused at load, naming the target that passes the budget, and nothing of the shard runs |

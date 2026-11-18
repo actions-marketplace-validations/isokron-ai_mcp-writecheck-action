@@ -55,6 +55,8 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sha256Jcs } from './jcs.mjs';
+import { LineScrubber, redactArgv, Scrubber, scrubStrings, SECRET_ENV_NAME } from './scrub.mjs';
+export { redactArgv, Scrubber, SECRET_ENV_NAME } from './scrub.mjs';
 import { listTree } from './sandbox/evidence.mjs';
 import { checkListedUrl } from './sandbox/fetch.mjs';
 
@@ -289,11 +291,24 @@ export function sandboxEnv(binDir, extra = {}) {
   };
 }
 
+/** Names the docker client reads itself: never set from a target's env. */
+const DOCKER_CLIENT_NAME = /^(DOCKER_|BUILDKIT_|COMPOSE_|BUILDX_)|^(PATH|HOME|LANG|LC_ALL|TZ|TMPDIR)$/;
+
+/**
+ * The secret-named values of a container's env (SECRET_ENV_NAME), to be given to the docker client
+ * process instead of its command line: `hide` lists the names, `env` their values. A name the docker
+ * client reads itself (DOCKER_*, PATH, HOME, ...) is never moved there.
+ */
+export function clientEnvFor(env) {
+  const hide = Object.keys(env ?? {}).filter((k) => SECRET_ENV_NAME.test(k) && !DOCKER_CLIENT_NAME.test(k) && /^[A-Za-z_][A-Za-z0-9_]*$/.test(k));
+  return { hide, env: Object.fromEntries(hide.map((k) => [k, String(env[k])])) };
+}
+
 /**
  * `docker run` arguments for a container that runs target-controlled code. The flags are fixed here
  * and unit-tested; only volumes (never a bind mount), the network, the env and the command vary.
  */
-export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels = {}, workdir = P.work, stdin = false, cpus = CPUS, cmd }) {
+export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels = {}, workdir = P.work, stdin = false, cpus = CPUS, cmd, hideEnv = [] }) {
   checkPinned(image, 'sandbox');
   const a = [
     'run', '--rm', '--name', name,
@@ -317,7 +332,9 @@ export function sandboxRunArgs({ name, image, network, mounts, env = {}, labels 
     if (m.dst === P.evidence) throw new HarnessError('a target container never mounts the evidence volume');
     a.push('--mount', volumeMount(m));
   }
-  for (const [k, v] of Object.entries(env)) a.push('--env', `${k}=${v}`);
+  // A hidden name is passed as `--env NAME`: Docker takes its value from the client's environment, so it
+  // is not on the docker command line (see clientEnvFor).
+  for (const [k, v] of Object.entries(env)) a.push('--env', hideEnv.includes(k) ? k : `${k}=${v}`);
   if (stdin) a.push('--interactive');
   a.push(image, ...cmd);
   return a;
@@ -378,20 +395,26 @@ export function validateTarget(t, dropped = []) {
 export function volatileCaptures(t) {
   const vol = new Set();
   const plain = new Set();
+  const names = (v) => new Set([...String(v).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((m) => m[1]));
+  // In order (a step can only use captures made before it): a capture whose exec uses a volatile name
+  // (`echo postgres://u:{{tok}}@b0` -> dsn) is volatile too.
   for (const [i, b] of (Array.isArray(t.backends) ? t.backends : []).entries()) {
     for (const [k, s] of (Array.isArray(b?.setup) ? b.setup : []).entries()) {
       if (s?.volatile !== undefined && typeof s.volatile !== 'boolean') throw new HarnessError(`backend ${i} set-up ${k}: volatile must be true or false`);
       if (s?.volatile === true && (typeof s.capture !== 'string' || !s.capture)) throw new HarnessError(`backend ${i} set-up ${k}: volatile is only for a step with capture`);
-      if (typeof s?.capture === 'string' && s.capture) (s.volatile === true ? vol : plain).add(s.capture);
+      if (typeof s?.capture !== 'string' || !s.capture) continue;
+      const derived = [...names(Array.isArray(s.exec) ? s.exec.join('\n') : '')].some((n) => vol.has(n));
+      (s.volatile === true || derived ? vol : plain).add(s.capture);
     }
   }
   for (const n of vol) if (plain.has(n)) throw new HarnessError(`capture ${n} is volatile in one set-up step and not in another`);
-  const names = (v) => new Set([...String(v).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((m) => m[1]));
-  const where = [['full.manifest', typeof t.full?.manifest === 'string' ? t.full.manifest : ''], ['server.command', Array.isArray(t.server?.command) ? t.server.command.join('\n') : '']];
-  for (const [field, text] of where) {
+  // The manifest's CLI template names are never filled by the driver (fillManifest), so a volatile
+  // capture of the same name does not reach it; server.command is filled with every name.
+  const where = [['full.manifest', typeof t.full?.manifest === 'string' ? t.full.manifest : '', CLI_TEMPLATE_NAMES], ['server.command', Array.isArray(t.server?.command) ? t.server.command.join('\n') : '', []]];
+  for (const [field, text, skip] of where) {
     const used = names(text);
     for (const n of vol) {
-      if (used.has(n)) throw new HarnessError(`volatile capture ${n} is used in ${field}: a volatile value may reach server.env only, so that the manifest and its plan hash stay the same on every repeat`);
+      if (used.has(n) && !skip.includes(n)) throw new HarnessError(`volatile capture ${n} is used in ${field}: a volatile value may reach server.env only, so that the manifest and its plan hash stay the same on every repeat`);
     }
   }
   return vol;
@@ -680,7 +703,7 @@ export function checkFetch(s, what = 'set-up') {
 }
 
 /** `docker run -d` arguments for one backend: digest-pinned, on the target's internal network only. */
-export function backendRunArgs({ name, image, network, alias, env = {}, args = [], capAdd = [], labels = {}, cpus = CPUS }) {
+export function backendRunArgs({ name, image, network, alias, env = {}, args = [], capAdd = [], labels = {}, cpus = CPUS, hideEnv = [] }) {
   checkPinned(image, 'backend');
   for (const c of capAdd) if (!BACKEND_CAPS.has(c)) throw new HarnessError(`backend capability ${c} is not allowed`);
   return [
@@ -691,7 +714,7 @@ export function backendRunArgs({ name, image, network, alias, env = {}, args = [
     '--security-opt', 'no-new-privileges',
     '--cap-drop', 'ALL', ...capAdd.flatMap((c) => ['--cap-add', c]),
     '--pids-limit', '1024', '--memory', '2g', '--cpus', String(cpus),
-    ...Object.entries(env).flatMap(([k, v]) => ['--env', `${k}=${v}`]),
+    ...Object.entries(env).flatMap(([k, v]) => ['--env', hideEnv.includes(k) ? k : `${k}=${v}`]),
     image, ...args,
   ];
 }
@@ -895,57 +918,22 @@ export function readRunFields(f, cap = JSON_CAP) {
 const sha256Text = (s) => createHash('sha256').update(s).digest('hex');
 const now = () => new Date().toISOString();
 
-/** Env names whose values are not written to the logs (b). */
-export const SECRET_ENV_NAME = /(TOKEN|SECRET|PASSWORD|PASSWD|PWD|KEY|CREDENTIAL|AUTH|COOKIE|SESSION|DSN|DATABASE_URL|CONNECTION_STRING|_URL$|_URI$)/i;
-const URL_ENV_NAME = /(DATABASE_URL|CONNECTION_STRING|_URL$|_URI$)/i;
-/** `scheme://user:password@`: the password part (c). */
-const URL_USERINFO = /([a-z][a-z0-9+.-]*:\/\/[^\s:/@]*):[^\s/@]*@/gi;
-
-/**
- * The argv of a command as it is written to a log (never as it runs): (a) every value of a volatile
- * capture (`secrets`: name -> values) is replaced by <redacted:NAME>; (b) in `--env NAME=VALUE` with a
- * NAME like SECRET_ENV_NAME, the value is replaced, except that for a URL-like NAME (DATABASE_URL,
- * *_URL, *_URI, CONNECTION_STRING) given as a plain scheme:// URL without a query only its user info is;
- * (c) in every element, the password of a scheme://user:password@ URL is replaced. Pure; unit-tested.
- */
-export function redactArgv(argv, secrets = null) {
-  const pairs = [];
-  for (const [name, values] of secrets ?? []) for (const v of values) pairs.push([name, v]);
-  pairs.sort((a, b) => b[1].length - a[1].length);
-  return argv.map((x, i) => {
-    let s = String(x);
-    for (const [name, v] of pairs) {
-      // A value shorter than 4 characters is replaced only where it is a whole value (below), not inside text.
-      if (v.length >= 4 && s.includes(v)) s = s.split(v).join(`<redacted:${name}>`);
-    }
-    if (argv[i - 1] === '--env') {
-      const eq = s.indexOf('=');
-      const name = eq > 0 ? s.slice(0, eq) : '';
-      const value = eq > 0 ? s.slice(eq + 1) : '';
-      const whole = pairs.find(([, v]) => v === value);
-      if (whole) return `${name}=<redacted:${whole[0]}>`;
-      if (name && SECRET_ENV_NAME.test(name)) {
-        const plainUrl = /^[a-z][a-z0-9+.-]*:\/\/[^\s?#]*$/i.test(value);
-        if (URL_ENV_NAME.test(name) && plainUrl) return `${name}=${value.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^\s/@]*@/i, `$1<redacted:${name}>@`)}`;
-        if (value) return `${name}=<redacted:${name}>`;
-      }
-    }
-    return s.replace(URL_USERINFO, '$1:<redacted:password>@');
-  });
-}
-
 /**
  * Run a command with all output to a log file, in its own process group, bounded by `deadline`
  * (ms since epoch). Never throws; returns { exit, signal, timed_out, spawn_error, ms, stdout }.
  * `onTimeout` runs once when the deadline passes (a container is removed there: killing the docker
  * client alone would leave the container running). `keepStdout: 'buffer'` keeps raw bytes.
  */
-function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false, secrets = null }) {
+function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = null, onTimeout = null, logStdout = true, raw = false, scrubber = null }) {
   return new Promise((done) => {
     const t0 = Date.now();
     const out = createWriteStream(log, { flags: 'a' });
-    // Only the logged line is redacted (redactArgv); the command runs with `argv` as given.
-    out.write(`\n$ ${[cmd, ...redactArgv(argv, secrets)].join(' ')}\n# at ${now()}\n`);
+    // Only what is logged is scrubbed (the command line, and its output line by line); the command
+    // runs with `argv` as given and its captured stdout is the real one.
+    const sc = scrubber ?? new Scrubber();
+    out.write(`\n$ ${[cmd, ...sc.argv(argv)].join(' ')}\n# at ${now()}\n`);
+    const outLines = new LineScrubber(sc);
+    const errLines = new LineScrubber(sc);
     const chunks = [];
     let logged = 0;
     let buffered = 0;
@@ -978,9 +966,9 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
         chunks.push(keep === c.length ? c : c.subarray(0, keep));
       }
       // A capture written to its own file (surface, snapshot) is not copied into the log as well.
-      if (keepStdout !== 'buffer' && logStdout) toLog(c);
+      if (keepStdout !== 'buffer' && logStdout) toLog(outLines.push(c));
     });
-    child.stderr.on('data', (c) => toLog(c));
+    child.stderr.on('data', (c) => toLog(errLines.push(c)));
     let timedOut = false;
     const left = Math.max(1000, deadline - Date.now());
     const timer = setTimeout(() => {
@@ -996,6 +984,8 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
       // Anything the step left behind in its process group dies with it: an orphan would outlive
       // the job and the runner prints its process name in the public log.
       try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+      toLog(outLines.end());
+      toLog(errLines.end());
       out.end(`${dropped ? `\n# ${dropped} bytes of output dropped (log cap)\n` : ''}${logStdout ? '' : `# ${seen} bytes of stdout captured, not logged\n`}# exit ${code} signal ${signal}${timedOut ? ' (time limit)' : ''} after ${Date.now() - t0} ms\n`);
       const buf = Buffer.concat(chunks);
       done({ exit: code, signal, timed_out: timedOut, spawn_error: spawnError, ms: Date.now() - t0, stdout: keepStdout === 'buffer' || raw ? buf : buf.toString('utf8'), stdout_truncated: keepStdout !== 'buffer' && !!keepStdout && seen > buffered });
@@ -1048,15 +1038,8 @@ class Docker {
     this.env = dockerEnvFrom(process.env);
     this.log = log;
     this.n = 0;
-    /** Volatile capture values seen so far (name -> values), redacted from every logged command line. */
-    this.secrets = new Map();
-  }
-
-  /** A volatile capture's value: from now on redacted from the logged command lines. */
-  secret(name, value) {
-    if (typeof value !== 'string' || !value) return;
-    if (!this.secrets.has(name)) this.secrets.set(name, new Set());
-    this.secrets.get(name).add(value);
+    /** Secret values seen so far (list secrets, filled env values, volatile captures): scrubbed from every log. */
+    this.scrub = new Scrubber();
   }
 
   labels(extra = {}) {
@@ -1064,7 +1047,7 @@ class Docker {
   }
 
   d(argv, opts = {}) {
-    return run('docker', argv, { cwd: this.ctx.out, env: this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false, secrets: this.secrets });
+    return run('docker', argv, { cwd: this.ctx.out, env: opts.clientEnv ? { ...this.env, ...opts.clientEnv } : this.env, log: opts.log ?? this.log, deadline: opts.deadline ?? Date.now() + 300_000, keepStdout: opts.keepStdout ?? false, input: opts.input ?? null, onTimeout: opts.onTimeout ?? null, logStdout: opts.logStdout ?? true, raw: opts.raw ?? false, scrubber: this.scrub });
   }
 
   /** Remove a container now, without waiting (at a time limit: killing the client leaves it running). */
@@ -1087,9 +1070,10 @@ class Docker {
   /** A sandbox container running `cmd`; removed (with its processes) at the deadline. */
   async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, target }) {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
-    const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd });
+    const ce = clientEnvFor(env);
+    const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd, hideEnv: ce.hide });
     const r = await run('docker', argv, {
-      cwd: this.ctx.out, env: this.env, log, deadline, keepStdout, input, logStdout, secrets: this.secrets,
+      cwd: this.ctx.out, env: { ...this.env, ...ce.env }, log, deadline, keepStdout, input, logStdout, scrubber: this.scrub,
       onTimeout: () => this.kill(name),
     });
     if (r.timed_out) await this.d(['rm', '-f', name], { log });
@@ -1193,7 +1177,7 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
   });
   return new Promise((done) => {
     const lg = createWriteStream(log, { flags: 'a' });
-    lg.write(`\n$ docker ${redactArgv(argv, dk.secrets).join(' ')} | tar -x\n`);
+    lg.write(`\n$ docker ${dk.scrub.argv(argv).join(' ')} | tar -x\n`);
     const src = spawn('docker', argv, { env: dk.env, stdio: ['ignore', 'pipe', 'pipe'] });
     const tar = spawn('tar', ['-x', '-f', '-', '--no-same-owner', '--no-same-permissions', '-C', dest], { stdio: ['pipe', 'ignore', 'pipe'] });
     let bytes = 0;
@@ -1201,8 +1185,10 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
     let timedOut = false;
     // The helper reads only regular files and folders, but a stuck one is removed (R2-10).
     const timer = setTimeout(() => { timedOut = true; dk.kill(name); src.kill('SIGKILL'); tar.stdin.destroy(); }, COPY_OUT_MS);
-    src.stderr.on('data', (c) => lg.write(c));
-    tar.stderr.on('data', (c) => lg.write(c));
+    const srcErr = new LineScrubber(dk.scrub);
+    const tarErr = new LineScrubber(dk.scrub);
+    src.stderr.on('data', (c) => lg.write(srcErr.push(c)));
+    tar.stderr.on('data', (c) => lg.write(tarErr.push(c)));
     tar.stdin.on('error', () => {});
     src.stdout.on('data', (c) => {
       bytes += c.length;
@@ -1220,6 +1206,8 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
       if (++n < 2) return;
       clearTimeout(timer);
       const removed = keepRegular(dest);
+      lg.write(srcErr.end());
+      lg.write(tarErr.end());
       lg.end(`# copy-out ${bytes} bytes, helper exit ${srcExit}, tar exit ${tarExit}${capped ? ', over the cap' : ''}${timedOut ? ', time limit' : ''}, ${removed} non-regular removed\n`);
       done({ bytes, capped, timed_out: timedOut, ok: srcExit === 0 && tarExit === 0 && !capped && !timedOut, removed });
     };
@@ -1340,6 +1328,9 @@ async function runTarget(t, o, ctx, dk) {
     if (ctx.invalid?.has(t.id)) throw new HarnessError(ctx.invalid.get(t.id));
     validateTarget(t, ctx.dropped);
     const volatile = volatileCaptures(t);
+    // Every secret the list gives for this target (env values under secret-like names, URL passwords)
+    // is scrubbed from everything logged from here on.
+    dk.scrub.addList(t);
     checkLane(t, o.lane);
     // D3: one record per backend with a snapshot, filled when the snapshots are taken.
     const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
@@ -1478,7 +1469,10 @@ async function runTarget(t, o, ctx, dk) {
       const name = backendName(i);
       const image = checkPinned(b.image, `backend ${i}`);
       const capAdd = backendCaps(b, `backend ${i}`);
-      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: fill(b.env ?? {}, v), args: fill(b.args ?? [], v), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus });
+      const benv = fill(b.env ?? {}, v);
+      dk.scrub.addEnv(benv);
+      const bce = clientEnvFor(benv);
+      const argv = backendRunArgs({ name, image, network: internal.name, alias: `b${i}`, env: benv, args: fill(b.args ?? [], v), capAdd, labels: dk.labels({ 'isokron.corpus.target': t.id }), cpus: ctx.cpus, hideEnv: bce.hide });
       const blog = L(`backend-${i}`);
       // A backend that did not come up: its own output (docker logs, capped like every command's log)
       // and its state go into backend-N.log, in the encrypted bundle, before the teardown removes it.
@@ -1489,7 +1483,7 @@ async function runTarget(t, o, ctx, dk) {
         bm.log = `logs/backend-${i}.log`;
         throw new HarnessError(why);
       };
-      const started = await dk.d(argv, { log: blog, deadline: d });
+      const started = await dk.d(argv, { log: blog, deadline: d, clientEnv: bce.env });
       if (started.timed_out) throw Object.assign(new HarnessError(`backend ${i} start: time limit`), { timeout: true });
       if (started.spawn_error || started.exit !== 0) await backendFailed(`backend ${i} start: exit ${started.exit}`);
       const waitUntil = Math.min(d, Date.now() + (b.wait_timeout_s ?? 120) * 1000);
@@ -1503,11 +1497,11 @@ async function runTarget(t, o, ctx, dk) {
       const captured = {};
       for (const s of b.setup ?? []) {
         // A volatile capture (a minted token, say) is not copied into the log.
-        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture, logStdout: s.volatile !== true });
+        const r = await dk.d(['exec', ...(s.user ? ['-u', s.user] : []), name, ...fill(s.exec, v)], { log: blog, deadline: d, keepStdout: !!s.capture, logStdout: !volatile.has(s.capture) });
         if (r.timed_out) throw Object.assign(new HarnessError(`backend ${i} set-up: time limit`), { timeout: true });
         if (r.spawn_error || r.exit !== 0) await backendFailed(`backend ${i} set-up: exit ${r.exit}`);
         if (s.capture) v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
-        if (s.capture && s.volatile === true) dk.secret(s.capture, v[s.capture]);
+        if (s.capture && volatile.has(s.capture)) dk.scrub.add(s.capture, v[s.capture]);
       }
       bm.ready = true;
       return captured;
@@ -1555,9 +1549,11 @@ async function runTarget(t, o, ctx, dk) {
     const command = fill(t.server.command, vars);
     // `let`: a volatile capture refreshed between full repeats fills the server env again (refreshEnv).
     let senv = fill(t.server.env ?? {}, vars);
+    dk.scrub.addEnv(senv);
     let envRun = sandboxEnv(plan.bin, senv);
     const refreshEnv = () => {
       senv = fill(t.server.env ?? {}, vars);
+      dk.scrub.addEnv(senv);
       envRun = sandboxEnv(plan.bin, senv);
     };
     // runSetup runs the list's set-up steps; again before every full repeat after the first (D5).
@@ -1629,7 +1625,11 @@ async function runTarget(t, o, ctx, dk) {
     }
     const manifestText = t.full?.manifest ? fillManifest(t.full.manifest, vars) : catalogManifest(serverWrap(command), Object.keys(senv), `mwsv-corpus-${t.id}`);
     await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L('plan'));
-    writeFileSync(join(odir, 'writecheck.yaml'), manifestText);
+    // The archived copy is scrubbed (a hand manifest can carry a fixture password); the CLI gets the real
+    // text, and manifest_sha256 is of the real text.
+    const archived = dk.scrub.text(manifestText);
+    writeFileSync(join(odir, 'writecheck.yaml'), archived);
+    if (archived !== manifestText) meta.manifest_redacted = true;
     meta.manifest_sha256 = sha256Text(manifestText);
     const manifest = `${P.work}/writecheck.yaml`;
 
@@ -1796,7 +1796,8 @@ async function runTarget(t, o, ctx, dk) {
   function writeMeta() {
     let text;
     try {
-      text = JSON.stringify(meta, null, 2) + '\n';
+      // Every string scrubbed of the secrets known so far (an error message can quote a set-up line).
+      text = JSON.stringify(scrubStrings(meta, dk.scrub), null, 2) + '\n';
     } catch (e) {
       meta.status = 'harness_error';
       meta.harness_error = `record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`;

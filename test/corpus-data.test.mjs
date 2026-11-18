@@ -17,9 +17,10 @@ import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
   boundAnnotations, checkDropped, checkFull, checkShardBudget, checkSnapshot, CLEAN_COPY, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
-  validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME,
+  validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME, Scrubber,
 } from '../corpus/run-shard.mjs';
 import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
+import { LineScrubber, scrubStrings } from '../corpus/scrub.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -438,9 +439,10 @@ function drive(d, { only, fake = {}, env = {} } = {}) {
     encoding: 'utf8', env: { ...process.env, PATH: `${join(d, 'bin')}:${process.env.PATH}`, CORPUS_ORDER_SEED: '00', ...env },
   });
   const log = join(d, 'fake', 'calls.jsonl');
-  const calls = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l).argv) : [];
+  const records = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [];
+  const calls = records.map((x) => x.argv);
   const meta = (id) => JSON.parse(readFileSync(join(d, 'out', id, 'meta.json'), 'utf8'));
-  return { r, calls, meta, file: (id, f) => readFileSync(join(d, 'out', id, f), 'utf8') };
+  return { r, calls, records, meta, file: (id, f) => readFileSync(join(d, 'out', id, f), 'utf8') };
 }
 
 const MANIFEST = 'mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\nresources: []\n';
@@ -857,17 +859,18 @@ test('volatile: only on a step with capture; its name may reach server.env only,
 
 test('volatile: a token minted again on every reset refreshes the server env; 3 repeats complete; the values are never in meta', () => {
   const d = stand([{ id: 't23', backends: [pg({ setup: [{ exec: ['seed'] }, mint()] })], server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}' } }, full: fullOf({ repeats: 3 }) }]);
-  const { r, calls, meta, file } = drive(d, { fake: { 'capture-values': 'tok-AAA1\ntok-BBB2\ntok-CCC3\n' } });
+  const { r, calls, records, meta, file } = drive(d, { fake: { 'capture-values': 'tok-AAA1\ntok-BBB2\ntok-CCC3\n' } });
   assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`);
   const m = meta('t23');
   assert.equal(m.status, 'completed', m.harness_error);
   assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.plan_hash]), [[1, 'completed', HASH], [2, 'completed', HASH], [3, 'completed', HASH]]);
   assert.deepEqual(m.full_runs.map((f) => f.volatile_refreshed ?? null), [null, ['tok'], ['tok']]);
   // Each repeat's plan and run get that repeat's token in the server env.
-  const tokenOf = (a) => a.find((x) => x.startsWith('GIT_TOKEN='));
-  const step = (sub, i) => calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/dist/src/cli/main.js') && a.includes(sub)).map(tokenOf)[i];
-  assert.deepEqual([0, 1, 2].map((i) => step('--plan-hash', i)), ['GIT_TOKEN=tok-AAA1', 'GIT_TOKEN=tok-BBB2', 'GIT_TOKEN=tok-CCC3']);
-  assert.deepEqual(calls.filter((a) => a[0] === 'run' && a.includes('/opt/mwsc/dist/src/cli/main.js') && a.includes('plan')).map(tokenOf), ['GIT_TOKEN=tok-AAA1', 'GIT_TOKEN=tok-BBB2', 'GIT_TOKEN=tok-CCC3']);
+  // The token is given to Docker through the client's environment (`--env GIT_TOKEN`, no value on the argv).
+  const cli = (sub) => records.filter((x) => x.argv[0] === 'run' && x.argv.includes('/opt/mwsc/dist/src/cli/main.js') && x.argv.includes(sub));
+  for (const x of cli('--plan-hash')) assert.ok(x.argv.includes('GIT_TOKEN') && !x.argv.some((a) => a.startsWith('GIT_TOKEN=')), x.argv.join(' '));
+  assert.deepEqual(cli('--plan-hash').map((x) => x.secrets.GIT_TOKEN), ['tok-AAA1', 'tok-BBB2', 'tok-CCC3']);
+  assert.deepEqual(cli('plan').map((x) => x.secrets.GIT_TOKEN), ['tok-AAA1', 'tok-BBB2', 'tok-CCC3']);
   // The manifest is the same on every repeat (written again from the same text).
   const manifests = calls.filter((a) => a[0] === 'run' && a.join(' ').includes('cat > "$1"') && a.at(-1) === '/work/writecheck.yaml');
   assert.equal(manifests.length, 3);
@@ -895,9 +898,9 @@ test('redactArgv: volatile values, secret-like env names, URL user info; the arg
   assert.deepEqual(argv, before, 'the argv given to Docker is unchanged');
   const env = (n) => out[out.findIndex((x) => x.startsWith(`${n}=`))];
   assert.equal(env('GIT_TOKEN'), 'GIT_TOKEN=<redacted:GIT_TOKEN>');
-  assert.equal(env('DATABASE_URL'), 'DATABASE_URL=postgres://<redacted:DATABASE_URL>@b0:5432/db', 'a plain URL: only its user info');
+  assert.equal(env('DATABASE_URL'), 'DATABASE_URL=postgres://mwsc:<redacted:password>@b0:5432/db', 'a plain URL: only its password');
   assert.equal(env('REDIS_URL'), 'REDIS_URL=redis://b0:6379/0', 'no user info: nothing to hide');
-  assert.equal(env('API_URL'), 'API_URL=<redacted:API_URL>', 'a URL with a query: the whole value');
+  assert.equal(env('API_URL'), 'API_URL=https://h/x?key=<redacted:key>', 'a URL: its secret query parameters');
   assert.equal(env('PG_DSN'), 'PG_DSN=<redacted:PG_DSN>');
   assert.equal(env('POSTGRES_PASSWORD'), 'POSTGRES_PASSWORD=<redacted:POSTGRES_PASSWORD>');
   assert.equal(env('HOME'), 'HOME=/work/home');
@@ -909,32 +912,125 @@ test('redactArgv: volatile values, secret-like env names, URL user info; the arg
   for (const n of ['HOME', 'PATH', 'TMPDIR', 'NO_COLOR', 'UV_CACHE_DIR', 'TDIR']) assert.ok(!SECRET_ENV_NAME.test(n), n);
 });
 
-test('logs: a volatile token, a URL password and secret-like env values never reach a log file; Docker gets them as given', () => {
-  const d = stand([{ id: 't23', backends: [pg({ setup: [{ exec: ['seed'] }, mint()] })],
-    setup: ['git clone https://u:sekret-777@h/r {{tdir}}/src || true'],
-    server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}', DATABASE_URL: 'postgres://mwsc:pw-999888@b0:5432/db', LOG_LEVEL: 'debug' } },
-    full: fullOf({ repeats: 3 }) }]);
-  const { calls, meta } = drive(d, { fake: { 'capture-values': 'tok-AAA1\ntok-BBB2\ntok-CCC3\n' } });
+test('scrub: every case of the review probe is hidden in the logged form', () => {
+  const sec = new Map([['tok', new Set(['abcdEFGH1234'])], ['sh', new Set(['xy'])]]);
+  const cases = [
+    [['--env', 'API_TOKEN=plain'], 'plain'], [['--env=API_TOKEN=plain'], 'plain'], [['-e', 'API_TOKEN=plain'], 'plain'],
+    [['--env', 'PASSWORD=a=b=c'], 'a=b=c'], [['--env', 'NEO4J_AUTH=neo4j/s3cretpass'], 's3cretpass'], [['--env', 'MYSQL_ROOT_PASSWORD=pw'], '=pw'],
+    [['--env', 'DATABASE_URL=postgres://u:p@b0/db'], ':p@'], [['--env', 'DATABASE_URL=postgres://u:p@ss@b0/db'], 'p@ss'],
+    [['--env', 'RABBITMQ_DEFAULT_PASS=hunter22'], 'hunter22'], [['--env', 'DB_PASS=hunter22'], 'hunter22'], [['--env', 'REDIS_PW=hunter22'], 'hunter22'],
+    [['--env', 'MONGO_INITDB_ROOT_PASSWORD=x1'], '=x1'], [['--env', 'X=xy'], '=xy'], [['--env', 'X=prefix-abcdEFGH1234-suffix'], 'abcdEFGH1234'],
+    [['--env', 'GITHUB_PAT=ghp_xxx'], 'ghp_xxx'], [['--env', 'CREDS=xxx'], '=xxx'], [['--env', 'HOST_URL=http://h/x?token=abc'], 'token=abc'],
+    [['redis-server', '--requirepass', 'hunter22'], 'hunter22'], [['mysql', '-uroot', '-phunter22'], 'hunter22'], [['env', 'PGPASSWORD=hunter22', 'psql'], 'hunter22'],
+    [['psql', '-c', "ALTER USER u PASSWORD 'hunter22'"], 'hunter22'],
+    [['sh', '-c', 'curl -H "Authorization: Bearer abcdEFGH1234" http://b0 -u admin:hunter22'], 'hunter22'],
+    [['sh', '-c', 'curl -H "Authorization: Bearer zzzzYYYY9999" http://b0'], 'zzzzYYYY9999'],
+    [['x', 'postgres://u:p/w@b0/db'], 'p/w'], [['x', 'jdbc:postgresql://b0/db?user=u&password=hunter22'], 'hunter22'], [['x', 'https://h/a?pass=hunter22&pwd=hunter22'], 'hunter22'],
+  ];
+  for (const [argv, secret] of cases) {
+    const out = redactArgv(argv, sec).join(' ');
+    assert.ok(!out.includes(secret), `${JSON.stringify(argv)} => ${out}`);
+    assert.match(out, /<redacted:/, out);
+  }
+  // Not secrets: docker's own --user, a port, plain settings, a short value inside a longer word.
+  assert.deepEqual(redactArgv(['run', '--user', '10001:10001', '-p', '8080', '--env', 'HOME=/work', 'xyz'], sec), ['run', '--user', '10001:10001', '-p', '8080', '--env', 'HOME=/work', 'xyz']);
+  assert.deepEqual(redactArgv(['mysql', '-p', 'x']), ['mysql', '-p', 'x'], '-p alone is a port flag elsewhere; only -p<value> is a password');
+  assert.equal(redactArgv(['-e', 'X=a']).join(' '), '-e X=a');
+});
+
+test('scrub: list secrets, free text and output line by line (a secret split across writes is still hidden)', () => {
+  const s = new Scrubber();
+  s.addList({ backends: [{ env: { POSTGRES_PASSWORD: 'pg-Hunter22', POSTGRES_USER: 'mwsc', HOST_URL: 'redis://:rd-Hunter22@b0' } }], server: { env: { DB_TOKEN: '{{tok}}', LOG: 'x' } },
+    setup: ['git clone https://u:sekret-777@h/r'], note: 'mysql://root:my-Hunter22@b1/db' });
+  assert.equal(s.text('PGPASSWORD=pg-Hunter22 psql -U mwsc'), 'PGPASSWORD=<redacted:POSTGRES_PASSWORD> psql -U mwsc', 'a known value is named after where the list gives it');
+  assert.equal(new Scrubber().text('PGPASSWORD=other99 psql'), 'PGPASSWORD=<redacted:PGPASSWORD> psql', 'an unknown one by its NAME=');
+  assert.equal(s.text('connecting with pg-Hunter22 now'), 'connecting with <redacted:POSTGRES_PASSWORD> now');
+  for (const v of ['rd-Hunter22', 'sekret-777', 'my-Hunter22']) assert.ok(!s.text(`... ${v} ...`).includes(v), v);
+  assert.ok(!s.values.has('{{tok}}'), 'a template is not a value yet');
+  assert.ok(!s.values.has('mwsc'), 'a value under a plain name is not a secret');
+  const ls = new LineScrubber(s);
+  const out = Buffer.concat([ls.push(Buffer.from('line one pg-Hun')), ls.push(Buffer.from('ter22 end\nsecond: my-Hunt')), ls.push(Buffer.from('er22')), ls.end()]).toString();
+  assert.equal(out, 'line one <redacted:POSTGRES_PASSWORD> end\nsecond: <redacted:url>');
+  // Strings in a JSON-like value; keys kept.
+  assert.deepEqual(scrubStrings({ a: ['x pg-Hunter22'], pg_Hunter22: 1, n: 2 }, s), { a: ['x <redacted:POSTGRES_PASSWORD>'], pg_Hunter22: 1, n: 2 });
+});
+
+test('scrub: linear on floods: megabytes with no newline, of letters, of NAME=, of URLs and of white space', () => {
+  const s = new Scrubber(new Map([['tok', new Set(['abcdEFGH1234'])]]));
+  for (const unit of ['x', 'ab=', 'a://', 'a://u:p@', 'http://u:p@h ', ' ', 'PASSWORD=x;', 'curl ', 'mysql ', '--password ', '?password=', 'abcdEFGH123']) {
+    const ls = new LineScrubber(s);
+    const t0 = Date.now();
+    let bytes = 0;
+    const chunk = Buffer.from(unit.repeat(Math.ceil(65536 / unit.length)));
+    for (let i = 0; i < 64; i++) bytes += ls.push(chunk).length;
+    bytes += ls.end().length;
+    assert.ok(Date.now() - t0 < 5000, `${JSON.stringify(unit)}: ${Date.now() - t0} ms`);
+    assert.ok(bytes > 0);
+  }
+});
+
+test('volatile: a capture made from a volatile one is volatile too; a CLI template name in the manifest is not a use', () => {
+  const b = { backends: [{ setup: [{ exec: ['x'], capture: 'tok', volatile: true }, { exec: ['echo', 'u:{{tok}}'], capture: 'dsn' }, { exec: ['echo', '{{dsn}}'], capture: 'dsn2' }] }] };
+  assert.deepEqual([...volatileCaptures(b)].sort(), ['dsn', 'dsn2', 'tok']);
+  assert.throws(() => volatileCaptures({ ...b, full: { manifest: 'x: "{{dsn}}"' } }), /volatile capture dsn is used in full\.manifest/);
+  assert.throws(() => volatileCaptures({ ...b, full: { manifest: 'x: "{{dsn2}}"' } }), /volatile capture dsn2 is used in full\.manifest/);
+  assert.throws(() => volatileCaptures({ ...b, server: { command: ['x', '--t={{tok}}'] } }), /used in server\.command/);
+  assert.throws(() => volatileCaptures({ ...b, full: { manifest: '{{tok}}' } }), /used in full\.manifest/);
+  assert.doesNotThrow(() => volatileCaptures({ ...b, setup: ['echo {{tok}} > /work/t'] }), 'list set-up runs again on every repeat');
+  assert.doesNotThrow(() => volatileCaptures({ ...b, backends: [...b.backends, { args: ['{{tok}}'] }] }), 'a backend is started again on every repeat');
+  // `id` is a CLI template name: fillManifest never fills it, so a volatile capture named id does not reach the manifest.
+  const idv = { backends: [{ setup: [{ exec: ['x'], capture: 'id', volatile: true }] }] };
+  assert.doesNotThrow(() => volatileCaptures({ ...idv, full: { manifest: 'read: { args: { id: "{{id}}" } }' } }));
+  assert.throws(() => volatileCaptures({ ...idv, server: { command: ['x', '{{id}}'] } }), /used in server\.command/, 'server.command is filled with every name');
+  // A derived capture that is also captured plainly elsewhere is refused like any mixed name.
+  assert.throws(() => volatileCaptures({ backends: [{ setup: [...b.backends[0].setup, { exec: ['y'], capture: 'dsn' }] }] }), /capture dsn is volatile in one set-up step and not in another/);
+});
+
+test('logs: no list secret, volatile or derived value reaches a log file, meta.json or the archived manifest; Docker gets them all', () => {
+  const PW = { pg: 'pg-Hunter22', my: 'my-Hunter22', rb: 'rb-Hunter22', rd: 'rd-Hunter22', n4: 'n4-Hunter22', pat: 'ghp_patvalue1', creds: 'creds-value1', db: 'pw-999888', url: 'sekret-777' };
+  const manifest = `mws: "0.9"\nserver:\n  stdio: ["{{bin}}/srv"]\n  env: { DB_PASSWORD: "${PW.pg}", URL: "postgres://u:${PW.pg}@b0/db" }\nresources: []\n`;
+  const d = stand([{ id: 't23',
+    backends: [pg({
+      env: { POSTGRES_PASSWORD: PW.pg, MYSQL_ROOT_PASSWORD: PW.my, RABBITMQ_DEFAULT_PASS: PW.rb, REDIS_PW: PW.rd, NEO4J_AUTH: `neo4j/${PW.n4}`, GITHUB_PAT: PW.pat },
+      args: ['redis-server', '--requirepass', PW.rd],
+      wait: ['mysql', '-uroot', `-p${PW.my}`, '-e', 'select 1'],
+      setup: [{ exec: ['psql', '-c', `ALTER USER u PASSWORD '${PW.pg}'`] }, { exec: ['sh', '-c', `PGPASSWORD=${PW.pg} psql -c "select 1"`] }, mint(),
+        { exec: ['echo', 'postgres://u:{{tok}}@b0/db', 'CAPTURE'], capture: 'dsn' }],
+      snapshot: { exec: ['sh', '-c', `curl -u admin:${PW.rb} http://b0 SNAPSHOT`] },
+    })],
+    setup: [`git clone https://u:${PW.url}@h/r {{tdir}}/src || true`, `mysql -uroot -p${PW.my} -e "select 1" || true`, `curl -s -H "Authorization: Bearer ${PW.pat}" http://b0 || true`],
+    server: { command: ['{{bin}}/srv'], env: { GIT_TOKEN: '{{tok}}', DB_DSN: '{{dsn}}', DATABASE_URL: `postgres://mwsc:${PW.db}@b0:5432/db`, LOG_LEVEL: 'debug', CREDS: PW.creds } },
+    full: fullOf({ manifest, repeats: 3 }) }]);
+  const caps = 'tok-AAA1\npostgres://u:tok-AAA1@b0/db\ntok-BBB2\npostgres://u:tok-BBB2@b0/db\ntok-CCC3\npostgres://u:tok-CCC3@b0/db\n';
+  const { records, meta } = drive(d, { fake: { 'capture-values': caps, 'exec-echo': '1' } });
   const m = meta('t23');
   assert.equal(m.status, 'completed', m.harness_error);
-  assert.deepEqual(m.env_names, ['DATABASE_URL', 'GIT_TOKEN', 'LOG_LEVEL']);
-  const secrets = ['tok-AAA1', 'tok-BBB2', 'tok-CCC3', 'pw-999888', 'sekret-777'];
-  // Every log the driver wrote (the target's and the shard's), and meta.json.
+  assert.deepEqual(m.full_runs.map((f) => [f.status, f.volatile_refreshed ?? null]), [['completed', null], ['completed', ['tok', 'dsn']], ['completed', ['tok', 'dsn']]]);
+  assert.equal(m.manifest_redacted, true);
+  const secrets = [...Object.values(PW), 'tok-AAA1', 'tok-BBB2', 'tok-CCC3'];
   const walk = (p) => readdirSync(p, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(join(p, e.name)) : [join(p, e.name)]));
-  const logs = walk(join(d, 'out')).filter((f) => f.endsWith('.log') || f.endsWith('meta.json'));
-  assert.ok(logs.some((f) => f.endsWith('full-3.log')));
-  for (const f of logs) {
+  const files = walk(join(d, 'out')).filter((f) => f.endsWith('.log') || f.endsWith('meta.json') || f.endsWith('writecheck.yaml') || f.endsWith('.txt'));
+  assert.ok(files.some((f) => f.endsWith('writecheck.yaml')) && files.some((f) => f.endsWith('backend-0.log')) && files.some((f) => f.endsWith('setup.log')));
+  for (const f of files.filter((x) => !/backend-0-.*\.txt$/.test(x))) {
     const text = readFileSync(f, 'utf8');
     for (const v of secrets) assert.ok(!text.includes(v), `${v} in ${f}`);
   }
-  // The logged lines say what was hidden.
-  const full2 = readFileSync(join(d, 'out', 't23', 'logs', 'full-2.log'), 'utf8');
-  assert.match(full2, /--env GIT_TOKEN=<redacted:GIT_TOKEN>/);
-  assert.match(full2, /--env DATABASE_URL=postgres:\/\/<redacted:DATABASE_URL>@b0:5432\/db/);
-  assert.match(full2, /--env LOG_LEVEL=debug/);
-  assert.match(readFileSync(join(d, 'out', 't23', 'logs', 'setup.log'), 'utf8'), /https:\/\/u:<redacted:password>@h\/r/);
-  // Docker itself got the real values: the stand-in recorded the argv it was called with.
-  const flat = calls.map((a) => a.join(' ')).join('\n');
+  // What the logs say instead, and that the scrubbed output lines are there.
+  const blog = readFileSync(join(d, 'out', 't23', 'logs', 'backend-0.log'), 'utf8');
+  assert.match(blog, /--env POSTGRES_PASSWORD( |\n)/, 'a secret env value is not even on the docker argv');
+  assert.match(blog, /--requirepass <redacted:/);
+  assert.match(blog, /\nran: \S+ mysql -uroot -p<redacted:MYSQL_ROOT_PASSWORD> -e select 1\n/, 'output lines are scrubbed too');
+  assert.match(blog, /PASSWORD '<redacted:/);
+  // Docker got every real value: on its argv where the list puts it there, else in its client env.
+  const flat = records.map((x) => `${x.argv.join(' ')} ${JSON.stringify(x.secrets ?? {})}`).join('\n');
   for (const v of secrets) assert.ok(flat.includes(v), v);
-  assert.ok(calls.some((a) => a.includes('GIT_TOKEN=tok-BBB2') && a.includes('--plan-hash')));
+  const be = records.find((x) => x.argv[0] === 'run' && x.argv.includes('-d'));
+  assert.equal(be.secrets.POSTGRES_PASSWORD, PW.pg);
+  assert.ok(be.argv.includes('POSTGRES_PASSWORD') && be.argv.includes(PW.rd));
+  const run2 = records.filter((x) => x.argv.includes('--plan-hash'))[1];
+  assert.deepEqual([run2.secrets.GIT_TOKEN, run2.secrets.DB_DSN, run2.secrets.DATABASE_URL], ['tok-BBB2', 'postgres://u:tok-BBB2@b0/db', `postgres://mwsc:${PW.db}@b0:5432/db`]);
+  assert.ok(run2.argv.includes('LOG_LEVEL=debug'));
+  // The CLI got the real manifest (written into the target's volume).
+  const vols = readdirSync(join(d, 'fake', 'vols')).filter((v) => /-t23$/.test(v));
+  assert.ok(readFileSync(join(d, 'fake', 'vols', vols[0], 'writecheck.yaml'), 'utf8').includes(PW.pg));
 });

@@ -19,7 +19,9 @@ const argv = process.argv.slice(2);
 const root = process.env.FAKE_DOCKER_ROOT;
 const NAME = 'zz-secret-target-name';
 const env = JSON.parse(process.env.FAKE_DOCKER_SEEN_ENV ?? '[]');
-appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({ argv, env }) + '\n');
+// The values of secret-like names the docker client was given in its own environment (`--env NAME`).
+const secrets = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith('FAKE_') && /(TOKEN|SECRET|PASS|PWD|KEY|AUTH|CRED|_URL$|_URI$|DSN)/i.test(k)));
+appendFileSync(join(root, 'calls.jsonl'), JSON.stringify({ argv, env, secrets }) + '\n');
 const netFile = join(root, 'networks.json');
 const nets = existsSync(netFile) ? JSON.parse(readFileSync(netFile, 'utf8')) : {};
 const done = (code = 0, out = '') => {
@@ -70,6 +72,8 @@ if (cmd === 'network') {
 // A backend that never gets ready (wait fails) and what its logs say (FAKE root files). A snapshot
 // exec (an argument SNAPSHOT) prints a numbered state; a capture exec (CAPTURE) prints `capture-values`' n-th line.
 if (cmd === 'exec') {
+  // FAKE root `exec-echo`: every exec says what it ran on stderr (output the driver logs, line by line).
+  if (existsSync(join(root, 'exec-echo'))) process.stderr.write(`ran: ${rest.join(' ')}\nand again: ${rest.slice(1).join(' ')}\n`);
   if (rest.includes('SNAPSHOT')) {
     const n = count('snapshot');
     done(existsSync(join(root, 'snapshot-exit')) ? Number(readFileSync(join(root, 'snapshot-exit'), 'utf8')) : 0, `${NAME} rows: state ${n}\n`);
