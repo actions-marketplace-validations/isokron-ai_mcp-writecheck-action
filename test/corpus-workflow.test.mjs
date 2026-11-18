@@ -71,6 +71,29 @@ test('H3: the driver\'s stderr goes to the bundle; the last sweep removes contai
   for (const k of ['docker ps -aq --filter label=isokron.corpus.run', 'docker network ls -q --filter label=isokron.corpus.run', 'docker volume ls -q --filter label=isokron.corpus.run']) assert.ok(sh.includes(k), k);
 });
 
+test('the last sweep: an environ that cannot be read prints nothing; a CORPUS_SANDBOX=1 process is still killed', () => {
+  const sh = readFileSync(join(root, 'corpus', 'run-ci-shard.sh'), 'utf8');
+  const line = sh.split('\n').find((l) => l.includes('"$p/environ"'));
+  assert.ok(line, 'the sweep line');
+  assert.match(line, /\{ tr '\\0' '\\n' < "\$p\/environ"; \} 2>\/dev\/null \| grep -qx 'CORPUS_SANDBOX=1'/);
+  // Run the script's own line against stand-in /proc entries, with kill stubbed to report its argument.
+  const d = mkdtempSync(join(tmpdir(), 'sweep-'));
+  const mk = (n, env, mode) => {
+    mkdirSync(join(d, n));
+    if (env !== null) writeFileSync(join(d, n, 'environ'), env, { mode: mode ?? 0o600 });
+  };
+  mk('101', null); // no environ at all: the redirection fails
+  mk('102', 'PATH=/bin\0CORPUS_SANDBOX=1\0', 0o600); // a sandbox process
+  mk('103', 'PATH=/bin\0CORPUS_SANDBOX=10\0', 0o600); // not one (exact line match)
+  mk('104', 'CORPUS_SANDBOX=1\0', 0o000); // unreadable unless root
+  const script = `kill() { echo "killed \${2#/proc/}"; }\nfor p in ${d}/[0-9]*; do\n${line.replaceAll('"${p#/proc/}"', '"$(basename "$p")"')}\ndone\n`;
+  const r = spawnSync('bash', ['-c', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0);
+  assert.equal(r.stderr, '', 'nothing on stderr (the public log)');
+  const root0 = process.getuid?.() === 0;
+  assert.deepEqual(r.stdout.trim().split('\n').filter(Boolean).sort(), root0 ? ['killed 102', 'killed 104'] : ['killed 102']);
+});
+
 test('net-guard: metadata and wire-server addresses dropped, container-to-host traffic dropped', () => {
   const g = readFileSync(join(root, 'corpus', 'net-guard.sh'), 'utf8');
   assert.match(g, /169\.254\.0\.0\/16 168\.63\.129\.16\/32/);

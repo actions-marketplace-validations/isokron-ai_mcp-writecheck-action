@@ -24,7 +24,9 @@ rm -f "$c/targets.json"
   [ -z "$ids" ] || docker volume rm -f $ids
 } >>"$c/out/_shard/driver-stderr.log" 2>&1 || true
 for p in /proc/[0-9]*; do
-  if tr '\0' '\n' < "$p/environ" 2>/dev/null | grep -qx 'CORPUS_SANDBOX=1'; then kill -KILL "${p#/proc/}" 2>/dev/null || true; fi
+  # The braces put the redirection itself under 2>/dev/null: an environ this user may not read (most
+  # of them on a runner) would otherwise print "Permission denied" into the public log.
+  if { tr '\0' '\n' < "$p/environ"; } 2>/dev/null | grep -qx 'CORPUS_SANDBOX=1'; then kill -KILL "${p#/proc/}" 2>/dev/null || true; fi
 done
 [[ "$rc" =~ ^[0-9]{1,3}$ ]] || rc=125
 echo "rc=$rc" >> "$GITHUB_OUTPUT"
