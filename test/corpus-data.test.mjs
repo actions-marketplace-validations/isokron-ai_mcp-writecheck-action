@@ -20,7 +20,7 @@ import {
   validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME, Scrubber,
 } from '../corpus/run-shard.mjs';
 import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
-import { LineScrubber, scrubStrings } from '../corpus/scrub.mjs';
+import { acceptValue, errorText, isSecretName, LineScrubber, scrubFreeText, scrubStrings } from '../corpus/scrub.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -892,34 +892,36 @@ test('volatile: a token minted again on every reset refreshes the server env; 3 
 test('redactArgv: volatile values, secret-like env names, URL user info; the argv itself is not changed', () => {
   const argv = ['run', '--env', 'GIT_TOKEN=tok-AAA1', '--env', 'DATABASE_URL=postgres://mwsc:pw-123@b0:5432/db', '--env', 'REDIS_URL=redis://b0:6379/0',
     '--env', 'API_URL=https://h/x?key=k1', '--env', 'PG_DSN=host=b0 password=pw', '--env', 'POSTGRES_PASSWORD=pw', '--env', 'HOME=/work/home', '--env', 'PATH=/usr/bin',
-    '--env', 'SHORTV=ab', IMG, 'sh', '-c', 'git clone https://u:sekret@h/r && echo tok-AAA1 && curl http://h/no-userinfo'];
+    '--env', 'SHORTV=a1b', IMG, 'sh', '-c', 'git clone https://u:sekret@h/r && echo tok-AAA1 && curl http://h/no-userinfo'];
   const before = [...argv];
-  const out = redactArgv(argv, new Map([['tok', new Set(['tok-AAA1'])], ['shortv', new Set(['ab'])]]));
+  const out = redactArgv(argv, new Map([['tok', new Set(['tok-AAA1'])], ['shortv', new Set(['a1b'])]]));
   assert.deepEqual(argv, before, 'the argv given to Docker is unchanged');
   const env = (n) => out[out.findIndex((x) => x.startsWith(`${n}=`))];
-  assert.equal(env('GIT_TOKEN'), 'GIT_TOKEN=<redacted:GIT_TOKEN>');
+  assert.match(env('GIT_TOKEN'), /^GIT_TOKEN=<redacted:(tok|GIT_TOKEN)>$/);
   assert.equal(env('DATABASE_URL'), 'DATABASE_URL=postgres://mwsc:<redacted:password>@b0:5432/db', 'a plain URL: only its password');
   assert.equal(env('REDIS_URL'), 'REDIS_URL=redis://b0:6379/0', 'no user info: nothing to hide');
   assert.equal(env('API_URL'), 'API_URL=https://h/x?key=<redacted:key>', 'a URL: its secret query parameters');
-  assert.equal(env('PG_DSN'), 'PG_DSN=<redacted:PG_DSN>');
+  assert.equal(env('PG_DSN'), 'PG_DSN=host=b0 password=<redacted:password>', 'a DSN: only its password part');
   assert.equal(env('POSTGRES_PASSWORD'), 'POSTGRES_PASSWORD=<redacted:POSTGRES_PASSWORD>');
   assert.equal(env('HOME'), 'HOME=/work/home');
   assert.equal(env('PATH'), 'PATH=/usr/bin');
   assert.equal(env('SHORTV'), 'SHORTV=<redacted:shortv>', 'a short volatile value: where it is the whole value');
   assert.equal(out.at(-1), 'git clone https://u:<redacted:password>@h/r && echo <redacted:tok> && curl http://h/no-userinfo');
   assert.equal(out[out.indexOf(IMG)], IMG);
-  for (const n of ['GITHUB_TOKEN', 'aws_secret_key', 'SESSION_ID', 'X_AUTH', 'MONGO_URI', 'PGPASSWD']) assert.ok(SECRET_ENV_NAME.test(n), n);
+  for (const n of ['GITHUB_TOKEN', 'aws_secret_key', 'SESSION_SECRET', 'X_AUTH', 'MONGO_URI', 'PGPASSWD', 'PGPASSWORD', 'DB_PASS', 'REDIS_PW', 'GITHUB_PAT', 'CREDS', 'OPENAI_API_KEY', 'JWT_PRIVATE_KEY', 'MYSQL_PWD', 'password']) assert.ok(SECRET_ENV_NAME.test(n), n);
+  // Whole tokens only: these are settings, not secrets.
+  for (const n of ['AUTH_ENABLED', 'AUTH_PROVIDER', 'SESSION_STORE', 'SESSION_ID', 'PWD', 'OLDPWD', 'author', 'monkey', 'keyboard', 'KEY_PREFIX', 'TOKENIZER', 'PASSTHROUGH']) assert.ok(!SECRET_ENV_NAME.test(n), n);
   for (const n of ['HOME', 'PATH', 'TMPDIR', 'NO_COLOR', 'UV_CACHE_DIR', 'TDIR']) assert.ok(!SECRET_ENV_NAME.test(n), n);
 });
 
 test('scrub: every case of the review probe is hidden in the logged form', () => {
-  const sec = new Map([['tok', new Set(['abcdEFGH1234'])], ['sh', new Set(['xy'])]]);
+  const sec = new Map([['tok', new Set(['abcdEFGH1234'])], ['sh', new Set(['x9y'])]]);
   const cases = [
     [['--env', 'API_TOKEN=plain'], 'plain'], [['--env=API_TOKEN=plain'], 'plain'], [['-e', 'API_TOKEN=plain'], 'plain'],
     [['--env', 'PASSWORD=a=b=c'], 'a=b=c'], [['--env', 'NEO4J_AUTH=neo4j/s3cretpass'], 's3cretpass'], [['--env', 'MYSQL_ROOT_PASSWORD=pw'], '=pw'],
     [['--env', 'DATABASE_URL=postgres://u:p@b0/db'], ':p@'], [['--env', 'DATABASE_URL=postgres://u:p@ss@b0/db'], 'p@ss'],
     [['--env', 'RABBITMQ_DEFAULT_PASS=hunter22'], 'hunter22'], [['--env', 'DB_PASS=hunter22'], 'hunter22'], [['--env', 'REDIS_PW=hunter22'], 'hunter22'],
-    [['--env', 'MONGO_INITDB_ROOT_PASSWORD=x1'], '=x1'], [['--env', 'X=xy'], '=xy'], [['--env', 'X=prefix-abcdEFGH1234-suffix'], 'abcdEFGH1234'],
+    [['--env', 'MONGO_INITDB_ROOT_PASSWORD=x1'], '=x1'], [['--env', 'X=x9y'], '=x9y'], [['--env', 'X=prefix-abcdEFGH1234-suffix'], 'abcdEFGH1234'],
     [['--env', 'GITHUB_PAT=ghp_xxx'], 'ghp_xxx'], [['--env', 'CREDS=xxx'], '=xxx'], [['--env', 'HOST_URL=http://h/x?token=abc'], 'token=abc'],
     [['redis-server', '--requirepass', 'hunter22'], 'hunter22'], [['mysql', '-uroot', '-phunter22'], 'hunter22'], [['env', 'PGPASSWORD=hunter22', 'psql'], 'hunter22'],
     [['psql', '-c', "ALTER USER u PASSWORD 'hunter22'"], 'hunter22'],
@@ -952,7 +954,8 @@ test('scrub: list secrets, free text and output line by line (a secret split acr
   const out = Buffer.concat([ls.push(Buffer.from('line one pg-Hun')), ls.push(Buffer.from('ter22 end\nsecond: my-Hunt')), ls.push(Buffer.from('er22')), ls.end()]).toString();
   assert.equal(out, 'line one <redacted:POSTGRES_PASSWORD> end\nsecond: <redacted:url>');
   // Strings in a JSON-like value; keys kept.
-  assert.deepEqual(scrubStrings({ a: ['x pg-Hunter22'], pg_Hunter22: 1, n: 2 }, s), { a: ['x <redacted:POSTGRES_PASSWORD>'], pg_Hunter22: 1, n: 2 });
+  // meta.json: free-text fields only; structured data (names, URLs, versions) as it is.
+  assert.deepEqual(scrubStrings({ harness_error: 'x pg-Hunter22', a: ['x pg-Hunter22'], pg_Hunter22: 1, n: 2 }, s), { harness_error: 'x <redacted:POSTGRES_PASSWORD>', a: ['x pg-Hunter22'], pg_Hunter22: 1, n: 2 });
 });
 
 test('scrub: linear on floods: megabytes with no newline, of letters, of NAME=, of URLs and of white space', () => {
@@ -1033,4 +1036,114 @@ test('logs: no list secret, volatile or derived value reaches a log file, meta.j
   // The CLI got the real manifest (written into the target's volume).
   const vols = readdirSync(join(d, 'fake', 'vols')).filter((v) => /-t23$/.test(v));
   assert.ok(readFileSync(join(d, 'fake', 'vols', vols[0], 'writecheck.yaml'), 'utf8').includes(PW.pg));
+});
+
+// ------------------------------------------------------------------------------------------------
+// Scrubbing, review round 2: no over-redaction, safe cuts, multi-line and encoded secrets
+// ------------------------------------------------------------------------------------------------
+
+test('scrub (1): settings named like AUTH_ENABLED / SESSION_STORE / AUTH_PROVIDER corrupt nothing; meta keeps its structured data', () => {
+  const tools = { tools: [{ name: 'memory_search', description: 'Search memory.', inputSchema: { type: 'object' }, annotations: { readOnlyHint: false, title: 'memory github' } }] };
+  const surface = { initialize: { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'memory-server', version: '1.0.0' } }, tools, pages: 1, captured_at: '2026-11-17T00:00:00.000Z' };
+  const env = { AUTH_ENABLED: 'true', SESSION_STORE: 'memory', AUTH_PROVIDER: 'github', POSTGRES_PASSWORD: 'postgres', API_TOKEN: 'tok-REAL-9988' };
+  const source = { repo: 'https://github.com/o/memory-server', commit: 'c'.repeat(40) };
+  const d = stand([{ id: 't01', source, backends: [{ image: IMG, port: 5432, env }], server: { command: ['{{bin}}/srv'], env } }]);
+  const { records, meta, file } = drive(d, { fake: { 'surface-json': JSON.stringify(surface) } });
+  const m = meta('t01');
+  assert.equal(m.status, 'completed', m.harness_error);
+  assert.equal(m.surface.tools[0].name, 'memory_search');
+  assert.deepEqual(m.surface.tools[0].annotations, { readOnlyHint: false, title: 'memory github' });
+  assert.deepEqual(m.target.source, source);
+  assert.deepEqual(m.surface.server_info, { name: 'memory-server', version: '1.0.0' });
+  assert.equal(m.meta_redacted, undefined, 'nothing in meta needed scrubbing');
+  assert.equal(JSON.parse(file('t01', 'surface.json')).tools.tools[0].name, 'memory_search');
+  const plan = file('t01', 'logs/plan.log');
+  assert.match(plan, /--memory 4g/);
+  assert.match(plan, /--env AUTH_ENABLED=true --env SESSION_STORE=memory --env AUTH_PROVIDER=github/);
+  assert.match(file('t01', 'logs/backend-0.log'), /--memory 2g/);
+  // The real secret is hidden all the same, and Docker got it.
+  for (const f of ['logs/plan.log', 'logs/backend-0.log', 'meta.json']) assert.ok(!file('t01', f).includes('tok-REAL-9988'), f);
+  assert.ok(records.some((x) => x.secrets?.API_TOKEN === 'tok-REAL-9988'));
+  // Values that are never known secrets: booleans, numbers, short words, common words.
+  for (const v of ['true', 'false', '1234', '3.5', 'ab', 'memory', 'github', 'postgres', 'root', 'secret', 'admin', 'none']) assert.equal(acceptValue(v), false, v);
+  for (const v of ['k3y', 'hunter2xyz', 'p@ss w0rd!', 'tok-REAL-9988']) assert.equal(acceptValue(v), true, v);
+  // meta: free text only, with the paths that changed.
+  const s = new Scrubber();
+  s.add('API_TOKEN', 'tok-REAL-9988');
+  const r = scrubFreeText({ harness_error: 'set-up: tok-REAL-9988', surface: { tools: [{ name: 'tok-REAL-9988' }] }, steps: [{ spawn_error: 'x tok-REAL-9988' }], fresh_state_why: 'ok' }, s);
+  assert.deepEqual(r.paths, ['harness_error', 'steps[0].spawn_error']);
+  assert.equal(r.value.surface.tools[0].name, 'tok-REAL-9988', 'structured data is never touched');
+});
+
+test('scrub (2/3): no known value, flag+value pair or private key is split by a cut, across chunks and lines', () => {
+  const s = new Scrubber();
+  s.add('DB_PASSWORD', 'Secret-Value-123456');
+  s.add('PRIVATE_KEY', '-----BEGIN KEY-----\nAAAABBBBCCCC\nDDDDEEEE\n-----END KEY-----');
+  const feed = (text, size, opts) => {
+    const ls = new LineScrubber(s, opts);
+    const out = [];
+    for (let i = 0; i < text.length; i += size) out.push(ls.push(Buffer.from(text.slice(i, i + size))));
+    out.push(ls.end());
+    return Buffer.concat(out).toString();
+  };
+  // A known value straddling the forced cut of a line with no newline (limit 1000), in 7-byte chunks.
+  const long = `${'x'.repeat(995)}Secret-Value-123456${'y'.repeat(3000)}`;
+  const o1 = feed(long, 7, { limit: 1000 });
+  assert.ok(!o1.includes('Secret-Value') && o1.includes('<redacted:DB_PASSWORD>'), o1.slice(980, 1040));
+  // A flag and an unknown value straddling the cut.
+  const o2 = feed(`${'x'.repeat(990)} --requirepass zz9-unknown-77 ${'y'.repeat(3000)}`, 5, { limit: 1000 });
+  assert.ok(!o2.includes('zz9-unknown-77'), o2.slice(970, 1040));
+  // A known multi-line value and a PEM private key, split across chunks and lines.
+  const o3 = feed('key: -----BEGIN KEY-----\nAAAABBBBCCCC\nDDDDEEEE\n-----END KEY-----\nnext line\n', 9);
+  assert.equal(o3, 'key: <redacted:PRIVATE_KEY>\nnext line\n');
+  const pem = '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA1\nZZZZ\n-----END RSA PRIVATE KEY-----\n';
+  const o4 = feed(`before\n${pem}after\n`, 11);
+  assert.equal(o4, 'before\n<redacted:private-key>\nafter\n');
+  assert.equal(new Scrubber().text(pem), '<redacted:private-key>\n');
+});
+
+test('scrub (4/5): literal secrets outside env are known (flags in args, exec, set-up; manifest YAML); encoded forms; $ENV-derived captures', () => {
+  const s = new Scrubber();
+  s.addList({ backends: [{ args: ['redis-server', '--requirepass', 'redisPW123'], setup: [{ exec: ['redis-cli', '-a', 'otherPW-777', 'ping'] }] }],
+    setup: ['node s.js --db-password=dbPW-5566 --redis-pass "rpPW-8899"'], full: { manifest: 'server:\n  env:\n    password: mfPW-1234\n    token: "mfTK-5678"\n' } });
+  for (const v of ['redisPW123', 'otherPW-777', 'dbPW-5566', 'rpPW-8899', 'mfPW-1234', 'mfTK-5678']) {
+    assert.ok(s.values.has(v), v);
+    assert.ok(!s.text(`connected with ${v} ok`).includes(v), v);
+  }
+  assert.deepEqual(redactArgv(['node', 's.js', '--db-password', 'zz-1', '--redis-pass=zz-2', '--x-token', 'zz-3'], new Scrubber()), ['node', 's.js', '--db-password', '<redacted:password>', '--redis-pass=<redacted:password>', '--x-token', '<redacted:password>']);
+  assert.deepEqual(redactArgv(['redis-cli', '-a', 'zz-4', 'ping'], new Scrubber()), ['redis-cli', '-a', '<redacted:password>', 'ping']);
+  assert.equal(new Scrubber().text('env:\n  password: zz-5\n  REDIS_PASSWORD: "zz-6"\n'), 'env:\n  password: <redacted:password>\n  REDIS_PASSWORD: "<redacted:REDIS_PASSWORD>"\n');
+  // Encoded forms of a known value of 6+ characters.
+  const e = new Scrubber();
+  e.add('DB_PASS', 'p@ss w0rd!"\\');
+  e.add('POSTGRES_PASSWORD', 'hunter2xyz');
+  const enc = ['p%40ss%20w0rd!%22%5C', 'p%40ss%20w0rd%21%22%5C', JSON.stringify('p@ss w0rd!"\\').slice(1, -1), Buffer.from('hunter2xyz').toString('base64'), Buffer.from('hunter2xyz').toString('base64url'), Buffer.from('p@ss w0rd!"\\').toString('base64url')];
+  for (const v of enc) assert.ok(e.text(`x ${v} y`).includes('<redacted:'), v);
+  // A capture that reads a secret-named variable is derived, so volatile (and refused in the manifest).
+  const derived = { backends: [{ setup: [{ exec: ['sh', '-c', 'echo "u:$POSTGRES_PASSWORD"'], capture: 'pw' }, { exec: ['sh', '-c', 'echo ${API_TOKEN}'], capture: 'tk' }, { exec: ['sh', '-c', 'echo $HOME'], capture: 'home' }] }] };
+  assert.deepEqual([...volatileCaptures(derived)].sort(), ['pw', 'tk']);
+  assert.throws(() => volatileCaptures({ ...derived, full: { manifest: 'x: "{{pw}}"' } }), /volatile capture pw is used in full\.manifest/);
+  assert.doesNotThrow(() => volatileCaptures({ ...derived, full: { manifest: 'x: "{{home}}"' } }));
+});
+
+test('scrub (6/7): errors are scrubbed; Authorization in any case; LineScrubber is linear (2 MiB in 16-byte chunks)', () => {
+  const s = new Scrubber();
+  s.add('API_TOKEN', 'tok-REAL-9988');
+  const err = new Error('failed with tok-REAL-9988');
+  assert.ok(!errorText(err, s).includes('tok-REAL-9988') && errorText(err, s).includes('<redacted:API_TOKEN>'));
+  for (const h of ['authorization: bearer abcd1234efgh', 'Authorization: BEARER abcd1234efgh', 'AUTHORIZATION: Basic dXNlcjpwYXNzd29yZA==']) assert.match(new Scrubber().text(h), /<redacted:authorization>/, h);
+  assert.equal(new Scrubber().text('token expired'), 'token expired', 'a plain word after "token" is not a credential');
+  for (const name of ['AUTH_ENABLED', 'author', 'monkey']) assert.equal(isSecretName(name), false, name);
+  // Timing: one 2 MiB line in 16-byte chunks, with known values (so the stream is held back and cut safely).
+  for (const unit of ['x', 'Secret-Value-12345 ', '--requirepass a ', 'a://u:p@h ']) {
+    const t = new Scrubber(new Map([['A', ['Secret-Value-12345', ...Array.from({ length: 200 }, (_, i) => `tok${i}xxxxxxxx`)]]]));
+    const ls = new LineScrubber(t);
+    const chunk = Buffer.from(unit.repeat(Math.ceil(16 / unit.length)).slice(0, 16));
+    const t0 = Date.now();
+    let bytes = 0;
+    for (let i = 0; i < (2 * 1024 * 1024) / 16; i++) bytes += ls.push(chunk).length;
+    bytes += ls.end().length;
+    assert.ok(Date.now() - t0 < 3000, `${JSON.stringify(unit)}: ${Date.now() - t0} ms`);
+    assert.ok(bytes > 0);
+  }
 });

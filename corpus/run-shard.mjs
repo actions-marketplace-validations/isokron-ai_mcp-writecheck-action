@@ -55,7 +55,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sha256Jcs } from './jcs.mjs';
-import { LineScrubber, redactArgv, Scrubber, scrubStrings, SECRET_ENV_NAME } from './scrub.mjs';
+import { errorText, isSecretName, LineScrubber, redactArgv, Scrubber, scrubFreeText, SECRET_ENV_NAME } from './scrub.mjs';
 export { redactArgv, Scrubber, SECRET_ENV_NAME } from './scrub.mjs';
 import { listTree } from './sandbox/evidence.mjs';
 import { checkListedUrl } from './sandbox/fetch.mjs';
@@ -403,7 +403,10 @@ export function volatileCaptures(t) {
       if (s?.volatile !== undefined && typeof s.volatile !== 'boolean') throw new HarnessError(`backend ${i} set-up ${k}: volatile must be true or false`);
       if (s?.volatile === true && (typeof s.capture !== 'string' || !s.capture)) throw new HarnessError(`backend ${i} set-up ${k}: volatile is only for a step with capture`);
       if (typeof s?.capture !== 'string' || !s.capture) continue;
-      const derived = [...names(Array.isArray(s.exec) ? s.exec.join('\n') : '')].some((n) => vol.has(n));
+      // Derived too: an exec that reads a secret-named variable ($POSTGRES_PASSWORD, ${API_TOKEN}).
+      const execText = Array.isArray(s.exec) ? s.exec.join('\n') : '';
+      const derived = [...names(execText)].some((n) => vol.has(n))
+        || [...execText.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]{0,127})\}?/g)].some((m) => isSecretName(m[1]));
       (s.volatile === true || derived ? vol : plain).add(s.capture);
     }
   }
@@ -949,7 +952,7 @@ function run(cmd, argv, { cwd, env, log, deadline, keepStdout = false, input = n
     try {
       child = spawn(cmd, argv, { cwd, env, stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'], detached: true });
     } catch (e) {
-      out.end(`# spawn error: ${e.message}\n`);
+      out.end(`# spawn error: ${sc.text(e.message)}\n`);
       return done({ exit: null, signal: null, timed_out: false, spawn_error: e.message, ms: 0, stdout: '' });
     }
     if (input !== null) {
@@ -1014,7 +1017,7 @@ async function must(step, what) {
   return r;
 }
 
-async function download(url, sha256, log) {
+async function download(url, sha256, log, scrub = new Scrubber()) {
   let buf;
   if (url.startsWith('file://')) buf = readFileSync(new URL(url)); // local artifacts (tests, a mirror)
   else if (url.startsWith('https://')) {
@@ -1023,7 +1026,7 @@ async function download(url, sha256, log) {
     buf = Buffer.from(await res.arrayBuffer());
   } else throw new HarnessError('download: only https:// and file:// artifacts');
   const got = createHash('sha256').update(buf).digest('hex');
-  writeFileSync(log, `download ${url}\nsha256 ${got}\n`, { flag: 'a' });
+  writeFileSync(log, `download ${scrub.text(url)}\nsha256 ${got}\n`, { flag: 'a' });
   if (got !== sha256) throw new HarnessError(`checksum: artifact sha256 ${got} is not the pinned ${sha256}`);
   return { buf, sha256: got };
 }
@@ -1257,6 +1260,8 @@ const safeRel = (p) => typeof p === 'string' && p.length > 0 && p.length < 4096 
 
 /** One target. Returns its metadata record; never throws. */
 async function runTarget(t, o, ctx, dk) {
+  // One scrubber per target: no target's secrets (or false positives) touch another's records.
+  dk.scrub = new Scrubber();
   const odir = resolve(o.out, t.id);
   mkdirSync(join(odir, 'logs'), { recursive: true });
   const L = (n) => join(odir, 'logs', `${n}.log`);
@@ -1345,7 +1350,7 @@ async function runTarget(t, o, ctx, dk) {
     const plan = installPlan(t, ctx.plat);
     if (plan.needsUv) meta.env.images.push({ role: 'uv', ...imageParts(ctx.images.uv) });
     const art = artifactFor(t, ctx.plat);
-    const dl = await download(art.url, art.sha256, L('install'));
+    const dl = await download(art.url, art.sha256, L('install'), dk.scrub);
     meta.artifact_sha256_verified = dl.sha256;
     if (plan.needsUv) await ctx.ensureTools();
 
@@ -1796,11 +1801,14 @@ async function runTarget(t, o, ctx, dk) {
   function writeMeta() {
     let text;
     try {
-      // Every string scrubbed of the secrets known so far (an error message can quote a set-up line).
-      text = JSON.stringify(scrubStrings(meta, dk.scrub), null, 2) + '\n';
+      // Free-text fields only (harness_error, *_why, error messages: they can quote a set-up line);
+      // structured data (the surface, tool names, the source, versions, hashes) is never touched.
+      const sc = scrubFreeText(meta, dk.scrub);
+      if (sc.paths.length) sc.value.meta_redacted = sc.paths;
+      text = JSON.stringify(sc.value, null, 2) + '\n';
     } catch (e) {
       meta.status = 'harness_error';
-      meta.harness_error = `record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`;
+      meta.harness_error = dk.scrub.text(`record: meta.json could not be serialised: ${String(e?.message ?? e).slice(0, 200)}`);
       meta.public_exit = publicExit(meta);
       text = JSON.stringify({ format: meta.format, label: meta.label, target: { id: t.id }, status: meta.status, harness_error: meta.harness_error, public_exit: meta.public_exit, started: meta.started, ended: meta.ended }, null, 2) + '\n';
     }
@@ -2104,6 +2112,8 @@ async function main() {
   let o;
   let failed = false;
   let dk = null;
+  // For the shard's own error files: every target's list secrets (a stack can quote one).
+  const shardScrub = new Scrubber();
   say(LABEL);
   try {
     o = args(process.argv.slice(2));
@@ -2111,6 +2121,7 @@ async function main() {
     const raw = readFileSync(o.targets);
     if (o.consumeTargets) rmSync(o.targets, { force: true }); // no clear-text list on disk while targets run
     const list = JSON.parse(raw.toString('utf8'));
+    for (const t of Array.isArray(list?.targets) ? list.targets : []) shardScrub.addList(t);
     // Every entry is checked at load (capabilities, set-up forms, snapshots, repeats, a dropped id):
     // one that fails is refused before anything of it is fetched or started; the others run.
     const { invalid, dropped } = validateList(list);
@@ -2135,7 +2146,7 @@ async function main() {
         m = await runTarget(t, o, ctx, dk);
       } catch (e) {
         // runTarget records and returns; should it ever throw, this target alone is lost, not the shard.
-        try { writeFileSync(join(o.out, '_shard', `target-error-${t.id}.txt`), `${now()}\n${e?.stack ?? e}\n`); } catch {}
+        try { writeFileSync(join(o.out, '_shard', `target-error-${t.id}.txt`), `${now()}\n${errorText(e, shardScrub)}\n`); } catch {}
         m = { status: 'harness_error', cli_exit: null, public_exit: 125, results: [] };
       }
       shard.targets.push({ id: t.id, status: m.status, cli_exit: m.cli_exit, public_exit: m.public_exit, results: m.results.map((r) => r.sha256) });
@@ -2149,11 +2160,12 @@ async function main() {
     try {
       const out = o?.out ?? '.';
       mkdirSync(join(out, '_shard'), { recursive: true });
-      writeFileSync(join(out, '_shard', 'harness-error.txt'), `${now()}\n${e?.stack ?? e}\n`);
+      writeFileSync(join(out, '_shard', 'harness-error.txt'), `${now()}\n${errorText(e, shardScrub)}\n`);
     } catch {}
     say('run finished, exit 125');
     failed = true;
   } finally {
+    if (dk) dk.scrub = new Scrubber();
     if (dk) await dk.sweep(join(o.out, '_shard', 'docker.log')).catch(() => {});
   }
   process.exitCode = failed ? 1 : 0;

@@ -135,6 +135,8 @@ if (script.includes('find . -mindepth 1')) {
   done(0, 'node v22.11.0\npython none\n');
 } else if (c[0] === 'node' && c[1] === '/opt/mwsc/_corpus/surface.mjs') {
   // The surface probe: what it would print for a two-tool server (FAKE root `surface-fail`: initialize fails).
+  // FAKE root `surface-json`: the probe's answer as given.
+  if (existsSync(join(root, 'surface-json'))) done(0, `${readFileSync(join(root, 'surface-json'), 'utf8').trim()}\n`);
   if (existsSync(join(root, 'surface-fail'))) done(1, JSON.stringify({ initialize: null, initialize_error: 'the server exited (exit 1 signal null)', tools: null }) + '\n');
   // A hostile answer: an initialize nested deeper than JSON.stringify can follow, and forged fields.
   if (existsSync(join(root, 'surface-deep'))) {

@@ -30,23 +30,31 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   Docker socket. Files go in through stdin; results come out through a helper that copies regular
   files and folders only, under a size cap. Our helper containers carry the target's label and a
   time limit, so one stuck on something the target planted is removed with it.
-- Secrets are scrubbed from everything the driver writes down, never from what runs (`corpus/scrub.mjs`).
-  The scrubber knows every value the list gives under a secret-like env name (TOKEN, SECRET, PASSWORD,
-  PASSWD, PWD, KEY, CREDENTIAL, CREDS, AUTH, COOKIE, SESSION, DSN, DATABASE_URL, CONNECTION_STRING,
-  PRIVATE, SIGNING, `*_PASS`, `*_PW`, `*_PAT`, `*_URL`, `*_URI`) in any `env` object of the entry
-  (backends, server, set-up), before and after its templates are filled, the password and secret query
-  parameters of every URL in any string of the entry, and every volatile capture (and capture made from
-  one). A value of 6 characters or more is replaced wherever it appears, a shorter one only as a whole
-  token. Pattern rules catch the rest: `NAME=VALUE` with a secret-like NAME (`--env`, `--env=`, `-e`, or
-  free text such as `PGPASSWORD=x psql`), `scheme://user:password@` (up to the last `@` before the
-  host), `password=` / `pwd=` / `pass=` / `token=` / `key=` query parameters, `--requirepass x`,
-  `--password x`, mysql's `-px`, SQL `PASSWORD 'x'` / `IDENTIFIED BY 'x'`, curl's `-u user:x` and
-  `Authorization: Bearer|Basic x`. Each becomes `<redacted:NAME>`. It applies to every logged command
-  line and to every line of output the driver logs (set-up, wait, backend set-up, `docker logs`, the
-  CLI's steps), scrubbed line by line as it streams, to the archived `writecheck.yaml`
-  (`manifest_redacted`; `manifest_sha256` stays the hash of the real text the CLI ran) and to every
-  string in `meta.json`. Secret-named env values are not on the docker command line at all: they go
-  as `--env NAME`, with the value in the docker client's own environment (never a name the client
+- Secrets are scrubbed from everything the driver writes down, never from what runs (`corpus/scrub.mjs`,
+  one scrubber per target). Known values: what the list gives under a secret-like name, matched as a
+  whole token (`*PASSWORD`, `*_PASS`, `*_PW`, `*_PWD`, `*_SECRET`, `*_TOKEN`, `*_API_KEY`,
+  `*_PRIVATE_KEY`, `*_CREDENTIALS`, `*_CREDS`, `*_PAT`, `*_AUTH`; for `*_URL`, `*_URI`, `*_DSN` and
+  `CONNECTION_STRING` only the password parts; `AUTH_ENABLED`, `SESSION_STORE` or `author` are not
+  secret names) in any `env` object of the entry, before and after its templates are filled; URL
+  passwords and token-like user info in any of its strings; the values of secret flags in its args,
+  exec, command and set-up lines (`--requirepass`, `--*-password`, `--*-pass`, `--*-token`,
+  `--*-secret`, `redis-cli -a`, `mysql -p<pw>`); secret-named YAML keys in its hand manifest; and
+  every volatile capture, including a capture derived from one or reading a secret-named `$VAR`. A
+  boolean, a number, a value under 3 characters, a short plain word or a common word (`postgres`,
+  `root`, `secret`, ...) is never a known value. Each known value of 6 characters or more is also
+  matched URL-encoded, JSON-escaped and in base64 (standard and URL-safe); a shorter one only as a
+  whole token. Pattern rules catch the rest: `-----BEGIN ... PRIVATE KEY-----` blocks, `NAME=VALUE`
+  and YAML `name: value` with a secret-like name, `scheme://user:password@` (up to the last `@`),
+  secret query parameters, secret flags with their value, SQL `PASSWORD '...'`, `curl -u user:x` and
+  `Authorization: Bearer|Basic|Token x` in any case. Each becomes `<redacted:NAME>`. It applies to
+  every logged command line, to every line of output the driver logs (scrubbed as it streams; the tail
+  that could still hold a known value, a flag's value or a private key is held back, so a cut never
+  splits one), to error messages and stack traces, to the archived `writecheck.yaml`
+  (`manifest_redacted`; `manifest_sha256` stays the hash of the real text the CLI ran), and to the
+  free-text fields of `meta.json` only (`harness_error`, `*_why`, error messages; `meta_redacted`
+  lists the paths it changed). Structured data (the surface, tool names, the source, versions,
+  hashes) is never touched. Secret-named env values are not on the docker command line at all: they
+  go as `--env NAME`, with the value in the docker client's own environment (never a name the client
   reads itself, such as `DOCKER_*` or `PATH`). `meta.env_names` keeps the server env's names. Files
   that are data rather than logs (snapshots, results, the server's stderr) are kept as they are, in
   the encrypted bundle.
