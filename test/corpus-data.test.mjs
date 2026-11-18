@@ -15,7 +15,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
-  boundAnnotations, checkDropped, checkFull, checkShardBudget, checkSnapshot, CLEAN_COPY, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
+  boundAnnotations, checkDropped, checkFull, checkSetupExec, checkShardBudget, checkSnapshot, checkTargetSnapshot, CLEAN_COPY, listCaptures, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
   validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME, Scrubber,
 } from '../corpus/run-shard.mjs';
@@ -184,6 +184,40 @@ test('D3: backends[].snapshot is { exec: [strings], user? } and is checked at lo
   }
   assert.throws(() => validateTarget({ id: 't01', backends: [{ image: 'x', snapshot: { exec: [] } }] }), /backend 0: snapshot\.exec/);
   assert.doesNotThrow(() => validateTarget({ id: 't01', backends: [{ image: 'x', snapshot: { exec: ['true'] } }] }));
+});
+
+test('File targets: list-level { exec, capture? } set-up and a target-level snapshot { exec } are checked at load', () => {
+  assert.doesNotThrow(() => checkSetupExec({ exec: ['node', '-e', 'x', '{{tdir}}/db.sqlite'], capture: 'seed_check' }));
+  assert.doesNotThrow(() => checkSetupExec({ exec: ['sh', '-c', 'true'] }));
+  for (const bad of [{ exec: [] }, { exec: 'node -e x' }, { exec: ['x', 1] }, { exec: ['x'], capture: '' }, { exec: ['x'], capture: 'a-b' }, { exec: ['x'], capture: 7 },
+    { exec: ['x'], capture: 'tdir' }, { exec: ['x'], capture: 'host0' }, { exec: ['x'], capture: 'id' }, { exec: ['x'], capture: 'c'.repeat(65) }, { exec: ['x'], user: 'root' }, { exec: ['x'], capture: 'c', volatile: true }, { exec: ['x'], volatile: false }]) {
+    assert.throws(() => checkSetupExec(bad), HarnessError, JSON.stringify(bad));
+  }
+  assert.throws(() => checkSetupExec({ exec: ['x'], capture: 'c', volatile: true }), /volatile is for backends\[\]\.setup only/);
+  assert.doesNotThrow(() => checkTargetSnapshot({ exec: ['node', '-e', 'x', '{{tdir}}/db.sqlite'] }));
+  for (const bad of ['dump', [], {}, { exec: [] }, { exec: 'dump' }, { exec: ['x', null] }, { exec: ['x'], user: '10001' }, { exec: ['x'], capture: 'y' }, null]) {
+    assert.throws(() => checkTargetSnapshot(bad), HarnessError, JSON.stringify(bad));
+  }
+  assert.throws(() => checkTargetSnapshot({ exec: ['x'], user: 'root' }), /always runs as the sandbox user/);
+  // In validateTarget: the forms, the shell-line and fetch forms still accepted, the whole entry refused otherwise.
+  const ok = { id: 't14', setup: ['echo hi', { exec: ['seed'], capture: 'seed_check' }], snapshot: { exec: ['dump', '{{tdir}}/db.sqlite'] }, server: { command: ['{{bin}}/srv', '{{tdir}}/db.sqlite'] } };
+  assert.doesNotThrow(() => validateTarget(ok));
+  assert.deepEqual(listCaptures(ok), ['seed_check']);
+  assert.throws(() => validateTarget({ ...ok, snapshot: { exec: [] } }), /snapshot\.exec/);
+  assert.throws(() => validateTarget({ ...ok, setup: [{ exec: ['seed'], capture: 'seed_check', extra: 1 }] }), /set-up 0: an exec step/);
+  assert.throws(() => validateTarget({ ...ok, setup: [{ exec: ['x'], fetch: {} }] }), /set-up 0: an exec step/);
+  // Captured twice, by the list or by a backend.
+  assert.throws(() => validateTarget({ ...ok, setup: [{ exec: ['a'], capture: 'c' }, { exec: ['b'], capture: 'c' }] }), /capture c is captured twice/);
+  assert.throws(() => validateTarget({ ...ok, backends: [{ image: 'x', setup: [{ exec: ['a'], capture: 'c' }] }], setup: [{ exec: ['b'], capture: 'c' }] }), /captured twice/);
+  // Never set where it is used: server.command and server.env are filled before the list's set-up.
+  assert.throws(() => validateTarget({ ...ok, server: { command: ['{{bin}}/srv', '{{seed_check}}'] } }), /seed_check is used in server\.command/);
+  assert.throws(() => validateTarget({ ...ok, server: { command: ['srv'], env: { DB: '{{tdir}}/{{seed_check}}' } } }), /seed_check is used in server\.env/);
+  // Derived from a volatile backend capture or from a secret-named variable: refused (it would be volatile).
+  const vol = { image: 'x', setup: [{ exec: ['mint'], capture: 'tok', volatile: true }] };
+  assert.throws(() => validateTarget({ ...ok, backends: [vol], setup: [{ exec: ['echo', '{{tok}}'], capture: 'c' }] }), /derived from a volatile capture/);
+  assert.throws(() => validateTarget({ ...ok, setup: [{ exec: ['sh', '-c', 'echo $DB_PASSWORD'], capture: 'c' }] }), /derived from a volatile capture or a secret-named variable/);
+  // Without a capture, an exec step may use anything set before it.
+  assert.doesNotThrow(() => validateTarget({ ...ok, backends: [vol], setup: [{ exec: ['echo', '{{tok}}'] }] }));
 });
 
 test('D5 / D8: full.repeats and full.timeout_s are checked; the time limit grows by repeats x full.timeout_s', () => {
@@ -568,6 +602,145 @@ test('D3 / D5: three repeats against fresh backends; results/full-<i>/; snapshot
   assert.doesNotMatch(file('t01', 'logs/backend-0.log'), /rows: state/);
   assert.ok(!r.stdout.includes(NAME));
   assert.deepEqual(m.env.backends, [{ image_tag: 'docker.io/library/node:22-bookworm-slim', image_digest: `sha256:${'a'.repeat(64)}` }]);
+});
+
+const fileTarget = (extra = {}) => ({ id: 't14', setup: [{ exec: ['seed', 'CAPTURE', '{{tdir}}/db.sqlite'], capture: 'seed_check' }], snapshot: { exec: ['dump', 'SNAPSHOT', '{{tdir}}/db.sqlite', '{{seed_check}}'] },
+  full: fullOf({ manifest: `${MANIFEST}# fixture {{seed_check}}\n`, repeats: 2 }), ...extra });
+
+test('File targets: list-level capture and a target snapshot in the sandbox, before the first full run and after the last (and each repeat)', () => {
+  const d = stand([fileTarget()]);
+  const { r, calls, meta, file } = drive(d);
+  assert.equal(r.stdout, `${LABEL}\nrun finished, exit 0\n`);
+  const m = meta('t14');
+  assert.equal(m.status, 'completed', m.harness_error);
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.fresh_state]), [[1, 'completed', true], [2, 'completed', true]]);
+  // The capture: the last line of stdout, recorded by name, filled into the manifest; its output is in the set-up log.
+  assert.deepEqual(m.setup_captures, [{ step: 0, capture: 'seed_check' }]);
+  assert.match(file('t14', 'writecheck.yaml'), /# fixture seed_check 1\n/);
+  assert.match(file('t14', 'logs/setup.log'), /seed_check 1/);
+  const seeds = calls.filter((a) => a[0] === 'run' && a.includes('CAPTURE'));
+  assert.equal(seeds.length, 2, 'the set-up ran again before repeat 2');
+  for (const a of seeds) {
+    assert.deepEqual(a.slice(a.indexOf(IMG) + 1), ['seed', 'CAPTURE', '/work/db.sqlite'], 'argv as given, no sh -c');
+    assert.match(a[a.indexOf('--network') + 1], /-run$/, 'like a shell line: the internal network');
+    assert.ok(a.includes('TDIR=/work'));
+  }
+  // The snapshot: in the target's hardened sandbox, no network, never a backend exec.
+  const snaps = calls.filter((a) => a.includes('SNAPSHOT'));
+  assert.equal(snaps.length, 4);
+  for (const a of snaps) {
+    assert.equal(a[0], 'run');
+    assert.deepEqual(a.slice(a.indexOf(IMG) + 1), ['dump', 'SNAPSHOT', '/work/db.sqlite', 'seed_check 1']);
+    assert.equal(a[a.indexOf('--user') + 1], '10001:10001');
+    assert.equal(a[a.indexOf('--cap-drop') + 1], 'ALL');
+    assert.equal(a[a.indexOf('--network') + 1], 'none');
+    assert.ok(a.includes('--read-only') && !a.includes('--cap-add') && !a.includes('--privileged'));
+    assert.ok(a.some((x) => /^type=volume,src=corpus-[a-z0-9-]+-t14,dst=\/work,readonly$/.test(x)), a.join(' '));
+    assert.ok(!a.some((x) => x.startsWith('type=bind') || x.includes('dst=/clean') || x.includes('dst=/evidence')), a.join(' '));
+  }
+  // Before each full run, after each; the after snapshot only once the repeat's results were moved out of /work.
+  const idx = (pred, from = 0) => calls.findIndex((a, k) => k >= from && pred(a));
+  const full1 = idx((a) => a.includes('--plan-hash'));
+  const ev1 = idx((a) => a.includes('/opt/mwsc/_corpus/evidence.mjs') && a.includes('results/full-1'));
+  assert.ok(idx((a) => a.includes('SNAPSHOT')) < full1);
+  assert.ok(ev1 > full1 && idx((a) => a.includes('SNAPSHOT'), full1) > ev1, 'after snapshot after the evidence move');
+  const st = m.backend_state;
+  assert.equal(st.length, 1);
+  assert.equal(st[0].backend, 'target');
+  assert.deepEqual([st[0].before.file, st[0].after.file], ['target-before.txt', 'target-after.txt']);
+  assert.equal(file('t14', 'target-before.txt'), `${NAME} file rows: state 1\n`);
+  assert.equal(file('t14', 'target-after.txt'), `${NAME} file rows: state 4\n`);
+  assert.equal(st[0].after.sha256, sha(`${NAME} file rows: state 4\n`));
+  assert.deepEqual(st[0].repeats.map((x) => [x.i, x.before.file, x.after.file]), [1, 2].map((i) => [i, `target-full-${i}-before.txt`, `target-full-${i}-after.txt`]));
+  // Never logged: not in any log, not in the public output.
+  for (const f of readdirSync(join(d, 'out', 't14', 'logs'))) assert.doesNotMatch(file('t14', `logs/${f}`), /file rows: state/, f);
+  assert.match(file('t14', 'logs/snapshot.log'), /bytes of stdout captured, not logged/);
+  assert.ok(!r.stdout.includes(NAME));
+});
+
+test('File targets: a list-level capture that changes refuses the repeat; a failed snapshot is null with its reason; a bad entry is refused at load', () => {
+  const d = stand([fileTarget()]);
+  const m = drive(d, { fake: { 'list-capture-values': 'seed_check 1\nseed_check 2\n' } }).meta('t14');
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.fresh_state]), [[1, 'completed', true], [2, 'not_started', false]]);
+  assert.match(m.full_runs[1].why, /set-up capture changed after the reset \(seed_check\)/);
+  assert.equal(m.backend_state[0].after.file, 'target-after.txt', 'after the last repeat that ran');
+  const d2 = stand([fileTarget({ full: fullOf() })]);
+  const m2 = drive(d2, { fake: { 'tsnapshot-exit': '3' } }).meta('t14');
+  assert.equal(m2.status, 'completed', m2.harness_error);
+  assert.deepEqual(m2.backend_state, [{ backend: 'target', before: null, before_why: 'snapshot exec: exit 3', after: null, after_why: 'snapshot exec: exit 3' }]);
+  assert.ok(!existsSync(join(d2, 'out', 't14', 'target-before.txt')));
+  // No full run: the record says so.
+  const d3 = stand([fileTarget({ full: undefined })]);
+  assert.deepEqual(drive(d3).meta('t14').backend_state, [{ backend: 'target', before: null, before_why: 'no CLI step that writes ran', after: null, after_why: 'no CLI step that writes ran' }]);
+  const d4 = stand([fileTarget({ snapshot: { exec: ['dump'], user: 'root' } }), { id: 't15', setup: [{ exec: ['seed'], capture: 'c', volatile: true }] }]);
+  const { calls, meta } = drive(d4);
+  assert.match(meta('t14').harness_error, /refused at load: snapshot: a target snapshot always runs as the sandbox user/);
+  assert.match(meta('t15').harness_error, /refused at load: set-up 0: volatile is for backends/);
+  assert.ok(!calls.some((a) => a[0] === 'run' && (a.includes('dump') || a.includes('seed'))), 'nothing of a refused entry runs');
+});
+
+test('File targets: the target snapshot mounts /work read-only and gets the base sandbox env and TDIR, never server.env', () => {
+  const d = stand([fileTarget({ full: fullOf(), server: { command: ['{{bin}}/srv'], env: { MODE: 'zz-mode', API_TOKEN: 'zz-token-value' } } })]);
+  const { records, meta } = drive(d);
+  assert.equal(meta('t14').status, 'completed', meta('t14').harness_error);
+  const snaps = records.filter((x) => x.argv.includes('SNAPSHOT'));
+  assert.equal(snaps.length, 2);
+  for (const { argv: a, env, secrets } of snaps) {
+    const mounts = a.filter((x, k) => a[k - 1] === '--mount');
+    assert.ok(mounts.some((x) => /^type=volume,src=corpus-[a-z0-9-]+-t14,dst=\/work,readonly$/.test(x)), mounts.join(' '));
+    assert.ok(mounts.every((x) => x.endsWith(',readonly')), `every volume read-only: ${mounts.join(' ')}`);
+    assert.ok(a.includes('TDIR=/work') && a.includes('HOME=/work/home') && a.includes('CORPUS_SANDBOX=1'), a.join(' '));
+    assert.ok(!a.some((x) => /^(MODE|API_TOKEN)(=|$)/.test(x)), a.join(' '));
+    assert.ok(!env.includes('API_TOKEN') && !('API_TOKEN' in secrets), 'not passed through the client env either');
+  }
+  // The set-up still gets server.env (as before).
+  const seed = records.find((x) => x.argv.includes('CAPTURE')).argv;
+  assert.ok(seed.includes('MODE=zz-mode'), seed.join(' '));
+});
+
+test('Snapshots: an after snapshot has its own time limit, so a repeat that used all of full.timeout_s still gets one', () => {
+  const d = stand([fileTarget({ timeout_s: 300, backends: [pg()], full: fullOf({ timeout_s: 1 }) })]);
+  // The CLI step runs past the repeat's 1 s; each after snapshot (the second of each kind) then takes 1.5 s.
+  const m = drive(d, { fake: { 'run-sleep-ms': '20000', 'tsnapshot-sleep-ms': '0\n1500\n', 'snapshot-sleep-ms': '0\n1500\n' } }).meta('t14');
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status]), [[1, 'timeout']]);
+  const [b0, tg] = m.backend_state;
+  assert.equal(b0.backend, 0);
+  assert.equal(b0.after?.file, 'backend-0-after.txt', JSON.stringify(b0));
+  assert.equal(tg.backend, 'target');
+  assert.equal(tg.after?.file, 'target-after.txt', JSON.stringify(tg));
+  assert.equal(tg.after_why, undefined);
+});
+
+test('File targets: a repeat whose evidence was not moved gets no target after snapshot; a backend\'s still runs', () => {
+  const d = stand([fileTarget({ backends: [pg()] })]);
+  const { calls, meta } = drive(d, { fake: { 'evidence-fail': 'results/full-2' } });
+  const m = meta('t14');
+  assert.deepEqual(m.full_runs.map((f) => [f.i, f.status, f.evidence.moved]), [[1, 'completed', true], [2, 'completed', false]]);
+  // Target: before 1, after 1, before 2; no after 2.
+  assert.equal(calls.filter((a) => a[0] === 'run' && a.includes('SNAPSHOT')).length, 3);
+  const [b0, tg] = m.backend_state;
+  assert.equal(tg.after, null);
+  assert.equal(tg.after_why, 'evidence not moved');
+  assert.deepEqual(tg.repeats.map((x) => [x.i, x.after?.file ?? null, x.after_why ?? null]), [[1, 'target-full-1-after.txt', null], [2, null, 'evidence not moved']]);
+  assert.ok(!existsSync(join(d, 'out', 't14', 'target-after.txt')));
+  assert.equal(b0.after.file, 'backend-0-after.txt');
+  assert.deepEqual(b0.repeats.map((x) => x.after?.file), ['backend-0-full-1-after.txt', 'backend-0-full-2-after.txt']);
+});
+
+test('Load checks: a list-level capture in a backend\'s env, args, wait or set-up or in a fetch step; a volatile capture in a snapshot', () => {
+  const ok = { id: 't14', setup: [{ exec: ['seed'], capture: 'seed_check' }], server: { command: ['{{bin}}/srv'] } };
+  assert.doesNotThrow(() => validateTarget({ ...ok, backends: [{ image: 'x', snapshot: { exec: ['dump', '{{seed_check}}'] } }] }), 'a backend snapshot runs after the list set-up');
+  for (const [b, field] of [[{ env: { X: 'a{{seed_check}}' } }, 'backends\\[0\\]\\.env'], [{ args: ['--x={{seed_check}}'] }, 'backends\\[0\\]\\.args'],
+    [{ wait: ['probe', '{{seed_check}}'] }, 'backends\\[0\\]\\.wait'], [{ setup: [{ exec: ['echo', '{{seed_check}}'] }] }, 'backends\\[0\\]\\.setup']]) {
+    assert.throws(() => validateTarget({ ...ok, backends: [{ image: 'x', ...b }] }), new RegExp(`list-level capture seed_check is used in ${field}`), JSON.stringify(b));
+  }
+  const fetch = { fetch: { url: 'https://example.com/{{seed_check}}.tgz', sha256: 'a'.repeat(64) } };
+  assert.throws(() => listCaptures({ ...ok, setup: [...ok.setup, fetch] }), /seed_check is used in set-up 1 fetch/);
+  // Volatile: refused in a target or a backend snapshot (its output is kept unscrubbed), as in server.command.
+  const vol = { image: 'x', setup: [{ exec: ['mint'], capture: 'tok', volatile: true }] };
+  assert.throws(() => validateTarget({ id: 't14', server: { command: ['srv'] }, backends: [vol], snapshot: { exec: ['dump', '{{tok}}'] } }), /volatile capture tok is used in snapshot\.exec/);
+  assert.throws(() => validateTarget({ id: 't14', server: { command: ['srv'] }, backends: [{ ...vol, snapshot: { exec: ['dump', '--auth={{tok}}'] } }] }), /volatile capture tok is used in backends\[0\]\.snapshot\.exec/);
+  assert.doesNotThrow(() => validateTarget({ id: 't14', server: { command: ['srv'], env: { T: '{{tok}}' } }, backends: [{ ...vol, snapshot: { exec: ['dump'] } }] }));
 });
 
 test('D5: a repeat whose plan hash is not the accepted one is refused, and no later repeat runs', () => {
