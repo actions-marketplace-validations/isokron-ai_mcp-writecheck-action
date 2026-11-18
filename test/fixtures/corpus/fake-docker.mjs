@@ -76,6 +76,8 @@ if (cmd === 'exec') {
   if (existsSync(join(root, 'exec-echo'))) process.stderr.write(`ran: ${rest.join(' ')}\nand again: ${rest.slice(1).join(' ')}\n`);
   if (rest.includes('SNAPSHOT')) {
     const n = count('snapshot');
+    const sleep = Number(nth('snapshot-sleep-ms', n) ?? 0); // FAKE root: the n-th backend snapshot is held that long
+    if (sleep) await new Promise((r) => setTimeout(r, sleep));
     done(existsSync(join(root, 'snapshot-exit')) ? Number(readFileSync(join(root, 'snapshot-exit'), 'utf8')) : 0, `${NAME} rows: state ${n}\n`);
   }
   if (rest.includes('CAPTURE')) done(0, `${nth('capture-values', count('capture')) ?? 'cap'}\n`);
@@ -124,6 +126,9 @@ if (script.includes('find . -mindepth 1')) {
   // The evidence helper, for real, between the fake volumes. FAKE root `evidence-tamper`: a moved file
   // is changed afterwards (as if our copy-out were not to be trusted).
   const ev = join(root, 'vols', volAt('/evidence'));
+  // FAKE root `evidence-fail`: the helper fails for a move whose paths include that text.
+  const fail = existsSync(join(root, 'evidence-fail')) ? readFileSync(join(root, 'evidence-fail'), 'utf8').trim() : null;
+  if (fail && c.slice(4).some((x) => x.includes(fail))) done(2);
   const res = moveEvidence(inVol(c[2]), ev, c.slice(4));
   if (existsSync(join(root, 'evidence-tamper')) && res.files[0]) writeFileSync(join(ev, res.files[0].path), 'tampered');
   done(0, JSON.stringify(res) + '\n');
@@ -201,4 +206,13 @@ if (script.includes('find . -mindepth 1')) {
   const n = existsSync(join(root, 'deps-bytes')) ? Number(readFileSync(join(root, 'deps-bytes'), 'utf8')) : 0;
   done(0, n ? `${'d'.repeat(n)}\n` : '{"fake":true}\n');
 }
+// A target-level snapshot in the sandbox (an argument SNAPSHOT) prints a numbered file state (FAKE root
+// `tsnapshot-exit`: it fails); a list-level set-up exec (CAPTURE) prints `list-capture-values`' n-th line.
+else if (c.includes('SNAPSHOT')) {
+  const n = count('tsnapshot');
+  // FAKE root `tsnapshot-sleep-ms`: the n-th line holds the n-th snapshot that long.
+  const sleep = Number(nth('tsnapshot-sleep-ms', n) ?? 0);
+  if (sleep) await new Promise((r) => setTimeout(r, sleep));
+  done(existsSync(join(root, 'tsnapshot-exit')) ? Number(readFileSync(join(root, 'tsnapshot-exit'), 'utf8')) : 0, `${NAME} file rows: state ${n}\n`);
+} else if (c.includes('CAPTURE')) done(0, `${NAME} seeding\n${nth('list-capture-values', count('lcapture')) ?? 'seed_check 1'}\n`);
 else done(0, `${NAME} install output\n`);
