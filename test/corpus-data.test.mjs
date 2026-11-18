@@ -20,7 +20,7 @@ import {
   validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME, Scrubber,
 } from '../corpus/run-shard.mjs';
 import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
-import { acceptValue, errorText, isSecretName, LineScrubber, scrubFreeText, scrubStrings } from '../corpus/scrub.mjs';
+import { acceptValue, errorText, flagSecrets, isSecretName, LineScrubber, scrubFreeText, scrubStrings } from '../corpus/scrub.mjs';
 import { CONFIG_MAX, MAX_FILES, MAX_TOTAL, collect, noLinks } from '../corpus/sandbox/config-source.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -958,18 +958,41 @@ test('scrub: list secrets, free text and output line by line (a secret split acr
   assert.deepEqual(scrubStrings({ harness_error: 'x pg-Hunter22', a: ['x pg-Hunter22'], pg_Hunter22: 1, n: 2 }, s), { harness_error: 'x <redacted:POSTGRES_PASSWORD>', a: ['x pg-Hunter22'], pg_Hunter22: 1, n: 2 });
 });
 
-test('scrub: linear on floods: megabytes with no newline, of letters, of NAME=, of URLs and of white space', () => {
+test('scrub: linear on floods: each 4 MiB flood within 20x a plain letters flood measured in the same process', () => {
+  // Relative to a baseline from this process and machine, so a slow CI runner does not fail it, while
+  // quadratic behaviour (seconds where letters take tens of milliseconds) still does.
   const s = new Scrubber(new Map([['tok', new Set(['abcdEFGH1234'])]]));
-  for (const unit of ['x', 'ab=', 'a://', 'a://u:p@', 'http://u:p@h ', ' ', 'PASSWORD=x;', 'curl ', 'mysql ', '--password ', '?password=', 'abcdEFGH123']) {
+  const time = (unit) => {
     const ls = new LineScrubber(s);
-    const t0 = Date.now();
-    let bytes = 0;
     const chunk = Buffer.from(unit.repeat(Math.ceil(65536 / unit.length)));
+    const t0 = process.hrtime.bigint();
+    let bytes = 0;
     for (let i = 0; i < 64; i++) bytes += ls.push(chunk).length;
     bytes += ls.end().length;
-    assert.ok(Date.now() - t0 < 5000, `${JSON.stringify(unit)}: ${Date.now() - t0} ms`);
     assert.ok(bytes > 0);
+    return Number(process.hrtime.bigint() - t0) / 1e6;
+  };
+  time('x'); // warm-up
+  const baseline = Math.min(time('x'), time('x'), time('x'));
+  // A floor of 250 ms keeps timer noise from failing it when the baseline is a few milliseconds.
+  const bound = Math.min(Math.max(20 * baseline, 250), 30_000);
+  for (const unit of ['ab=', 'a://', 'a://u:p@', 'http://u:p@h ', ' ', 'PASSWORD=x;', 'curl ', 'curl -u a:b ', 'wget --user ', 'mysql ', 'mysql -p ', 'redis-cli -a ',
+    '--password ', '?password=', 'abcdEFGH123']) {
+    const ms = Math.min(time(unit), time(unit));
+    assert.ok(ms <= bound, `${JSON.stringify(unit)}: ${ms.toFixed(0)} ms, bound ${bound.toFixed(0)} ms (20x the ${baseline.toFixed(0)} ms letters baseline)`);
   }
+});
+
+test('scrub: redis-cli -a, mysql -p and curl -u need their program earlier on the same line', () => {
+  const s = new Scrubber();
+  assert.equal(s.text('curl -s http://b0 -u admin:pw-9988'), 'curl -s http://b0 -u admin:<redacted:password>');
+  assert.equal(s.text('wget --user=admin:pw-9988 http://b0'), 'wget --user=admin:<redacted:password> http://b0');
+  assert.equal(s.text('mysql -uroot -ppw-9988 -e "select 1"'), 'mysql -uroot -p<redacted:password> -e "select 1"');
+  assert.equal(s.text('redis-cli -a pw-9988 ping'), 'redis-cli -a <redacted:password> ping');
+  // Without the program on that line, the flags are something else (a port, ls -a, a user:group).
+  assert.equal(s.text('docker run -p 8080 --user 10001:10001 x\nls -a dir\n-u admin:x'), 'docker run -p 8080 --user 10001:10001 x\nls -a dir\n-u admin:x');
+  assert.equal(s.text('curl http://b0\n --user admin:pw-9988'), 'curl http://b0\n --user admin:pw-9988', 'the program must be on the same line');
+  assert.deepEqual(flagSecrets('ls -a dir; redis-cli -a pw-1122 ping'), ['pw-1122']);
 });
 
 test('volatile: a capture made from a volatile one is volatile too; a CLI template name in the manifest is not a use', () => {

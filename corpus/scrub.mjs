@@ -54,17 +54,31 @@ const tokenish = (u) => /^(gh[pousr]_|github_pat_|glpat-|xox[abpr]-|sk-|npm_)/.t
 
 // Patterns. Each is bounded so a flood of output stays linear.
 const PEM = /-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY-----(?:[^-]|-(?!----BEGIN)){0,65536}?-----END [A-Z0-9 ]{0,40}-----/g;
-const URL_USERINFO = /(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/)([^\s'"<>]{1,256})@(?=[^\s'"<>@]{0,2048}(?:[\s'"<>]|$))/gi;
+// User info never runs past the next "://", so a flood like a://u:p@a://u:p@... costs each scheme only up to the next one.
+const URL_USERINFO = /(?<![A-Za-z0-9+.-])([a-z][a-z0-9+.-]{0,31}:\/\/)((?:[^\s'"<>:]|:(?!\/\/)){1,256})@(?=[^\s'"<>@]{0,2048}(?:[\s'"<>]|$))/gi;
 const QUERY_SECRET = /([?&;](password|passwd|pwd|pass|token|access_token|secret|api_?key|apikey|key|auth)=)([^&\s'"#;]{1,1024})/gi;
 const NAME_VALUE = /(^|[\s;'"(,{])([A-Za-z_][A-Za-z0-9_]{0,127})=([^\s'";&,}]{1,4096})/g;
 const YAML_VALUE = /^([ \t]{0,64}-?[ \t]{0,8})([A-Za-z0-9_.-]{1,128})([ \t]{0,8}:[ \t]{1,8})(['"]?)([^\s'"#][^'"#\n]{0,1023}?)\4[ \t]*$/gm;
 const SECRET_FLAG_WORD = '(?:[a-z0-9]{1,32}-){0,4}(?:requirepass|password|passwd|pass|pwd|token|secret|api-?key|auth-token)';
 const SECRET_FLAG = new RegExp(`^--?${SECRET_FLAG_WORD}$`, 'i');
 const FLAG_VALUE = new RegExp(`(?<![A-Za-z0-9_-])(--?${SECRET_FLAG_WORD})(=|[ \\t]{1,16})('[^'\\n]{0,1024}'|"[^"\\n]{0,1024}"|[^\\s'"]{1,1024})`, 'gi');
-const REDIS_A = /(\bredis-cli\b[^\n]{0,1024}?\s-a[ \t]{1,16})([^\s'"]{1,1024})/g;
-const MYSQL_P = /(\b(?:mysql|mysqldump|mysqladmin|mariadb)\b[^\n]{0,1024}?\s-p)([^\s'"]{1,1024})/gi;
+// redis-cli -a, mysql -p<pw> and curl -u: anchored on the flag itself (a search forward from the
+// program name on every match was a backtracking scan, seconds per MiB on a flood); the program is
+// then looked for in a bounded stretch before the flag, on the same line (onLineOf).
+const REDIS_A = /(?<=\s)(-a[ \t]{1,16})([^\s'"]{1,1024})/g;
+const MYSQL_P = /(?<=\s)(-p)([^\s'"]{1,1024})/g;
 const SQL_PASSWORD = /\b(PASSWORD|IDENTIFIED[ \t]{1,16}BY)([ \t]{1,16})('[^'\n]{0,1024}'|"[^"\n]{0,1024}")/gi;
-const CURL_USER = /(\b(?:curl|wget)\b[^\n]{0,1024}?\s(?:-u[ \t]{0,16}|--user[ \t=]|--http-user[ \t=]))([^\s:'"]{1,256}):([^\s'"]{1,1024})/g;
+const CURL_USER = /(?<=\s)(-u[ \t]{0,16}|--user[ \t=]|--http-user[ \t=])([^\s:'"]{1,256}):([^\s'"]{1,1024})/g;
+const LOOK_BACK = 512;
+const REDIS_PROG = /\bredis-cli\b/;
+const MYSQL_PROG = /\b(?:mysql|mysqldump|mysqladmin|mariadb)\b/i;
+const CURL_PROG = /\b(?:curl|wget)\b/;
+/** Whether `prog` appears in the LOOK_BACK characters before `offset`, on the same line. */
+function onLineOf(str, offset, prog) {
+  const seg = str.slice(Math.max(0, offset - LOOK_BACK), offset);
+  const nl = seg.lastIndexOf('\n');
+  return prog.test(nl >= 0 ? seg.slice(nl + 1) : seg);
+}
 const AUTH_HEADER = /\b(Bearer|Basic|Token)([ \t]{1,16})([A-Za-z0-9._~+/=-]{8,4096})/gi;
 const PATTERNS = [PEM, URL_USERINFO, QUERY_SECRET, NAME_VALUE, YAML_VALUE, FLAG_VALUE, REDIS_A, MYSQL_P, SQL_PASSWORD, CURL_USER, AUTH_HEADER];
 
@@ -86,7 +100,10 @@ export function urlSecrets(s) {
 /** Values of secret flags in a text (`--requirepass x`, `--db-password=x`, `redis-cli -a x`, `mysql -px`). */
 export function flagSecrets(s) {
   const t = String(s);
-  return [...t.matchAll(FLAG_VALUE)].map((m) => unquote(m[3])).concat([...t.matchAll(REDIS_A)].map((m) => m[2]), [...t.matchAll(MYSQL_P)].map((m) => m[2]));
+  return [...t.matchAll(FLAG_VALUE)].map((m) => unquote(m[3])).concat(
+    [...t.matchAll(REDIS_A)].filter((m) => onLineOf(t, m.index, REDIS_PROG)).map((m) => m[2]),
+    [...t.matchAll(MYSQL_P)].filter((m) => onLineOf(t, m.index, MYSQL_PROG)).map((m) => m[2]),
+  );
 }
 
 /** Values of secret flags in an argv (split `--flag value` and joined `--flag=value` forms). */
@@ -222,10 +239,10 @@ export class Scrubber {
     t = t.replace(NAME_VALUE, (m, pre, name, v) => (!isSecretName(name) || isUrlName(name) || v.startsWith('<redacted:') ? m : `${pre}${name}=<redacted:${name}>`));
     t = t.replace(YAML_VALUE, (m, ind, key, sep, q, v) => (!isSecretName(key) || isUrlName(key) || v.startsWith('<redacted:') ? m : `${ind}${key}${sep}${q}<redacted:${key}>${q}`));
     t = t.replace(FLAG_VALUE, (m, flag, sep, v) => (v.includes('<redacted:') ? m : `${flag}${sep}<redacted:password>`));
-    t = t.replace(REDIS_A, (m, pre, v) => (v.startsWith('<redacted:') ? m : `${pre}<redacted:password>`));
-    t = t.replace(MYSQL_P, (m, pre, v) => (v.startsWith('<redacted:') ? m : `${pre}<redacted:password>`));
+    t = t.replace(REDIS_A, (m, pre, v, off, str) => (v.startsWith('<redacted:') || !onLineOf(str, off, REDIS_PROG) ? m : `${pre}<redacted:password>`));
+    t = t.replace(MYSQL_P, (m, pre, v, off, str) => (v.startsWith('<redacted:') || !onLineOf(str, off, MYSQL_PROG) ? m : `${pre}<redacted:password>`));
     t = t.replace(SQL_PASSWORD, (m, kw, sp, v) => (v.includes('<redacted:') ? m : `${kw}${sp}'<redacted:password>'`));
-    t = t.replace(CURL_USER, (m, pre, user, v) => (v.startsWith('<redacted:') ? m : `${pre}${user}:<redacted:password>`));
+    t = t.replace(CURL_USER, (m, flag, user, v, off, str) => (v.startsWith('<redacted:') || !onLineOf(str, off, CURL_PROG) ? m : `${flag}${user}:<redacted:password>`));
     t = t.replace(AUTH_HEADER, (m, kind, sp, v) => (v.startsWith('<redacted:') || !(/\d/.test(v) || v.length >= 20) ? m : `${kind}${sp}<redacted:authorization>`));
     return t;
   }
