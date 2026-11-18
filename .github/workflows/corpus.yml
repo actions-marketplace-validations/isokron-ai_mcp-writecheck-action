@@ -1,4 +1,10 @@
-# Corpus: the CLI against pinned third-party open-source MCP servers, in small batches dispatched by hand.
+# Corpus: the CLI against pinned third-party open-source MCP servers, in batches dispatched by hand.
+#
+# Batches: on 17 Nov 2026 the owner set batches of 3 to 5 targets. On 18 Nov 2026 the owner asked to
+# run as many servers as possible during the day, still by hand dispatch only: one dispatch now takes
+# up to 40 target IDs, and a plan job (no environment, no secret, no checkout of anything but this
+# repository) splits them over min(16, n) shard jobs, 16 for an empty `only`. 16 stays below the 20
+# concurrent jobs GitHub-hosted runners give a free organization's public repository.
 #
 # What this is for: finding bugs in mcp-writecheck and this action on servers we did not write.
 # It is not a findings channel. Nothing target-specific appears here or in the logs:
@@ -29,17 +35,19 @@
 # decrypt step. The CLI comes from the public isokron-ai/mcp-write-safety without a token: no step
 # of this workflow reads MWS_CLI_TOKEN or any secret but CORPUS_TARGETS_KEY. The job also stops
 # before the checkout unless the repository variable MWS_CLI_PUBLIC is 'true' (set by the owner).
-# Third-party actions are pinned by full SHA.
+# The plan job that sizes the matrix runs without the environment, so it cannot read the key; it
+# reads only the `only` input, and each shard job checks that input again itself before the decrypt
+# step. Third-party actions are pinned by full SHA.
 
 name: corpus
 
 on:
-  # Manual dispatch only (owner, 17 Nov 2026): runs go in batches of 3 to 5 targets, chosen per run,
+  # Manual dispatch only (owner, 17 Nov 2026; wider batches 18 Nov 2026): targets are chosen per run,
   # with their results kept private. There is no schedule, so enabling the workflow starts nothing.
   workflow_dispatch:
     inputs:
       only:
-        description: Target IDs for this batch, comma-separated (e.g. t13,t09,t08); at most 10. Empty runs every target.
+        description: Target IDs for this batch, comma-separated (e.g. t13,t09,t08), each once; at most 40, run on up to 16 parallel shards. Empty runs every target on 16 shards.
         required: false
         default: ''
       cli-ref:
@@ -50,6 +58,12 @@ on:
 permissions:
   contents: read
 
+# One run at a time; a dispatch made while one runs waits. Two dispatches therefore never run the same
+# target at once, whatever their `only` lists say. (A group keyed on the input would let two runs with
+# overlapping lists, such as t13,t09 and t09,t13, or any list and an empty one, run together, and two
+# runs of 16 shards would pass the 20-job limit.) GitHub keeps one waiting run per group: a third
+# dispatch replaces the waiting one, which is cancelled before it starts. Wider batches give the
+# throughput instead.
 concurrency:
   group: corpus
   cancel-in-progress: false
@@ -58,10 +72,30 @@ env:
   # age v1.3.2, linux-amd64 release tarball (sha256 recorded 16 Nov 2026).
   AGE_URL: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
   AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
-  CORPUS_SHARDS: '4'
 
 jobs:
+  # Derives the shard matrix from the `only` input alone. No environment, so CORPUS_TARGETS_KEY is out
+  # of reach; it reads no secret, decrypts nothing and runs no third-party code.
+  plan:
+    if: github.repository == 'isokron-ai/mcp-writecheck-action' && github.ref == 'refs/heads/main'
+    name: corpus-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.batch.outputs.shards }}
+      matrix: ${{ steps.batch.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: batch
+        name: Plan the batch
+        env:
+          ONLY_IN: ${{ inputs.only }}
+        run: corpus/check-batch.sh output "$GITHUB_OUTPUT"
+
   corpus:
+    needs: plan
     if: github.repository == 'isokron-ai/mcp-writecheck-action' && github.ref == 'refs/heads/main'
     name: corpus-shard-${{ matrix.shard }}
     runs-on: ubuntu-24.04
@@ -72,8 +106,10 @@ jobs:
     timeout-minutes: 360
     strategy:
       fail-fast: false
+      # At most 16 jobs at once, below the 20 GitHub-hosted runners allow; the plan gives at most 16.
+      max-parallel: 16
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,18 +125,16 @@ jobs:
         run: dogfood/cli-ref.sh
       - name: Check the batch
         # why: the IDs reach a shell and the driver; only the list's own ID shape is accepted, before any secret is read.
+        # The input is checked again here, from inputs.only, not taken from the plan job; the plan's shard
+        # count must match it, this job's shard must be in it, and the matrix (strategy.job-total, job-index)
+        # must be exactly that many jobs with this one at its place. Writes CORPUS_ONLY and CORPUS_SHARDS.
         env:
           ONLY_IN: ${{ inputs.only }}
-        shell: bash
-        run: |
-          # The whole value must match: a bash regex, not grep (grep -x matches line by line, so a value
-          # with a newline could add lines to GITHUB_ENV). Only a value that passed is written.
-          re='^t[0-9]{2,3}(,t[0-9]{2,3}){0,9}$'
-          if [ -n "$ONLY_IN" ] && ! [[ "$ONLY_IN" =~ $re ]]; then
-            echo "::error::only must be comma-separated target IDs such as t13,t09 (at most 10)"
-            exit 1
-          fi
-          echo "CORPUS_ONLY=$ONLY_IN" >> "$GITHUB_ENV"
+          PLAN_SHARDS: ${{ needs.plan.outputs.shards }}
+          SHARD: ${{ matrix.shard }}
+          JOB_INDEX: ${{ strategy.job-index }}
+          JOB_TOTAL: ${{ strategy.job-total }}
+        run: corpus/check-batch.sh env "$GITHUB_ENV"
       # The CLI first, before any third-party code runs in this job. Its repository is public, so the
       # checkout has no token. Until the owner sets the repository variable MWS_CLI_PUBLIC to 'true',
       # the job stops here, before the checkout and before anything is decrypted or run.

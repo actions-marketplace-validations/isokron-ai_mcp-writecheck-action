@@ -110,33 +110,113 @@ test('M3: a second recipient (a tampered recipients file) fails the step and lea
 test('batches: the only input is checked against the ID shape before any secret, and reaches the driver', () => {
   const check = step('Check the batch');
   assert.match(check, /ONLY_IN: \$\{\{ inputs\.only \}\}/);
+  assert.match(check, /PLAN_SHARDS: \$\{\{ needs\.plan\.outputs\.shards \}\}/);
+  assert.match(check, /SHARD: \$\{\{ matrix\.shard \}\}/);
+  assert.match(check, /JOB_INDEX: \$\{\{ strategy\.job-index \}\}/);
+  assert.match(check, /JOB_TOTAL: \$\{\{ strategy\.job-total \}\}/);
+  assert.match(check, /run: corpus\/check-batch\.sh env "\$GITHUB_ENV"/);
   assert.ok(body.indexOf('name: Check the batch') < body.indexOf('secrets.CORPUS_TARGETS_KEY'));
   assert.doesNotMatch(body, /run:[^\n]*\$\{\{ inputs\.only/);
+  assert.doesNotMatch(body, /\n  CORPUS_SHARDS:/, 'the shard count comes from the batch, not a fixed env');
   const shard = readFileSync(new URL('../corpus/run-ci-shard.sh', import.meta.url), 'utf8');
   assert.match(shard, /\$\{CORPUS_ONLY:\+--only "\$CORPUS_ONLY"\}/);
+  assert.match(shard, /--shards "\$\{CORPUS_SHARDS:\?\}"/);
 });
 
-test('batches: the check runs: good IDs pass, and a newline, a separator or too many IDs never reach GITHUB_ENV', () => {
-  const raw = wf.slice(wf.indexOf('name: Check the batch'));
-  const script = raw.slice(raw.indexOf('run: |\n') + 'run: |\n'.length, raw.indexOf('\n      - ')).split('\n').map((l) => l.replace(/^          /, '')).join('\n');
+test('batches: the plan job sizes the matrix from the only input alone: no environment, no secret, before the shards', () => {
+  const plan = body.slice(body.indexOf('\n  plan:\n'), body.indexOf('\n  corpus:\n'));
+  assert.ok(plan.length > 0 && body.indexOf('\n  plan:\n') < body.indexOf('\n  corpus:\n'));
+  assert.match(plan, /\n    if: github.repository == 'isokron-ai\/mcp-writecheck-action' && github.ref == 'refs\/heads\/main'\n/);
+  assert.doesNotMatch(plan, /environment:|secrets\.|vars\.|github\.token|GH_TOKEN|needs\./);
+  assert.doesNotMatch(plan, /repository:/, 'checks out this repository only');
+  assert.match(plan, /persist-credentials: false/);
+  assert.match(plan, /ONLY_IN: \$\{\{ inputs\.only \}\}/);
+  assert.match(plan, /run: corpus\/check-batch\.sh output "\$GITHUB_OUTPUT"/);
+  // Only the input reaches it: no other inputs, no event payload.
+  assert.deepEqual(plan.match(/\$\{\{[^}]*\}\}/g).filter((e) => !/steps\.batch\.outputs\./.test(e)), ['${{ inputs.only }}']);
+  const job = body.slice(body.indexOf('\n  corpus:\n'));
+  assert.match(job, /\n    needs: plan\n/);
+  assert.match(job, /\n    environment: corpus\n/);
+  assert.match(job, /\n      max-parallel: 16\n/);
+  assert.match(job, /\n        shard: \$\{\{ fromJSON\(needs\.plan\.outputs\.matrix\) \}\}\n/);
+});
+
+test('batches: one run at a time (the concurrency group has no suffix and does not cancel)', () => {
+  assert.match(body, /^concurrency:\n  group: corpus\n  cancel-in-progress: false\n/m);
+  assert.equal(body.match(/concurrency:/g).length, 1);
+});
+
+const checkBatch = join(root, 'corpus', 'check-batch.sh');
+function batch(mode, value, extra = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'only-'));
-  const run = (value) => {
-    const env = join(dir, 'env');
-    writeFileSync(env, '');
-    const r = spawnSync('bash', ['-c', script], { env: { PATH: process.env.PATH, ONLY_IN: value, GITHUB_ENV: env }, encoding: 'utf8' });
-    return { code: r.status, env: readFileSync(env, 'utf8') };
-  };
-  assert.deepEqual(run('t13,t09,t08'), { code: 0, env: 'CORPUS_ONLY=t13,t09,t08\n' });
-  assert.deepEqual(run(''), { code: 0, env: 'CORPUS_ONLY=\n' });
-  for (const bad of ['t13\nNODE_OPTIONS=--require=/x', 't13\r\nX=1', 't13;id', 't1', 't13,t09,t08,t01,t02,t03,t04,t05,t06,t07,t10', ' t13']) {
-    const r = run(bad);
-    assert.equal(r.code, 1, JSON.stringify(bad));
-    assert.equal(r.env, '', JSON.stringify(bad));
+  const f = join(dir, 'out');
+  writeFileSync(f, '');
+  // JOB_TOTAL and JOB_INDEX follow PLAN_SHARDS and SHARD (a consistent matrix) unless given.
+  const job = {};
+  if (extra.PLAN_SHARDS !== undefined && !('JOB_TOTAL' in extra)) job.JOB_TOTAL = extra.PLAN_SHARDS;
+  if (/^[0-9]+$/.test(extra.SHARD ?? '') && !('JOB_INDEX' in extra)) job.JOB_INDEX = String(Number(extra.SHARD) - 1);
+  const env = { PATH: process.env.PATH, ONLY_IN: value, ...job, ...extra };
+  for (const k of Object.keys(env)) if (env[k] === undefined) delete env[k];
+  const r = spawnSync('bash', [checkBatch, mode, f], { env, encoding: 'utf8' });
+  return { code: r.status, out: readFileSync(f, 'utf8'), stdout: r.stdout };
+}
+const ids = (n) => Array.from({ length: n }, (_, i) => `t${String(i + 1).padStart(2, '0')}`).join(',');
+const range = (k) => `[${Array.from({ length: k }, (_, i) => i + 1).join(',')}]`;
+
+test('batches: the plan: min(16, n) shards for n IDs, 16 for an empty input, up to 40 IDs', () => {
+  for (const [value, k] of [['t13', 1], ['t13,t09,t08', 3], [ids(16), 16], [ids(17), 16], [ids(40), 16], ['', 16]]) {
+    assert.deepEqual(batch('output', value), { code: 0, out: `shards=${k}\nmatrix=${range(k)}\n`, stdout: '' }, value);
+  }
+  // 40 IDs over 16 shards, dealt as the driver does (i % shards): at most 3 per shard.
+  const per = Array(16).fill(0);
+  for (let i = 0; i < 40; i++) per[i % 16]++;
+  assert.equal(Math.max(...per), 3);
+});
+
+test('batches: the check runs: good IDs pass, and a newline, a separator, a repeat or too many IDs never reach GITHUB_ENV', () => {
+  assert.deepEqual(batch('env', 't13,t09,t08', { PLAN_SHARDS: '3', SHARD: '2' }), { code: 0, out: 'CORPUS_ONLY=t13,t09,t08\nCORPUS_SHARDS=3\n', stdout: '' });
+  assert.deepEqual(batch('env', '', { PLAN_SHARDS: '16', SHARD: '16' }), { code: 0, out: 'CORPUS_ONLY=\nCORPUS_SHARDS=16\n', stdout: '' });
+  assert.deepEqual(batch('env', ids(40), { PLAN_SHARDS: '16', SHARD: '1' }), { code: 0, out: `CORPUS_ONLY=${ids(40)}\nCORPUS_SHARDS=16\n`, stdout: '' });
+  const bad = ['t13\nNODE_OPTIONS=--require=/x', 't13\r\nX=1', 't13;id', 't1', ids(41), ' t13', 't13,', ',t13', 't13,,t09', 't13,t09,t13', 't09,t009', 't013,t13', 't100,t100', 't13\n', '$(id)'];
+  for (const v of bad) {
+    for (const mode of ['env', 'output']) {
+      const r = batch(mode, v, { PLAN_SHARDS: '16', SHARD: '1' });
+      assert.equal(r.code, 1, `${mode} ${JSON.stringify(v)}`);
+      assert.equal(r.out, '', `${mode} ${JSON.stringify(v)}`);
+      assert.match(r.stdout, /^::error::[^\n]*\n$/, 'one fixed error line');
+      assert.doesNotMatch(r.stdout, /NODE_OPTIONS|X=1|\$\(id\)|t41/, 'the error does not echo the input');
+    }
+  }
+});
+
+test('batches: a shard job refuses a plan that does not match the input, or a shard outside it', () => {
+  for (const extra of [{ PLAN_SHARDS: '16', SHARD: '1' }, { PLAN_SHARDS: '', SHARD: '1' }, { SHARD: '1' }, { PLAN_SHARDS: '3', SHARD: '4' }, { PLAN_SHARDS: '3', SHARD: '0' }, { PLAN_SHARDS: '3', SHARD: '' }, { PLAN_SHARDS: '3', SHARD: '1\nX=1' }, { PLAN_SHARDS: '3' }]) {
+    const r = batch('env', 't13,t09,t08', extra);
+    assert.equal(r.code, 1, JSON.stringify(extra));
+    assert.equal(r.out, '', JSON.stringify(extra));
+  }
+  assert.equal(batch('bogus', 't13').code, 2);
+});
+
+test('batches: the number decides a repeat (t09 and t009 are one ID); distinct 2- and 3-digit IDs pass', () => {
+  assert.equal(batch('output', 't09,t009').code, 1);
+  assert.equal(batch('output', 't000,t00').code, 1);
+  assert.deepEqual(batch('output', 't09,t090,t900,t99'), { code: 0, out: `shards=4\nmatrix=${range(4)}\n`, stdout: '' });
+  assert.deepEqual(batch('env', 't09,t100', { PLAN_SHARDS: '2', SHARD: '2' }), { code: 0, out: 'CORPUS_ONLY=t09,t100\nCORPUS_SHARDS=2\n', stdout: '' });
+});
+
+test('batches: a shard job refuses a matrix that is not exactly the planned one (strategy.job-total, job-index)', () => {
+  const ok = { PLAN_SHARDS: '3', SHARD: '2', JOB_TOTAL: '3', JOB_INDEX: '1' };
+  assert.equal(batch('env', 't13,t09,t08', ok).code, 0);
+  for (const over of [{ JOB_TOTAL: '4' }, { JOB_TOTAL: '16' }, { JOB_TOTAL: '2' }, { JOB_INDEX: '0' }, { JOB_INDEX: '2' }, { JOB_TOTAL: undefined }, { JOB_INDEX: undefined }, { JOB_TOTAL: '' }, { JOB_INDEX: '' }, { JOB_INDEX: '1\nX=1' }, { JOB_TOTAL: '-3' }, { JOB_INDEX: '1 ' }]) {
+    const r = batch('env', 't13,t09,t08', { ...ok, ...over });
+    assert.equal(r.code, 1, JSON.stringify(over));
+    assert.equal(r.out, '', JSON.stringify(over));
   }
 });
 
 test('D8: the job may run 360 minutes, the hosted maximum, which the driver\'s shard budget stays under', async () => {
-  const m = /^ {4}timeout-minutes: (\d+)$/m.exec(wf);
+  const m = /^ {4}timeout-minutes: (\d+)$/m.exec(wf.slice(wf.indexOf('\n  corpus:\n')));
   assert.equal(Number(m?.[1]), 360);
   const { SHARD_BUDGET_S } = await import('../corpus/run-shard.mjs');
   assert.ok(SHARD_BUDGET_S <= (360 - 30) * 60, 'at least 30 minutes left for checkout, build, encryption and upload');

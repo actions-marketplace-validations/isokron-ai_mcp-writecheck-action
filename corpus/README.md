@@ -1,6 +1,6 @@
 # Corpus: batch runs against third-party MCP servers
 
-`.github/workflows/corpus.yml` runs `mcp-writecheck`, dispatched by hand in batches of 3 to 5, against a pinned
+`.github/workflows/corpus.yml` runs `mcp-writecheck`, dispatched by hand in batches of up to 40 targets on up to 16 parallel jobs, against a pinned
 list of open-source MCP servers that IsoKron did not write. Its purpose is to test this action and the CLI on servers
 built by other people: crashes, time limits, harness errors and false positives are what it is
 looking for. It is not a findings channel, and it publishes no verdicts.
@@ -211,7 +211,7 @@ A shard fails only when some target's `N` is not 0. A server's verdicts never fa
 - Open-source licences that permit running the software, only.
 - Standard GitHub-hosted runners and a few dozen targets at most; the long tail runs on IsoKron's own
   hardware with the same driver, the same containers and the same record format.
-- Manual dispatch only, from `main`, in batches of 3 to 5 targets named in the `only` input (`t13,t09,t08`). There is no schedule (17 Nov 2026), so enabling the workflow starts nothing. An ID that is not in the list matches nothing: that shard runs nothing and still goes green, so check the IDs against the list before dispatching. No `pull_request` or `pull_request_target` trigger.
+- Manual dispatch only, from `main`, with the targets named in the `only` input (`t13,t09,t08`), each ID once (compared by number: `t09` and `t009` are the same), at most 40. On 17 Nov 2026 batches were 3 to 5 targets; on 18 Nov 2026 the owner asked to run as many servers as possible during the day, still dispatched by hand. A plan job, which has no environment and reads only the `only` input (never a secret), sets the shard matrix to min(16, n) jobs for n IDs, or 16 when `only` is empty (every target); targets are dealt to shards in list order (`i % shards`), so 40 IDs give at most 3 per shard, and each shard's planned time must still fit `SHARD_BUDGET_S`. 16 jobs stay below the 20 that GitHub-hosted runners run at once for a free organization's public repository. Each shard job checks the input again, the plan's shard count against it, and the matrix itself (`strategy.job-total` must equal that count and `strategy.job-index` + 1 its shard), before the decrypt step. One run at a time (concurrency group `corpus`): a dispatch made during a run waits, so two runs never test the same target at once; GitHub keeps one waiting run, and a third dispatch cancels it. There is no schedule (17 Nov 2026), so enabling the workflow starts nothing. An ID that is not in the list matches nothing: that shard runs nothing and still goes green, so check the IDs against the list before dispatching. No `pull_request` or `pull_request_target` trigger.
 - Catalog and plan modes for every target. A full run happens only for a target whose hand-written
   manifest and plan hash a person has read and accepted, and only against its in-job backend.
 
@@ -228,7 +228,7 @@ Needs Docker Engine 26.0.0 or later (Linux containers; Docker Desktop or colima 
 
 ```sh
 node corpus/run-shard.mjs --targets targets.json --cli <built mcp-writecheck package> \
-  --out out --lane ci [--shard 1 --shards 4] [--only t01,t02] [--consume-targets] [--spec spec/mws.md]
+  --out out --lane ci [--shard 1 --shards 16] [--only t01,t02] [--consume-targets] [--spec spec/mws.md]
 ```
 
 Unit tests: `node --test test/corpus.test.mjs test/corpus-data.test.mjs test/corpus-jcs.test.mjs test/corpus-workflow.test.mjs`. The sandbox against a
