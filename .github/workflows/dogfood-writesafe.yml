@@ -8,18 +8,25 @@
 #   full  on: the plan, the catalog and the full run (mode full, fail-on must) against the same throwaway
 #         Strapi; the plan hash must match the one pinned below.
 #
-# Security: no pull_request_target; dispatch only (see `on:`). No secret is used: isokron-ai/mcp-write-safety
-# is public, so the checkout of the CLI needs no token; the action gets the built CLI through cli-path.
+# Security: no pull_request_target; nightly schedule and dispatch only (see `on:`). No secret is used:
+# isokron-ai/mcp-write-safety is public, so the checkout of the CLI needs no token; the action gets the
+# built CLI through cli-path.
 # Every Strapi credential is generated in the job and masked.
 # Third-party actions are pinned by full SHA. Strapi listens on 127.0.0.1 only.
 
 name: "dogfood: writesafe"
 
 on:
-  # Dispatch only, for now: the test app installs Strapi's whole npm tree (unlocked, fixed by date). The
-  # CLI's repository is public and the secret is gone from this workflow, so schedule (cron '29 3 * * *'),
-  # and pull_request and push to main on the paths of this workflow (with the same-repository `if:` on
-  # the jobs) can be added back; that is the owner's call, not part of the re-pin.
+  # Nightly and on demand. The test app installs Strapi's whole npm tree (unlocked, fixed by date: the
+  # plugin's ci/strapi-versions.json resolve_before), and no secret is used, so the schedule is safe to
+  # run unattended. A scheduled run has no inputs: cli-ref is empty (the action's default CLI,
+  # contract.mjs CLI_DEFAULT_REF) and plan-hashes is empty, so each job compares its plan with the
+  # PLAN_HASH pinned below and the full run uses that hash. When the default CLI, the manifest or WS_REF
+  # changes, re-read the plans and update both pins in the same change, or the nightly run fails at
+  # "Compare the plan hash". pull_request and push to main on the paths of this workflow (with the
+  # same-repository `if:` on the jobs) can still be added; that is the owner's call.
+  schedule:
+    - cron: '29 3 * * *'
   workflow_dispatch:
     inputs:
       cli-ref:

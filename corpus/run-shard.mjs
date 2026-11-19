@@ -378,12 +378,113 @@ export function validateTarget(t, dropped = []) {
   if (t.setup !== undefined && !Array.isArray(t.setup)) throw new HarnessError('setup must be a list');
   for (const [k, s] of (t.setup ?? []).entries()) {
     if (typeof s === 'string') continue;
-    checkFetch(s, `set-up ${k}`);
+    if (s && typeof s === 'object' && !Array.isArray(s) && Object.hasOwn(s, 'exec')) checkSetupExec(s, `set-up ${k}`);
+    else checkFetch(s, `set-up ${k}`);
   }
+  if (t.snapshot !== undefined) checkTargetSnapshot(t.snapshot);
+  if (t.runtime !== undefined) checkRuntimeName(t.runtime);
   if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
   if (t.timeout_s !== undefined && !(Number.isInteger(t.timeout_s) && t.timeout_s >= 1 && t.timeout_s <= MAX_TIMEOUT_S)) throw new HarnessError(`timeout_s must be a whole number of seconds from 1 to ${MAX_TIMEOUT_S}`);
   if (t.full !== undefined) checkFull(t.full);
-  volatileCaptures(t);
+  listCaptures(t, volatileCaptures(t));
+}
+
+/**
+ * `runtime` (optional, per target): the name of another runtime image in images.json `runtimes`,
+ * used instead of `runtime` for that target's sandbox containers (install, set-up, CLI, server).
+ * The list names the image only; the digest lives in images.json, changed only by a reviewed commit.
+ */
+export function checkRuntimeName(name) {
+  if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new HarnessError('runtime must be the name of an images.json runtimes entry ([a-z][a-z0-9-]{0,31})');
+  return name;
+}
+
+/** The pinned image a target's sandbox containers run in: images.json `runtime`, or the `runtimes` entry its `runtime` names. */
+export function targetRuntime(t, images) {
+  if (t?.runtime === undefined) return checkPinned(images.runtime, 'images.json runtime');
+  const name = checkRuntimeName(t.runtime);
+  const rts = images.runtimes;
+  if (!rts || typeof rts !== 'object' || Array.isArray(rts) || !Object.hasOwn(rts, name)) throw new HarnessError(`runtime "${name}" is not in images.json runtimes`);
+  return checkPinned(rts[name], `images.json runtimes.${name}`);
+}
+
+/**
+ * A list-level set-up step in argv form: `{ exec: [argv...], capture? }`. It runs like a shell line
+ * (in the target's sandbox container, on the internal network, in /work, with TDIR set and the
+ * templates filled per argument), but without `sh -c`: the argv is run as given. `capture` keeps the
+ * last line of its stdout under that name, as `backends[].setup[].capture` does. `volatile` is refused
+ * here: the list's set-up runs with the server env already filled, so a list-level capture can never
+ * reach server.env, the only place a volatile value may go. Returns the step.
+ */
+export function checkSetupExec(s, what = 'set-up') {
+  for (const k of Object.keys(s)) {
+    if (k === 'volatile') throw new HarnessError(`${what}: volatile is for backends[].setup only (a list-level capture never reaches server.env)`);
+    if (k !== 'exec' && k !== 'capture') throw new HarnessError(`${what}: an exec step is { exec: [...], capture? }; it has an unknown field`);
+  }
+  if (!Array.isArray(s.exec) || !s.exec.length || s.exec.some((x) => typeof x !== 'string')) throw new HarnessError(`${what}: exec must be a non-empty list of strings`);
+  if (s.capture !== undefined) {
+    if (typeof s.capture !== 'string' || !/^[a-zA-Z0-9_]{1,64}$/.test(s.capture)) throw new HarnessError(`${what}: capture must be a template name ([a-zA-Z0-9_], 1 to 64)`);
+    if (DRIVER_NAME.test(s.capture) || CLI_TEMPLATE_NAMES.includes(s.capture)) throw new HarnessError(`${what}: capture ${s.capture} is a driver or CLI template name`);
+  }
+  return s;
+}
+
+/**
+ * The list-level set-up captures, in order. Refused at load: a name captured twice or also captured
+ * by a backend; a name used in server.command or server.env (both are filled before the list's
+ * set-up runs, so it would never be set there); a capture derived from a volatile backend capture or
+ * from a secret-named `$VAR` (it would be volatile, which a list-level capture cannot be, and its value
+ * would go into the setup log and the manifest). Returns the names.
+ */
+export function listCaptures(t, volatile = volatileCaptures(t)) {
+  const names = (v) => new Set([...String(v).matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((m) => m[1]));
+  const backend = new Set();
+  for (const b of Array.isArray(t.backends) ? t.backends : []) for (const s of Array.isArray(b?.setup) ? b.setup : []) if (typeof s?.capture === 'string') backend.add(s.capture);
+  const got = [];
+  for (const [k, s] of (Array.isArray(t.setup) ? t.setup : []).entries()) {
+    if (!s || typeof s !== 'object' || typeof s.capture !== 'string') continue;
+    const execText = s.exec.join('\n');
+    if ([...names(execText)].some((n) => volatile.has(n)) || [...execText.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]{0,127})\}?/g)].some((m) => isSecretName(m[1]))) {
+      throw new HarnessError(`set-up ${k}: capture ${s.capture} is derived from a volatile capture or a secret-named variable`);
+    }
+    if (got.includes(s.capture) || backend.has(s.capture)) throw new HarnessError(`set-up ${k}: capture ${s.capture} is captured twice`);
+    got.push(s.capture);
+  }
+  // Everything filled before the list's set-up runs (or never filled): server.command and server.env,
+  // the backends' env, args, wait and set-up (a backend is started and seeded first), and a fetch
+  // step's url (never filled).
+  const list = (x) => (Array.isArray(x) ? x.map(String).join('\n') : '');
+  const vals = (x) => (x && typeof x === 'object' && !Array.isArray(x) ? Object.values(x).map(String).join('\n') : '');
+  const early = [['server.command', list(t.server?.command)], ['server.env', vals(t.server?.env)]];
+  for (const [i, b] of (Array.isArray(t.backends) ? t.backends : []).entries()) {
+    early.push([`backends[${i}].env`, vals(b?.env)], [`backends[${i}].args`, list(b?.args)], [`backends[${i}].wait`, list(b?.wait)],
+      [`backends[${i}].setup`, (Array.isArray(b?.setup) ? b.setup : []).map((s) => list(s?.exec)).join('\n')]);
+  }
+  for (const [k, s] of (Array.isArray(t.setup) ? t.setup : []).entries()) {
+    if (s && typeof s === 'object' && s.fetch && typeof s.fetch === 'object') early.push([`set-up ${k} fetch`, Object.values(s.fetch).map(String).join('\n')]);
+  }
+  for (const [field, text] of early) {
+    const used = names(text);
+    for (const n of got) if (used.has(n)) throw new HarnessError(`list-level capture ${n} is used in ${field}, which is filled before the list's set-up runs or never`);
+  }
+  return got;
+}
+
+/**
+ * Target-level `snapshot`: `{ exec: [argv...] }`, for a target with no backend container (a SQLite,
+ * DuckDB or Chroma file under {{tdir}}). It runs in the target's own sandbox container (user 10001,
+ * every capability dropped, read-only root, no network, /work and every other volume read-only), at the
+ * same times as `backends[].snapshot`, and prints the fixture's state as text. No `user`: it always
+ * runs as the sandbox user.
+ */
+export function checkTargetSnapshot(s) {
+  if (!s || typeof s !== 'object' || Array.isArray(s)) throw new HarnessError('snapshot is { exec: [...] }');
+  for (const k of Object.keys(s)) {
+    if (k === 'user') throw new HarnessError('snapshot: a target snapshot always runs as the sandbox user; user is for backends[].snapshot only');
+    if (k !== 'exec') throw new HarnessError('snapshot has an unknown field');
+  }
+  if (!Array.isArray(s.exec) || !s.exec.length || s.exec.some((x) => typeof x !== 'string')) throw new HarnessError('snapshot.exec must be a non-empty list of strings');
+  return s;
 }
 
 /**
@@ -413,11 +514,15 @@ export function volatileCaptures(t) {
   for (const n of vol) if (plain.has(n)) throw new HarnessError(`capture ${n} is volatile in one set-up step and not in another`);
   // The manifest's CLI template names are never filled by the driver (fillManifest), so a volatile
   // capture of the same name does not reach it; server.command is filled with every name.
-  const where = [['full.manifest', typeof t.full?.manifest === 'string' ? t.full.manifest : '', CLI_TEMPLATE_NAMES], ['server.command', Array.isArray(t.server?.command) ? t.server.command.join('\n') : '', []]];
+  // A snapshot's argv is filled with every name too, and its output is kept unscrubbed as data.
+  const snapText = (s) => (Array.isArray(s?.exec) ? s.exec.map(String).join('\n') : '');
+  const where = [['full.manifest', typeof t.full?.manifest === 'string' ? t.full.manifest : '', CLI_TEMPLATE_NAMES], ['server.command', Array.isArray(t.server?.command) ? t.server.command.join('\n') : '', []],
+    ['snapshot.exec', snapText(t.snapshot), []],
+    ...(Array.isArray(t.backends) ? t.backends : []).map((b, i) => [`backends[${i}].snapshot.exec`, snapText(b?.snapshot), []])];
   for (const [field, text, skip] of where) {
     const used = names(text);
     for (const n of vol) {
-      if (used.has(n) && !skip.includes(n)) throw new HarnessError(`volatile capture ${n} is used in ${field}: a volatile value may reach server.env only, so that the manifest and its plan hash stay the same on every repeat`);
+      if (used.has(n) && !skip.includes(n)) throw new HarnessError(`volatile capture ${n} is used in ${field}: a volatile value may reach server.env only${field.endsWith('snapshot.exec') ? ' (a snapshot\'s output is kept as data, not scrubbed)' : ', so that the manifest and its plan hash stay the same on every repeat'}`);
     }
   }
   return vol;
@@ -690,7 +795,7 @@ export function surfaceMeta(s, file = 'surface.json') {
 export function checkFetch(s, what = 'set-up') {
   const f = s?.fetch;
   if (!s || typeof s !== 'object' || Array.isArray(s) || Object.keys(s).join() !== 'fetch' || !f || typeof f !== 'object' || Array.isArray(f)) {
-    throw new HarnessError(`${what}: a set-up step is a shell line or { fetch: { url, sha256, dest, strip_components } }`);
+    throw new HarnessError(`${what}: a set-up step is a shell line, { exec: [...], capture? } or { fetch: { url, sha256, dest, strip_components } }`);
   }
   for (const k of Object.keys(f)) if (!['url', 'sha256', 'dest', 'strip_components'].includes(k)) throw new HarnessError(`${what}: fetch has an unknown field`);
   if (typeof f.url !== 'string') throw new HarnessError(`${what}: fetch.url`);
@@ -1071,12 +1176,12 @@ class Docker {
   }
 
   /** A sandbox container running `cmd`; removed (with its processes) at the deadline. */
-  async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, target }) {
+  async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, raw = false, target }) {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
     const ce = clientEnvFor(env);
-    const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd, hideEnv: ce.hide });
+    const argv = sandboxRunArgs({ name, image: this.ctx.runtimeFor?.get(target) ?? this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd, hideEnv: ce.hide });
     const r = await run('docker', argv, {
-      cwd: this.ctx.out, env: { ...this.env, ...ce.env }, log, deadline, keepStdout, input, logStdout, scrubber: this.scrub,
+      cwd: this.ctx.out, env: { ...this.env, ...ce.env }, log, deadline, keepStdout, input, logStdout, raw, scrubber: this.scrub,
       onTimeout: () => this.kill(name),
     });
     if (r.timed_out) await this.d(['rm', '-f', name], { log });
@@ -1294,6 +1399,7 @@ async function runTarget(t, o, ctx, dk) {
     networks: {},
     backends: [],
     setup_fetch: [],
+    setup_captures: [],
     deps: null,
     manifest_sha256: null,
     init_draft_sha256: null,
@@ -1337,8 +1443,18 @@ async function runTarget(t, o, ctx, dk) {
     // is scrubbed from everything logged from here on.
     dk.scrub.addList(t);
     checkLane(t, o.lane);
+    // A target that names another runtime image (images.json runtimes) runs its sandboxes in it.
+    if (t.runtime !== undefined) {
+      const ref = targetRuntime(t, ctx.images);
+      const key = `runtime:${t.runtime}`;
+      ctx.imageInfo[key] ??= { ref, id: await dk.image(ref, L('install'), `runtime image ${t.runtime}`) };
+      (ctx.runtimeFor ??= new Map()).set(t.id, ref);
+      meta.env.images[0] = { role: 'runtime', name: t.runtime, ...imageParts(ref) };
+    }
     // D3: one record per backend with a snapshot, filled when the snapshots are taken.
+    // A target-level snapshot (no backend container: a file under {{tdir}}) is recorded as backend "target".
     const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
+    if (t.snapshot) snapping.push(['target', t]);
     const states = new Map();
     for (const [i] of snapping) {
       const e = { backend: i, before: null, before_why: 'no CLI step that writes ran', after: null, after_why: 'no CLI step that writes ran' };
@@ -1396,7 +1512,7 @@ async function runTarget(t, o, ctx, dk) {
         ? { step, paths: rels, moved: true, files: `evidence-${step}-files.json`, file_count: ev.file_count, sha256: ev.sha256, skipped: ev.skipped, missing: ev.missing, moved_paths: ev.moved_paths }
         : { step, paths: rels, moved: false, sha256: null, sha256_why: ev.why });
     };
-    /** A full repeat's results and state, into its full_runs entry. */
+    /** A full repeat's results and state, into its full_runs entry. Returns whether they were moved. */
     const keepEvidence = async (i, fr) => {
       const ev = await moveToEvidence([`results/full-${i}`, `state/full-${i}`], `full-${i}-files.json`);
       if (ev.moved) {
@@ -1408,6 +1524,7 @@ async function runTarget(t, o, ctx, dk) {
         fr.results_sha256_why = ev.why;
         fr.evidence = { moved: false };
       }
+      return ev.moved;
     };
 
     // 3. Install, in sandbox containers. Only the `egress` steps have a network that leaves the host.
@@ -1562,8 +1679,21 @@ async function runTarget(t, o, ctx, dk) {
       envRun = sandboxEnv(plan.bin, senv);
     };
     // runSetup runs the list's set-up steps; again before every full repeat after the first (D5).
-    const runSetup = async (d, first) => {
+    // Templates are filled from `v`, and an exec step's capture is set in it; returns the captures.
+    const runSetup = async (d, first, v = vars) => {
+      const captured = {};
       for (const [k, line] of (t.setup ?? []).entries()) {
+        if (line && typeof line === 'object' && Object.hasOwn(line, 'exec')) {
+          // Argv form, run as given (no sh -c), like a shell line otherwise. The capture is the last line
+          // of stdout, as for a backend's set-up; never volatile (checked at load), so it is logged.
+          const s = checkSetupExec(line, `set-up ${k}`);
+          const r = await must(dk.sandbox({ log: L('setup'), deadline: d, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: fill(s.exec, v), keepStdout: !!s.capture, target: t.id }), `set-up ${k}`);
+          if (s.capture) {
+            v[s.capture] = captured[s.capture] = r.stdout.trim().split('\n').pop();
+            if (first) meta.setup_captures.push({ step: k, capture: s.capture });
+          }
+          continue;
+        }
         if (typeof line !== 'string') {
           // B: a pinned tarball instead of a git step. Our helper fetches it on the install network
           // (no target code runs meanwhile: every sandbox container of the target has exited) and
@@ -1583,8 +1713,9 @@ async function runTarget(t, o, ctx, dk) {
             cmd: ['sh', '-c', 'mkdir -p "$2" && tar -xzf "$1" -C "$2" --no-same-owner --no-same-permissions --strip-components="$3" && rm -f "$1"', 'sh', file, `${P.work}/${f.dest}`, String(f.strip)] }), `set-up ${k} unpack`);
           continue;
         }
-        await must(dk.sandbox({ log: L('setup'), deadline: d, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, vars)], target: t.id }), 'set-up');
+        await must(dk.sandbox({ log: L('setup'), deadline: d, network: internal.name, mounts, env: { ...envRun, TDIR: P.work }, cmd: ['sh', '-c', fill(line, v)], target: t.id }), 'set-up');
       }
+      return captured;
     };
     await runSetup(deadline, true);
 
@@ -1640,18 +1771,32 @@ async function runTarget(t, o, ctx, dk) {
 
     // D3: the backends' state as text, before the first CLI step that writes and after the last.
     // With repeats, also before and after each repeat (backend-N-full-I-before.txt / -after.txt).
-    const takeSnapshots = async (when, rep, d) => {
+    // A target snapshot's mounts: /work read-only like the CLI and tools volumes; it only reads the fixture.
+    const snapMounts = mounts.map((m) => (m.dst === P.work ? { ...m, ro: true } : m));
+    // `skipTarget`: the reason the target snapshot does not run (its repeat's evidence was not moved out of /work).
+    const takeSnapshots = async (when, rep, d, skipTarget = null) => {
       for (const [i, b] of snapping) {
         const e = states.get(i);
-        const r = await dk.d(['exec', ...(b.snapshot.user ? ['-u', b.snapshot.user] : []), backendName(i), ...fill(b.snapshot.exec, vars)],
-          { log: L(`backend-${i}`), deadline: Math.min(d, Date.now() + SMALL_STEP_MS), keepStdout: true, logStdout: false, raw: true });
-        const ok = !r.timed_out && !r.spawn_error && r.exit === 0;
-        const why = ok ? null : `snapshot exec: exit ${r.exit}${r.timed_out ? ' (time limit)' : ''}`;
+        // The after snapshot has its own small limit: it runs after the CLI step and the evidence move,
+        // which may have used all of the repeat's time, and is the record of what that step did.
+        const sd = when === 'after' ? Date.now() + SMALL_STEP_MS : Math.min(d, Date.now() + SMALL_STEP_MS);
+        // A target snapshot runs in the target's own sandbox (user 10001, no capability, read-only root,
+        // no network, /work read-only), with the sandbox's base env and TDIR only (never server.env, which
+        // may hold secrets: its output is kept as data, unscrubbed); a backend's with docker exec in the backend.
+        const r = i === 'target' && skipTarget
+          ? null
+          : i === 'target'
+            ? await dk.sandbox({ log: L('snapshot'), deadline: sd, network: 'none', mounts: snapMounts, env: sandboxEnv(plan.bin, { TDIR: P.work }), cmd: fill(b.snapshot.exec, vars), keepStdout: true, logStdout: false, raw: true, target: t.id })
+            : await dk.d(['exec', ...(b.snapshot.user ? ['-u', b.snapshot.user] : []), backendName(i), ...fill(b.snapshot.exec, vars)],
+              { log: L(`backend-${i}`), deadline: sd, keepStdout: true, logStdout: false, raw: true });
+        const ok = !!r && !r.timed_out && !r.spawn_error && r.exit === 0;
+        const why = ok ? null : r ? `snapshot exec: exit ${r.exit}${r.timed_out ? ' (time limit)' : ''}` : skipTarget;
         const rec = (file) => {
           writeFileSync(join(odir, file), r.stdout);
           return { file, sha256: createHash('sha256').update(r.stdout).digest('hex'), bytes: r.stdout.length, ...(r.stdout_truncated ? { truncated: true } : {}) };
         };
-        const contract = `backend-${i}-${when}.txt`;
+        const stem = i === 'target' ? 'target' : `backend-${i}`;
+        const contract = `${stem}-${when}.txt`;
         if (when === 'after' || rep === 1) {
           if (ok) {
             e[when] = rec(contract);
@@ -1665,7 +1810,7 @@ async function runTarget(t, o, ctx, dk) {
         if (e.repeats) {
           let er = e.repeats.find((x) => x.i === rep);
           if (!er) e.repeats.push((er = { i: rep }));
-          er[when] = ok ? rec(`backend-${i}-full-${rep}-${when}.txt`) : null;
+          er[when] = ok ? rec(`${stem}-full-${rep}-${when}.txt`) : null;
           if (!ok) er[`${when}_why`] = why;
         }
       }
@@ -1713,7 +1858,16 @@ async function runTarget(t, o, ctx, dk) {
                   break;
                 }
               }
-              await runSetup(rd, false);
+              // The list's own captures: the manifest was filled with the first values, so one that
+              // changes refuses the repeat, like a backend's (a list-level capture is never volatile).
+              const got = await runSetup(rd, false, { ...vars });
+              const changedList = Object.keys(got).filter((k) => got[k] !== vars[k]);
+              if (changedList.length) {
+                fr.status = 'not_started';
+                fr.fresh_state = false;
+                fr.fresh_state_why = fr.why = `a set-up capture changed after the reset (${changedList.join(', ')})`;
+                break;
+              }
               await put(`${P.work}/writecheck.yaml`, Buffer.from(manifestText), L(`plan-${i}`), rd);
             } catch (e) {
               fr.fresh_state = false;
@@ -1747,8 +1901,11 @@ async function runTarget(t, o, ctx, dk) {
           fr.cli_exit = full.step.exit;
           fr.status = classifyCli(full.step);
           fr.ms = full.step.ms;
-          await takeSnapshots('after', i, rd);
-          await keepEvidence(i, fr);
+          // The repeat's results and state are moved out of /work first: a target snapshot runs target
+          // code (the target's own sqlite or chromadb, say) with /work mounted.
+          // Not moved: no target code runs with them still in /work.
+          const moved = await keepEvidence(i, fr);
+          await takeSnapshots('after', i, rd, moved ? null : 'evidence not moved');
         }
       }
     }
@@ -2010,6 +2167,10 @@ async function context(o) {
   if (!commit) commit = (await q('git', ['-C', cliDir, 'rev-parse', 'HEAD'])) || null;
   const images = JSON.parse(readFileSync(o.images, 'utf8'));
   for (const k of ['runtime', 'uv']) checkPinned(images[k], `images.json ${k}`);
+  if (images.runtimes !== undefined) {
+    if (!images.runtimes || typeof images.runtimes !== 'object' || Array.isArray(images.runtimes)) throw new HarnessError('images.json runtimes must be an object');
+    for (const [k, v] of Object.entries(images.runtimes)) { checkRuntimeName(k); checkPinned(v, `images.json runtimes.${k}`); }
+  }
   // D2: the CLI build carries no spec document, only the name of the text it follows (SPEC_TEXT in
   // its requirements module). The workflow checks out spec/mws.md from the same CLI commit, beside
   // the package; its sha256 is recorded (--spec names another file).
