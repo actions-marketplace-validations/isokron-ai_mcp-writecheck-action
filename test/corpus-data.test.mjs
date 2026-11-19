@@ -1351,6 +1351,9 @@ test('Per-target runtime: a name from images.json runtimes, checked at load and 
   const images = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'corpus', 'images.json'), 'utf8'));
   // The shipped images.json: node24 is pinned, and the default stays the default.
   assert.match(images.runtimes.node24, /^docker\.io\/library\/node:24-bookworm-slim@sha256:[0-9a-f]{64}$/);
+  assert.match(images.runtimes['node22-git'], /^docker\.io\/library\/node:22-bookworm@sha256:[0-9a-f]{64}$/);
+  assert.equal(targetRuntime({ id: 't01', runtime: 'node22-git' }, images), images.runtimes['node22-git']);
+  assert.doesNotThrow(() => validateTarget({ id: 't01', runtime: 'node22-git' }));
   assert.equal(targetRuntime({ id: 't01' }, images), images.runtime);
   assert.equal(targetRuntime({ id: 't01', runtime: 'node24' }, images), images.runtimes.node24);
   assert.doesNotThrow(() => validateTarget({ id: 't01', runtime: 'node24' }));
