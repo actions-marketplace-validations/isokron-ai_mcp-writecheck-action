@@ -382,10 +382,30 @@ export function validateTarget(t, dropped = []) {
     else checkFetch(s, `set-up ${k}`);
   }
   if (t.snapshot !== undefined) checkTargetSnapshot(t.snapshot);
+  if (t.runtime !== undefined) checkRuntimeName(t.runtime);
   if (t.canary !== undefined && t.canary !== 'good' && t.canary !== 'bad') throw new HarnessError('canary must be "good" or "bad"');
   if (t.timeout_s !== undefined && !(Number.isInteger(t.timeout_s) && t.timeout_s >= 1 && t.timeout_s <= MAX_TIMEOUT_S)) throw new HarnessError(`timeout_s must be a whole number of seconds from 1 to ${MAX_TIMEOUT_S}`);
   if (t.full !== undefined) checkFull(t.full);
   listCaptures(t, volatileCaptures(t));
+}
+
+/**
+ * `runtime` (optional, per target): the name of another runtime image in images.json `runtimes`,
+ * used instead of `runtime` for that target's sandbox containers (install, set-up, CLI, server).
+ * The list names the image only; the digest lives in images.json, changed only by a reviewed commit.
+ */
+export function checkRuntimeName(name) {
+  if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(name)) throw new HarnessError('runtime must be the name of an images.json runtimes entry ([a-z][a-z0-9-]{0,31})');
+  return name;
+}
+
+/** The pinned image a target's sandbox containers run in: images.json `runtime`, or the `runtimes` entry its `runtime` names. */
+export function targetRuntime(t, images) {
+  if (t?.runtime === undefined) return checkPinned(images.runtime, 'images.json runtime');
+  const name = checkRuntimeName(t.runtime);
+  const rts = images.runtimes;
+  if (!rts || typeof rts !== 'object' || Array.isArray(rts) || !Object.hasOwn(rts, name)) throw new HarnessError(`runtime "${name}" is not in images.json runtimes`);
+  return checkPinned(rts[name], `images.json runtimes.${name}`);
 }
 
 /**
@@ -1159,7 +1179,7 @@ class Docker {
   async sandbox({ log, deadline, network, mounts, env, cmd, workdir, input = null, keepStdout = false, logStdout = true, raw = false, target }) {
     const name = `corpus-${this.ctx.runId}-${target}-${++this.n}`;
     const ce = clientEnvFor(env);
-    const argv = sandboxRunArgs({ name, image: this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd, hideEnv: ce.hide });
+    const argv = sandboxRunArgs({ name, image: this.ctx.runtimeFor?.get(target) ?? this.ctx.images.runtime, network, mounts, env, workdir, stdin: input !== null, labels: this.labels({ 'isokron.corpus.target': target }), cpus: this.ctx.cpus, cmd, hideEnv: ce.hide });
     const r = await run('docker', argv, {
       cwd: this.ctx.out, env: { ...this.env, ...ce.env }, log, deadline, keepStdout, input, logStdout, raw, scrubber: this.scrub,
       onTimeout: () => this.kill(name),
@@ -1423,6 +1443,14 @@ async function runTarget(t, o, ctx, dk) {
     // is scrubbed from everything logged from here on.
     dk.scrub.addList(t);
     checkLane(t, o.lane);
+    // A target that names another runtime image (images.json runtimes) runs its sandboxes in it.
+    if (t.runtime !== undefined) {
+      const ref = targetRuntime(t, ctx.images);
+      const key = `runtime:${t.runtime}`;
+      ctx.imageInfo[key] ??= { ref, id: await dk.image(ref, L('install'), `runtime image ${t.runtime}`) };
+      (ctx.runtimeFor ??= new Map()).set(t.id, ref);
+      meta.env.images[0] = { role: 'runtime', name: t.runtime, ...imageParts(ref) };
+    }
     // D3: one record per backend with a snapshot, filled when the snapshots are taken.
     // A target-level snapshot (no backend container: a file under {{tdir}}) is recorded as backend "target".
     const snapping = (t.backends ?? []).map((b, i) => [i, b]).filter(([, b]) => b.snapshot);
@@ -2139,6 +2167,10 @@ async function context(o) {
   if (!commit) commit = (await q('git', ['-C', cliDir, 'rev-parse', 'HEAD'])) || null;
   const images = JSON.parse(readFileSync(o.images, 'utf8'));
   for (const k of ['runtime', 'uv']) checkPinned(images[k], `images.json ${k}`);
+  if (images.runtimes !== undefined) {
+    if (!images.runtimes || typeof images.runtimes !== 'object' || Array.isArray(images.runtimes)) throw new HarnessError('images.json runtimes must be an object');
+    for (const [k, v] of Object.entries(images.runtimes)) { checkRuntimeName(k); checkPinned(v, `images.json runtimes.${k}`); }
+  }
   // D2: the CLI build carries no spec document, only the name of the text it follows (SPEC_TEXT in
   // its requirements module). The workflow checks out spec/mws.md from the same CLI commit, beside
   // the package; its sha256 is recorded (--spec names another file).
