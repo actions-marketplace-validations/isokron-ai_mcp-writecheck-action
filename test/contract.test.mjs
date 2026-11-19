@@ -31,7 +31,7 @@ test('the registry has well-formed, unique requirement IDs', () => {
 });
 
 test('a requirement link is the base URL and the lower-case ID as the anchor', () => {
-  assert.equal(requirementUrl('https://isokron.ai/mws', 'MWS-UPD-1'), 'https://isokron.ai/mws#mws-upd-1');
+  assert.equal(requirementUrl('https://example.org/mws', 'MWS-UPD-1'), 'https://example.org/mws#mws-upd-1');
   assert.equal(requirementUrl('https://example.test/spec/#top', 'MWS-CONC-2'), 'https://example.test/spec/#mws-conc-2');
 });
 
@@ -158,7 +158,7 @@ test('the two skills cite only requirement IDs of the registry, and the builder 
   assert.deepEqual(rules, SPEC.requirements.map((r) => `${r.id} ${r.level}`));
   for (const text of [builder, caller]) {
     assert.ok(text.includes(`MCP Write-Safety Requirements, version ${SPEC.version}`), 'a skill names another spec version than the registry');
-    assert.ok(text.includes(SPEC_DEFAULT_URL), 'a skill does not link the public spec page');
+    assert.ok(text.includes('https://isokron.ai/mws?utm_source=writecheck-action-skill&utm_medium=skill'), 'a skill does not link the public spec page');
     assert.doesNotMatch(text, /spec commit/, 'a skill names a spec commit');
   }
 });

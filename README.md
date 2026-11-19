@@ -13,7 +13,7 @@ Runs [`mcp-writecheck`](https://github.com/isokron-ai/mcp-write-safety/tree/main
 
 Status: 0.1 (preview). Use `isokron-ai/mcp-writecheck-action@v0` for updates within 0.x, or pin a release tag or commit SHA. It is pinned to commit [`3af41c6`](https://github.com/isokron-ai/mcp-write-safety/commit/3af41c6fb79d66afdea41ebcabc6f7fc18e77c6a) of the public [`isokron-ai/mcp-write-safety`](https://github.com/isokron-ai/mcp-write-safety) repository: MWS 0.9 (the public draft, 37 requirements) and `mcp-writecheck` 0.1.0 plus the capture's `stop_sent` field, which is also published to npm as [`@mcp-write-safety/writecheck`](https://www.npmjs.com/package/@mcp-write-safety/writecheck). Everything that depends on the CLI or the spec is in [`contract.mjs`](contract.mjs). Commit SHAs in this repository's notes from before 16 November 2026 refer to the private pre-publication history of the spec and the CLI and do not resolve publicly.
 
-**Mode `full` makes real writes.** It creates, changes and deletes objects in whatever system the manifest points at. Point it only at a test environment that you are allowed to change. The default mode, `plan`, writes nothing.
+**Mode `full` makes thousands of real writes.** It creates, changes and deletes objects in whatever system the manifest points at: the plan states the largest number (for the sample server, tiny-tracker, between 1,600 and 1,800, depending on the CLI commit). Run it against a disposable backend, one that the job starts for itself or a tenant that exists only for testing, with a credential that is valid only there. The default mode, `plan`, calls no tool and writes nothing. `full` needs two explicit inputs, `confirm-target` and the `plan-hash` of a plan a person has read; the destructive empty-selector forms of MWS-TGT-2 are sent only where the manifest sets `selector.send_empty_forms: true`, for a backend where every object is disposable. Read [`full`](#full-real-writes-test-environment-required) before you use it.
 
 ## What it does
 
@@ -66,7 +66,7 @@ The manifest is the file `mcp-writecheck init` drafts and you complete. The CLI'
 | `confirm-target` | | Mode `full`, required. The manifest's `target.confirm`, typed back. |
 | `plan-hash` | | Mode `full`, required. The hash of the plan a person has read. |
 | `catalog` | | Modes `plan` and `catalog`, optional. A saved `tools/list` answer, a list of tools, or the `catalog.json` of an earlier run. With it, no server is started. |
-| `spec-url` | `https://isokron.ai/mws` | Base URL of the public spec page. A requirement links to `<spec-url>#<id in lower case>`, for example `https://isokron.ai/mws#mws-conc-2`. |
+| `spec-url` | `https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action` | Base URL of the public spec page. A requirement links to `<spec-url>#<id in lower case>`, for example `https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-2`. The default carries a fixed channel tag that names the job summary and nothing about your repository or run; an untagged link to isokron.ai is given the same tag, and any other URL is used as given. |
 | `results-dir` | `mwsc-results` | Folder the results are written to and the artifact is made from, relative to the workspace. |
 | `artifact-name` | `mcp-writecheck-results` | Name of the artifact. Give each job of a matrix its own. |
 | `max-rss-mb` | | Optional. A memory ceiling in MB (1 MB = 1024 KiB) for the CLI and the processes under it. A peak that reaches it is shown under "Needs attention"; it never changes the job status, and a value that is not a whole number of MB gives a warning and no ceiling. See [Time and memory](#time-and-memory). |
@@ -131,7 +131,7 @@ Otherwise only `violated` records can fail the job:
 
 A requirement counts as a MUST when the spec says MUST or the CLI's record says MUST. At the pinned commit the two agree on all 37 requirements; the rule stays so that a future difference errs on the strict side, and the summary marks any such record.
 
-The CLI's `--baseline` (known violations that do not fail a run) and `--sign` options are not exposed by this draft.
+This action does not pass the CLI's `--baseline` (known violations that do not fail a run), `--sign` or `--sign-key` options, and it does not run `compare` or `verify-results`. Use the CLI directly for those (see its [README](https://github.com/isokron-ai/mcp-write-safety/tree/main/packages/writecheck)). The pinned CLI (0.1.0 plus `stop_sent`) has `--baseline` and `--sign`; signing with a key and `compare` came in later CLI commits, and a different `cli-ref` that uses them is untested here.
 
 ### Time and memory
 
@@ -222,8 +222,8 @@ The skills then load as `mcp-write-safety:mcp-write-safe-builder` and `mcp-write
 
 Apache-2.0; see [`LICENSE`](LICENSE) and [`NOTICE`](NOTICE).
 
-Made by [IsoKron](https://isokron.ai/?utm_source=github&utm_medium=readme&utm_campaign=mcp-writecheck-action).
+Made by [IsoKron](https://isokron.ai/?utm_source=writecheck-action-readme&utm_medium=readme).
 
 ## Tests
 
-[`TESTING.md`](TESTING.md) shows the local test against tiny-tracker, the MWS sample server, and lists what has not been tested. [`RUNNER-TEST.md`](RUNNER-TEST.md) is the plan for the first run on a GitHub runner, which has not happened yet.
+Runs on GitHub-hosted runners: [`test.yml`](.github/workflows/test.yml) runs the unit tests on every push and pull request; [`selftest.yml`](.github/workflows/selftest.yml) runs the action's script against tiny-tracker, the MWS sample server, nightly and on push; the [`dogfood-*.yml`](dogfood/README.md) workflows run the action in modes `plan`, `catalog` and `full`, nightly and on demand, against servers IsoKron builds, with the backend started inside the job. [`TESTING.md`](TESTING.md) shows the local test and lists what has no recorded observation. [`RUNNER-TEST.md`](RUNNER-TEST.md) is the historical plan for the first run on a runner.

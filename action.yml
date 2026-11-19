@@ -16,7 +16,8 @@ inputs:
       test environment is needed. There are no verdicts in this mode.
       catalog: catalog-only verdicts (MWS-ANN-4 per tool) from tools/list or a saved catalog. No
       tool is called and nothing is written; every other requirement is not tested.
-      full: run the checks. This makes real writes to whatever the manifest points at.
+      full: run the checks. This makes thousands of real writes to whatever the manifest points at:
+      use a disposable test backend, and read the plan (mode plan) first.
     required: false
     default: plan
   fail-on:
@@ -52,7 +53,7 @@ inputs:
   spec-url:
     description: Base URL of the public MWS page. Each requirement ID in the summary links to its anchor there.
     required: false
-    default: https://isokron.ai/mws
+    default: https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action
   results-dir:
     description: Folder the results are written to and the artifact is made from.
     required: false

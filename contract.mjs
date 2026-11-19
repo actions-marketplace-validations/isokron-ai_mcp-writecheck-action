@@ -262,7 +262,18 @@ export const REQUIREMENT_ID = /^MWS-[A-Z]+-[0-9]+$/;
 // ---------------------------------------------------------------------------------------------
 
 /** Default of the `spec-url` input. The page does not exist yet (HTTP 404 on 14 Nov 2026; not re-checked). */
-export const SPEC_DEFAULT_URL = 'https://isokron.ai/mws';
+/** The channel tag of links in the job summary (docs/LINK-TAGS.md in the site's repository). */
+export const SPEC_LINK_TAG = 'utm_source=writecheck-action&utm_medium=action';
+export const SPEC_DEFAULT_URL = 'https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action';
+
+function onIsokron(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && u.hostname === 'isokron.ai';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The link for one requirement: the base URL, then the anchor of its heading. The headings in
@@ -270,7 +281,11 @@ export const SPEC_DEFAULT_URL = 'https://isokron.ai/mws';
  * If the published page builds anchors another way, this function is the only thing to change.
  */
 export function requirementUrl(baseUrl, id) {
-  return `${String(baseUrl).replace(/#.*$/, '')}#${id.toLowerCase()}`;
+  let base = String(baseUrl).replace(/#.*$/, '');
+  // A link to isokron.ai without a utm_source (an older workflow's explicit spec-url) gets the
+  // job-summary channel tag; any other URL is used as given. The tag names the surface, never the run.
+  if (onIsokron(base) && !/[?&]utm_source=/.test(base)) base += (base.includes('?') ? '&' : '?') + SPEC_LINK_TAG;
+  return `${base}#${id.toLowerCase()}`;
 }
 
 // ---------------------------------------------------------------------------------------------
