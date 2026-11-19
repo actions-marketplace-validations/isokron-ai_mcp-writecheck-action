@@ -261,16 +261,35 @@ export const REQUIREMENT_ID = /^MWS-[A-Z]+-[0-9]+$/;
 // 4. The public spec page
 // ---------------------------------------------------------------------------------------------
 
-/** Default of the `spec-url` input. The page does not exist yet (HTTP 404 on 14 Nov 2026; not re-checked). */
-export const SPEC_DEFAULT_URL = 'https://isokron.ai/mws';
+/** The channel tag of links in the job summary (docs/LINK-TAGS.md in the site's repository). */
+export const SPEC_LINK_TAG = 'utm_source=writecheck-action&utm_medium=action';
+/** Default of the `spec-url` input: the public MWS page, with the job-summary channel tag. The page answered HTTP 200 on 19 Nov 2026. */
+export const SPEC_DEFAULT_URL = 'https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action';
+
+/**
+ * True for the public spec page itself and nothing else: https, host isokron.ai, path /mws or /mws/, and no query
+ * (a lone trailing "?" counts as none). A URL with any query, in any letter case, or another path is the caller's own.
+ */
+function isUntaggedSpecPage(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === 'https:' && u.hostname === 'isokron.ai' && (u.pathname === '/mws' || u.pathname === '/mws/') && u.search === '';
+  } catch {
+    return false;
+  }
+}
 
 /**
  * The link for one requirement: the base URL, then the anchor of its heading. The headings in
  * spec/mws.md are "#### MWS-UPD-1", whose slug in the usual Markdown renderers is "mws-upd-1".
  * If the published page builds anchors another way, this function is the only thing to change.
+ * The spec page without a query gets the job-summary channel tag (the tag names the surface, never the run);
+ * any other URL is used as given.
  */
 export function requirementUrl(baseUrl, id) {
-  return `${String(baseUrl).replace(/#.*$/, '')}#${id.toLowerCase()}`;
+  let base = String(baseUrl).replace(/#.*$/, '');
+  if (isUntaggedSpecPage(base)) base = base.replace(/\?$/, '') + '?' + SPEC_LINK_TAG;
+  return `${base}#${id.toLowerCase()}`;
 }
 
 // ---------------------------------------------------------------------------------------------
