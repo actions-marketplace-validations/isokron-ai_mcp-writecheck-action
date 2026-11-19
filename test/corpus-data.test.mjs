@@ -17,7 +17,7 @@ import { sha256Jcs } from '../corpus/jcs.mjs';
 import {
   boundAnnotations, checkDropped, checkFull, checkSetupExec, checkShardBudget, checkSnapshot, checkTargetSnapshot, CLEAN_COPY, listCaptures, configSourceMeta, entryBin, envVersions, GRANDFATHERED_IDS, HarnessError, imageParts, LABEL,
   MAX_FULL_TIMEOUT_S, MAX_REPEATS, MAX_TIMEOUT_S, readRunFields, RESTORE_WORK, sandboxRunArgs, SHARD_BUDGET_S, surfaceDoc, surfaceMeta, TARGETS_FORMAT, timeLimits, validateList,
-  validateTarget, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME, Scrubber,
+  validateTarget, checkRuntimeName, targetRuntime, VERSION_PROBE, checkId, RESERVED_ID, volatileCaptures, redactArgv, SECRET_ENV_NAME, Scrubber,
 } from '../corpus/run-shard.mjs';
 import { EVIDENCE_PATH, listTree, listingHash, moveEvidence } from '../corpus/sandbox/evidence.mjs';
 import { acceptValue, errorText, flagSecrets, isSecretName, LineScrubber, scrubFreeText, scrubStrings } from '../corpus/scrub.mjs';
@@ -1342,4 +1342,28 @@ test('scrub (6/7): errors are scrubbed; Authorization in any case; LineScrubber 
     assert.ok(Date.now() - t0 < 3000, `${JSON.stringify(unit)}: ${Date.now() - t0} ms`);
     assert.ok(bytes > 0);
   }
+});
+
+test('Per-target runtime: a name from images.json runtimes, checked at load and resolved to a pinned digest', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const images = JSON.parse(readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'corpus', 'images.json'), 'utf8'));
+  // The shipped images.json: node24 is pinned, and the default stays the default.
+  assert.match(images.runtimes.node24, /^docker\.io\/library\/node:24-bookworm-slim@sha256:[0-9a-f]{64}$/);
+  assert.equal(targetRuntime({ id: 't01' }, images), images.runtime);
+  assert.equal(targetRuntime({ id: 't01', runtime: 'node24' }, images), images.runtimes.node24);
+  assert.doesNotThrow(() => validateTarget({ id: 't01', runtime: 'node24' }));
+  for (const bad of ['', 'Node24', 'node 24', '24', 'n'.repeat(33), 7, null, ['node24'], { name: 'node24' }, 'docker.io/library/node:24@sha256:' + 'a'.repeat(64)]) {
+    assert.throws(() => checkRuntimeName(bad), HarnessError, JSON.stringify(bad));
+    assert.throws(() => validateTarget({ id: 't01', runtime: bad }), /runtime must be/, JSON.stringify(bad));
+  }
+  // A well-formed name that images.json does not have, or an unpinned entry, refuses the target when it starts.
+  assert.throws(() => targetRuntime({ id: 't01', runtime: 'node99' }, images), /not in images\.json runtimes/);
+  assert.throws(() => targetRuntime({ id: 't01', runtime: 'node24' }, { runtime: images.runtime }), /not in images\.json runtimes/);
+  assert.throws(() => targetRuntime({ id: 't01', runtime: 'node24' }, { runtime: images.runtime, runtimes: { node24: 'node:24' } }), /pinned by digest/);
+  assert.throws(() => targetRuntime({ id: 't01', runtime: 'constructor' }, { runtime: images.runtime, runtimes: {} }), /not in images\.json runtimes/);
+  // In the list: a bad name refuses that target only.
+  const { invalid } = validateList({ format: TARGETS_FORMAT, targets: [{ id: 't01', runtime: 'node24' }, { id: 't02', runtime: 'Bad' }] });
+  assert.deepEqual([...invalid.keys()], ['t02']);
 });
