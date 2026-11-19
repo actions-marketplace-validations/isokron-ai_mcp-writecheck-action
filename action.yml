@@ -16,8 +16,8 @@ inputs:
       test environment is needed. There are no verdicts in this mode.
       catalog: catalog-only verdicts (MWS-ANN-4 per tool) from tools/list or a saved catalog. No
       tool is called and nothing is written; every other requirement is not tested.
-      full: run the checks. This makes thousands of real writes to whatever the manifest points at:
-      use a disposable test backend, and read the plan (mode plan) first.
+      full: run the checks. This makes real writes to whatever the manifest points at, up to about 1,800 for the
+      sample server (default budget 20,000): use a disposable test backend, and read the plan (mode plan) first.
     required: false
     default: plan
   fail-on:

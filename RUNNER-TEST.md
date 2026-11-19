@@ -1,6 +1,6 @@
 # The first run on a GitHub runner: plan (historical)
 
-> **History note (16 November 2026).** The action is now pinned to commit `7b95215` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
+> **History note (16 November 2026).** The action is now pinned to commit `3af41c6` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
 
 **Status (19 November 2026): historical.** This was the plan for the first run on a GitHub-hosted runner. The action now runs on them: `test.yml` (unit tests on every push and pull request), `selftest.yml` (the local test against tiny-tracker, nightly and on push), the `dogfood-*.yml` workflows (nightly and on demand: modes `plan`, `catalog` and `full` against servers IsoKron builds, with a backend started inside the job) and `corpus.yml` (on demand). The blockers listed in the first version of this file are gone: `isokron-ai/mcp-write-safety` is public, so no token is needed, and the action has its own public repository, `isokron-ai/mcp-writecheck-action`. The secret and test-repository sections below are kept as a record of the plan and are not needed to run the action. What a runner showed, and what still has no recorded observation, is in `TESTING.md`, "What has not been tested".
 
@@ -325,22 +325,10 @@ Round 2, with the hash read from round 1. Each item closes one entry of "What ha
 | `catalog` mode | `catalog` job | correct build 0; `missing-annotations` 1 with CLI exit 0 |
 | Environment variables reach the composite action and the server | `full` and `catalog` | `TRACKER_DEFECTS` set on the step changes the verdicts; `TRACKER_BACKEND_URL` and the token set on the job reach tiny-tracker (it starts) |
 | The plan hash is the same in the plan job and the full jobs | `plan` summary against the `full` summaries' "Plan hash" row | Equal |
-| The rendered job summary | each job's summary page | Tables render; `<details>` folds open; `<br>` separates write paths; links point to `https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-…`; no raw Markdown escapes visible in a normal cell |
+| The rendered job summary | each job's summary page | Tables render; `<details>` folds open; `<br>` separates write paths; links point to `https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-…`; no raw Markdown escapes visible in a normal cell |
 | Workflow commands | logs | `::error::` lines appear as annotations on the run; nothing the CLI prints between `::stop-commands::` and its end token is interpreted (the CLI's output appears as plain text inside the folded group) |
 | The artifact upload, also after a failure | artifacts of the run | One artifact per step (`plan`, `catalog-correct`, `catalog-missing-annotations`, `full-<case>`, `full-cancelled`); a failed case still has its artifact |
 | Cancellation | `cancelled` job | The action step ends as timed out; its log shows the CLI's "SIGTERM: stopping; cleaning up" line (if the runner sends SIGTERM rather than SIGKILL); the last step lists `mwsc-results/state/<run id>/`. Whether the artifact `full-cancelled` exists answers the open question in the job's comment; if it does not, the action needs its upload outside the composite, or the README must tell users to add one. Also record whether the CLI's clean-up finished: the runner's cancel sequence (SIGINT, then SIGTERM some seconds later, then a kill) can be shorter than the CLI's clean-up grace, and a second signal makes the CLI exit without cleaning up. Look for the CLI's clean-up lines and for an open ledger in `state/` |
 | Node | log | The action's Node check passes on `ubuntu-latest` with `setup-node` 22 |
 
 Then variant B: the same with `uses: isokron-ai/mcp-writecheck-action@<sha>`, which adds one check: the runner resolves a public action by SHA.
-
-## What Joshua or the coordinator does
-
-1. Create the fine-grained token above and add it to the test repository as `MWS_CLI_TOKEN`.
-2. Create the private test repository with the layout above (variant A: copy `action.yml`, `contract.mjs` and `src/` from the root of this repository).
-3. Check the organization's Actions policy allows the actions used (`actions/checkout`, `actions/setup-node`, `actions/upload-artifact`, and for variant B `isokron-ai/mcp-writecheck-action`).
-4. Start round 1 from the Actions tab. Read the plan in the `plan` job's summary. Start round 2 with the hash.
-5. Download the artifacts, and keep the run's URL. Compare each row of the table above, and record the outcome in `TESTING.md` under a new heading "On a GitHub runner".
-6. After the action's own repository exists: variant B.
-7. Delete the test repository and revoke the token when done.
-
-Agents in this lane do not do any of these steps.

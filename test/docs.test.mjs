@@ -72,11 +72,13 @@ test('README: the three modes and the fail-on values are the ones action.yml doc
 });
 
 test('README: the warning that mode full makes real writes comes before "What it does"', () => {
-  const w = readme.indexOf('**Mode `full` makes thousands of real writes.**');
+  const w = readme.indexOf('**Mode `full` makes real writes.**');
   assert.ok(w > 0 && w < readme.indexOf('## What it does'));
   const para = readme.slice(w, readme.indexOf('## What it does'));
   for (const s of ['disposable backend', '`confirm-target`', '`plan-hash`', 'selector.send_empty_forms', 'writes nothing']) assert.ok(para.includes(s), s);
-  assert.match(inputs.mode.text, /thousands of real writes/);
+  assert.match(inputs.mode.text, /up to about 1,800 for the\s+sample server \(default budget 20,000\)/);
+  assert.ok(para.includes('up to about 1,800 real writes for the sample server'));
+  assert.doesNotMatch(readme + action, /thousands of real writes/);
 });
 
 test('README: what the action says it does not pass to the CLI, the code does not pass', () => {
@@ -86,14 +88,14 @@ test('README: what the action says it does not pass to the CLI, the code does no
   }
 });
 
-test('docs: no "certified", no "seal", no Strapi in the public Markdown', () => {
+test('docs: no "certified", no "seal" and no plugin platform name in the public Markdown', () => {
   const files = ['README.md', 'TESTING.md', 'NOTES.md', 'RUNNER-TEST.md', 'SECURITY.md', 'dogfood/README.md', 'plugin/README.md', 'corpus/README.md'];
   for (const d of ['skills', 'plugin/skills']) for (const s of readdirSync(root + d)) files.push(`${d}/${s}/SKILL.md`);
   for (const f of files) {
     const t = read(f);
     assert.doesNotMatch(t, /\bcertif(?:ied|ication|y)\b/i, f);
     assert.doesNotMatch(t, /\bseal\b/i, f);
-    assert.doesNotMatch(t, /strapi/i, f);
+    assert.doesNotMatch(t, new RegExp(['stra', 'pi'].join(''), 'i'), f);
   }
 });
 

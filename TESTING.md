@@ -1,6 +1,6 @@
 # Testing
 
-> **History note (16 November 2026).** The action is now pinned to commit `7b95215` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
+> **History note (16 November 2026).** The action is now pinned to commit `3af41c6` of the public `isokron-ai/mcp-write-safety` (MWS 0.9, `mcp-writecheck` 0.1.0), which needs no token. Commit SHAs below from before that date (`17851d7`, `0295ed6`, `f573a24`, `15f71e5` and the others) refer to the private pre-publication history of the spec and the CLI and do not resolve publicly; `MWS_CLI_TOKEN` and `cli-token` are no longer needed.
 
 This file records the local test of the action's script logic and says what has not been tested. Since 16 November 2026 the action also runs on GitHub-hosted runners (`selftest.yml`, the `dogfood-*.yml` workflows, `test.yml`); `RUNNER-TEST.md` is the historical plan for the first such run.
 
@@ -73,53 +73,53 @@ full, no confirm-target            job status 1 (want 1)   cli exit none (want n
    plan hash ce76d1cd4c55d4f5
 full, fail-on must                 job status 1 (want 1)   cli exit 1 (want 1)   ok
    **Job status: failed.** `fail-on` is `must`, and a record of a MUST is `violated`.
-   - [MWS-CONC-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-2) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**, attribution: server
-   - [MWS-CONC-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-1) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**
-   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `barrier-pairs v1`: **violated (MUST)**, attribution: unresolved
-   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `held-request v1`: **violated (MUST)**, attribution: server
+   - [MWS-CONC-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-2) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**, attribution: server
+   - [MWS-CONC-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-1) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**
+   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `barrier-pairs v1`: **violated (MUST)**, attribution: unresolved
+   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `held-request v1`: **violated (MUST)**, attribution: server
 full, fail-on none                 job status 0 (want 0)   cli exit 1 (want 1)   ok
    **Job status: not failed.** `fail-on` is `none`, so no verdict fails this job.
-   - [MWS-CONC-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-2) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**, attribution: server
-   - [MWS-CONC-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-1) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**
-   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `barrier-pairs v1`: **violated (MUST)**, attribution: unresolved
-   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `held-request v1`: **violated (MUST)**, attribution: server
+   - [MWS-CONC-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-2) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**, attribution: server
+   - [MWS-CONC-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-1) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**
+   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `barrier-pairs v1`: **violated (MUST)**, attribution: unresolved
+   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `held-request v1`: **violated (MUST)**, attribution: server
 full, fail-on any                  job status 1 (want 1)   cli exit 1 (want 1)   ok
    **Job status: failed.** `fail-on` is `any`, and a record is `violated`.
-   - [MWS-CONC-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-2) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**, attribution: server
-   - [MWS-CONC-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-1) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**
-   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `barrier-pairs v1`: **violated (MUST)**, attribution: unresolved
-   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `held-request v1`: **violated (MUST)**, attribution: server
+   - [MWS-CONC-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-2) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**, attribution: server
+   - [MWS-CONC-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-1) on `ticket-replace:replace_ticket`, scenario `stale-write v3`: **violated (MUST)**
+   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `barrier-pairs v1`: **violated (MUST)**, attribution: unresolved
+   - [MWS-CONC-3](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-conc-3) on `ticket-replace:replace_ticket`, scenario `held-request v1`: **violated (MUST)**, attribution: server
 == defect no-idempotency-key
    plan hash 4b3ae351dc81496f
 full, fail-on must                 job status 0 (want 0)   cli exit 0 (want 0)   ok
    **Job status: not failed.** `fail-on` is `must`, and no record of a MUST is `violated`.
-   - [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-retry-1) on `ticket:add_comment`, scenario `creates v1`: **violated (SHOULD)**
+   - [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-retry-1) on `ticket:add_comment`, scenario `creates v1`: **violated (SHOULD)**
 full, fail-on any                  job status 1 (want 1)   cli exit 0 (want 0)   ok
    **Job status: failed.** `fail-on` is `any`, and a record is `violated`.
-   - [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-retry-1) on `ticket:add_comment`, scenario `creates v1`: **violated (SHOULD)**
+   - [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-retry-1) on `ticket:add_comment`, scenario `creates v1`: **violated (SHOULD)**
 == defect empty-filter-deletes-all
    plan hash ce76d1cd4c55d4f5
 full, fail-on none                 job status 0 (want 0)   cli exit 1 (want 1)   ok
    **Job status: not failed.** `fail-on` is `none`, so no verdict fails this job.
-   - [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-tgt-2) on `ticket:delete_tickets`, scenario `targeting v1`: **violated (MUST)**
+   - [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-tgt-2) on `ticket:delete_tickets`, scenario `targeting v1`: **violated (MUST)**
 full, fail-on must                 job status 1 (want 1)   cli exit 1 (want 1)   ok
    **Job status: failed.** `fail-on` is `must`, and a record of a MUST is `violated`.
-   - [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-tgt-2) on `ticket:delete_tickets`, scenario `targeting v1`: **violated (MUST)**
+   - [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-tgt-2) on `ticket:delete_tickets`, scenario `targeting v1`: **violated (MUST)**
 == defect missing-annotations, catalog mode
 catalog, fail-on must              job status 0 (want 0)   cli exit 0 (want 0)   ok
    **Job status: not failed.** `fail-on` is `must`, and no record of a MUST is `violated`.
-   - [MWS-ANN-4](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-ann-4) on `(catalog):remove_label`, scenario `catalog v1`: **violated (SHOULD)**
+   - [MWS-ANN-4](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-ann-4) on `(catalog):remove_label`, scenario `catalog v1`: **violated (SHOULD)**
 catalog, fail-on any               job status 1 (want 1)   cli exit 0 (want 0)   ok
    **Job status: failed.** `fail-on` is `any`, and a record is `violated`.
-   - [MWS-ANN-4](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-ann-4) on `(catalog):remove_label`, scenario `catalog v1`: **violated (SHOULD)**
+   - [MWS-ANN-4](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-ann-4) on `(catalog):remove_label`, scenario `catalog v1`: **violated (SHOULD)**
 == a run that lost objects it did not create (the CLI's regression server, case S1)
 plan                               job status 0 (want 0)   cli exit 0 (want 0)   ok
 full, fail-on none                 job status 1 (want 1)   cli exit 1 (want 1)   ok
    **Job status: failed.** Objects the tester did not create were changed or deleted during the run. A lost bystander fails the job whatever `fail-on` says.
    ### Objects the tester did not create were changed or deleted
    - `MWS-TGT-2` on `ticket:tickets_delete` (violated): `"inbox"/"B1"`, `"inbox"/"B2"`
-   - [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-tgt-2) on `ticket:tickets_delete`, scenario `targeting v1`: **violated (MUST)**
-   - [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-retry-1) on `ticket:ticket_create`, scenario `creates v1`: **violated (SHOULD)**
+   - [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-tgt-2) on `ticket:tickets_delete`, scenario `targeting v1`: **violated (MUST)**
+   - [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-retry-1) on `ticket:ticket_create`, scenario `creates v1`: **violated (SHOULD)**
    ground truth from the fixture's backend: {"seeded":["B1","B2"],"left":[]}
 == a run that stopped before it finished (write budget 40)
 full, fail-on none                 job status 1 (want 1)   cli exit 4 (want 4)   ok
@@ -172,8 +172,8 @@ The tester lists every object it can list outside its own before and after each 
 
 ### Violated records
 
-- [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-tgt-2) on `ticket:tickets_delete`, scenario `targeting v1`: **violated (MUST)**. The call removed objects the tester did not create ("inbox"/"B1", "inbox"/"B2"), outside what it named. No declared selector form (omitted) without the opt-in removed anything in the tester's container (3 of 3 left each time). _omitted: success, 3 of 3 left Only the forms the declaration names were tried; empty, match-all, container path of the spec's forms were not declared. Objects the tester did not create were changed or deleted around this test's calls: gone: "inbox"/…
-- [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme#mws-retry-1) on `ticket:ticket_create`, scenario `creates v1`: **violated (SHOULD)**. Two identical calls made two objects, and the declaration names no idempotency key for ticket\_create.
+- [MWS-TGT-2](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-tgt-2) on `ticket:tickets_delete`, scenario `targeting v1`: **violated (MUST)**. The call removed objects the tester did not create ("inbox"/"B1", "inbox"/"B2"), outside what it named. No declared selector form (omitted) without the opt-in removed anything in the tester's container (3 of 3 left each time). _omitted: success, 3 of 3 left Only the forms the declaration names were tried; empty, match-all, container path of the spec's forms were not declared. Objects the tester did not create were changed or deleted around this test's calls: gone: "inbox"/…
+- [MWS-RETRY-1](https://isokron.ai/mws?utm_source=writecheck-action&utm_medium=action#mws-retry-1) on `ticket:ticket_create`, scenario `creates v1`: **violated (SHOULD)**. Two identical calls made two objects, and the declaration names no idempotency key for ticket\_create.
 ````
 
 Its outputs:
@@ -218,13 +218,13 @@ The list below is from the local test. Since then the action has run on GitHub-h
 - **The artifact upload.** `actions/upload-artifact` is pinned to the commit of v7.0.2 and its inputs were read from that commit's `action.yml`. It has not been called. Untested with it: `if: always()` inside a composite action, the upload after a failed or cancelled run, and what the upload does when the folder is missing.
 - **The rendered job summary.** The Markdown was read as text. How GitHub renders the tables, the `<details>` block and the `<br>` separators, and the size limit of a step summary, were not observed.
 - **Workflow commands.** The `::error::` and `::warning::` lines, and the `::stop-commands::` bracket around the CLI's output, were printed in one case (`GITHUB_ACTIONS=true`) and read. A runner has not interpreted them.
-- **Fetching the CLI from GitHub.** The fetch-and-build path ran against a local clone. Not run: a fetch over HTTPS, the `cli-token` header for the private repository (needed until the CLI is on npm or the repository is public), and a fetch on a runner's git version.
+- **Fetching the CLI from GitHub.** The local test ran the fetch-and-build path against a local clone. On runners it has since run over HTTPS from the public repository, with no token, in every dogfood and selftest run; a fetch on a runner's git version other than the current ubuntu-latest one has not been observed.
 - **Environment variables.** The test set the server's variables in the script's own environment. That variables set on the job or on the `uses:` step reach a composite action's steps the same way is expected and unverified.
 - **The example workflow** (`examples/mcp-writecheck.yml`). It parses as YAML. It was not run. Since the review it passes `actionlint` (1.7, macOS) with no finding.
 - **Cancellation on a runner.** Locally the script passed SIGTERM on and the state folder was kept. Whether a runner sends SIGTERM or SIGKILL to a cancelled composite step, and whether the upload step inside the composite action still runs, are untested (`RUNNER-TEST.md`, job `cancelled`).
 - **A changed canary, an unrestored fixture, and `safety.setup_unresolved`.** Covered by unit tests on made-up results only (the last in the shape of the CLI's series A). A stopped run, leftovers, an unfinished clean-up and a lost bystander were produced for real (above).
-- **Servers other than tiny-tracker.** A stdio server, a server reached by URL, a real backend, and a catalog large enough to approach the summary's size limit.
-- **The spec links.** `https://isokron.ai/mws?utm_source=writecheck-action-readme&utm_medium=readme` answered 404 on the day of the test, so no link in a summary was followed. It answered HTTP 200 on 19 November 2026; the anchors have not been followed.
+- **Servers other than tiny-tracker, locally.** The local test used tiny-tracker only. The dogfood workflows have since run the action against other servers IsoKron builds, with their backends started inside the job. Not observed: a server reached by a URL that someone else started, a hosted backend, and a catalog large enough to approach the summary's size limit.
+- **The spec links.** `https://isokron.ai/mws` answered 404 on the day of the test, so no link in a summary was followed. It answered HTTP 200 on 19 November 2026; the anchors have not been followed.
 - **Other platforms.** macOS and Windows runners, and Node versions other than 22.23.
 - **A bystander loss from a published server.** The case above uses the CLI's own regression server; tiny-tracker has no defect that loses a bystander (NOTES.md, CLI problem 13).
 

@@ -20,7 +20,7 @@ it (`plan-hashes`, `job=hash` pairs).
 Rules every dogfood workflow follows:
 
 - Triggers: `workflow_dispatch`, a nightly `schedule`, and `pull_request` and `push` to `main` on
-  each workflow's own paths (writesafe: dispatch only, see below). Never `pull_request_target`. A pull request from a fork
+  each workflow's own paths (writesafe: nightly and on demand only, see below). Never `pull_request_target`. A pull request from a fork
   runs no job (each job's `if:` checks that the head is this repository). Standard GitHub-hosted
   runners only, never self-hosted.
 - `permissions: contents: read`; third-party actions pinned by full commit SHA; `timeout-minutes`
@@ -29,7 +29,7 @@ Rules every dogfood workflow follows:
   checkout or fetch needs a token. Workflows that install or start third-party code (a server's npm
   or Go tree) check the CLI out in one step that runs first, build it there (`dogfood/cli-ref.sh`,
   `dogfood/build-cli.sh`) and give the action `cli-path`. writesafe, whose server installs an
-  unlocked dependency tree, still runs on dispatch only. Every backend credential is generated
+  unlocked dependency tree, runs nightly and on demand only (no pull_request or push trigger). Every backend credential is generated
   inside the job, checked and masked.
 - Full mode only against a backend started inside the job. The plan hash is pinned in the workflow
   after a person has read the plan; when the plan changes, the full run is refused and the
