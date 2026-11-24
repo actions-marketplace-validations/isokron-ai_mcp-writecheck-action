@@ -90,3 +90,5 @@ The guard job runs first, before any checkout but its own file: `LOOP_ENABLED` m
 | `loop/check-bundles.mjs` | The pull-request proof's judge |
 | `loop/fixtures.json` | Our fixture servers: package and version, which dogfood manifest they run, and the plan hash accepted for it |
 | `loop/sandbox/` | Our code inside the sandbox: the forgery server, the output collector, the backend starter |
+
+What went wrong while building this lane, and the test that pins each fix, is in `REGRESSIONS.md` (`R-WC-*`).
