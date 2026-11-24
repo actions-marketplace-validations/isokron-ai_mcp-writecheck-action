@@ -50,10 +50,10 @@ for (const [name, text] of [['corpus.yml', worker], ['loop-fixture.yml', fixture
     const kit = b.match(/isokron-ai\/tool-qa\/worker-kit@([0-9a-f]{40})/g);
     const pin = /WORKER_KIT_REF: '([0-9a-f]{40})'/.exec(b)[1];
     for (const k of kit) assert.ok(k.endsWith(pin), 'every worker-kit step names WORKER_KIT_REF');
-    // R-WC-06, R-WC-09: the sandbox at 066c15d (native builds from source; the guard tests the install network), the
+    // R-WC-06, R-WC-09: the sandbox at 4c16b58 (capped volumes, data-root and logs; native builds from source; the guard tests the install network), the
     // conformance workflow and the guard both at it.
     const sbx = /SANDBOX_REF: '([0-9a-f]{40})'/.exec(b)[1];
-    assert.equal(sbx, '066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5');
+    assert.equal(sbx, '4c16b586e8e5886acb098285b6ec405fd4db4ac7');
     assert.match(b, new RegExp(`\\n {4}uses: isokron-ai/mcp-surface-corpus/\\.github/workflows/sandbox-conformance\\.yml@${sbx} `));
     assert.match(b, new RegExp(`uses: isokron-ai/mcp-surface-corpus/sandbox-guard@${sbx} `));
     assert.match(b, /needs\.conformance\.outputs\.verdict == 'pass'/);
