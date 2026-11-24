@@ -58,9 +58,10 @@ env:
   # test/loop-workflow.test.mjs checks), and the seed the subjects are mapped with.
   WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
   SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  # isokron-ai/mcp-surface-corpus main at 73a2669 (pull request 8: native npm modules built from source in the
-  # node*-build images; pull request 7 before it: the sandbox guard action, the reusable conformance workflow). The conformance job and the sandbox-guard step name this same commit.
-  SANDBOX_REF: '73a2669ca3d571bc50c5deab1cd171bc4a70ddda'
+  # isokron-ai/mcp-surface-corpus main at 066c15d (pull requests 9 and 10: the guard's install-network hostile cases
+  # and the proxy positive control, which this lane's npm installs with scripts need; 8: native npm modules built from
+  # source in the node*-build images; 7: the sandbox guard action, the reusable conformance workflow). The conformance job and the sandbox-guard step name this same commit.
+  SANDBOX_REF: '066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5'
 
 jobs:
   guard:
@@ -103,7 +104,7 @@ jobs:
     if: needs.guard.outputs.proceed == 'true'
     permissions:
       contents: read
-    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@73a2669ca3d571bc50c5deab1cd171bc4a70ddda # SANDBOX_REF
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5 # SANDBOX_REF
     with:
       mutations: false
       artifact-prefix: writecheck-conformance
@@ -152,7 +153,7 @@ jobs:
       # unless the telemetry check recomputes a pass.
       - id: sandbox
         name: Sandbox guard (gVisor, firewall, self test)
-        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@73a2669ca3d571bc50c5deab1cd171bc4a70ddda # SANDBOX_REF
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5 # SANDBOX_REF
       - name: The guard ran the pinned sandbox and passed
         env:
           VERDICT: ${{ steps.sandbox.outputs.verdict }}
