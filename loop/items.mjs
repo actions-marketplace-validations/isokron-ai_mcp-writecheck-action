@@ -67,6 +67,9 @@ export function loadSeed(file) {
 
 const FIXTURE_FORMAT = 'isokron-writecheck-fixtures/1';
 const HEX16 = /^[0-9a-f]{16}$/;
+/** Where a fixture's manifest is written (two levels below /work, so a dogfood manifest's ../../<dir> cwd lands in /work). */
+export const FIXTURE_MANIFEST = '/work/m/x/writecheck.yaml';
+const LINK_RE = /^\/work\/(?!(?:out|pkg|home|lock|venv|bin|m)(?:\/|$))[a-z0-9_-]{1,40}(?:\/[a-z0-9_-]{1,40}){0,4}$/;
 const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 /** loop/fixtures.json, checked. */
@@ -84,7 +87,8 @@ export function validateFixtures(doc) {
     if (typeof f.subject !== 'string' || !SUBJECT_RE.test(f.subject)) throw new Error(`fixtures.${name}.subject must be owner/name`);
     const l = f.launch;
     if (!l || l.kind !== 'npm' || !NPM_NAME.test(l.package ?? '') || !/^\d+\.\d+\.\d+$/.test(l.version ?? '')) throw new Error(`fixtures.${name}.launch must be an npm package at an exact version`);
-    if (f.manifest !== undefined && !/^[a-z0-9-]{1,40}\.yaml$/.test(f.manifest)) throw new Error(`fixtures.${name}.manifest must name a file in loop/fixtures/`);
+    if (f.manifest !== undefined && !/^dogfood\/[a-z0-9-]{1,40}\/writecheck\.yaml$/.test(f.manifest)) throw new Error(`fixtures.${name}.manifest must name a dogfood manifest (dogfood/<name>/writecheck.yaml)`);
+    if (f.manifest !== undefined && !LINK_RE.test(f.link ?? '')) throw new Error(`fixtures.${name}.link must be a path under /work outside the driver's own folders`);
     for (const k of Object.keys(f.env ?? {})) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.env: bad name ${k}`);
     for (const k of f.random_env ?? []) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.random_env: bad name ${k}`);
     if (f.full !== undefined) {
@@ -160,12 +164,4 @@ export function catalogManifest(command, envNames, confirm) {
     '    cleanup: leave',
     '',
   ].join('\n');
-}
-
-/** A fixture manifest template with the driver's own names filled ({{pkgdir}}); every other {{...}} is the CLI's. */
-export function fillFixtureManifest(text, vars) {
-  return text.replace(/\{\{(pkgdir)\}\}/g, (_, k) => {
-    if (typeof vars[k] !== 'string' || !/^\/[A-Za-z0-9@._/-]{1,300}$/.test(vars[k])) throw new Error(`fixture manifest: ${k} is not set`);
-    return vars[k];
-  });
 }

@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { InputError, catalogManifest, fillFixtureManifest, loadFixtures, parseItems, resolveSubject, seedPackages, validateFixtures } from '../loop/items.mjs';
+import { FIXTURE_MANIFEST, InputError, catalogManifest, loadFixtures, parseItems, resolveSubject, seedPackages, validateFixtures } from '../loop/items.mjs';
 import { findRunFolder, observations, planHash, publicSummary, readCatalog, readResults, summarize, ndjson } from '../loop/summary.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, hasIdentityKeys, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from '../loop/bundle.mjs';
 import { evaluateGuard, laneVariable, main as guardMain, refProblem } from '../loop/guard.mjs';
@@ -77,20 +77,23 @@ test('subjects: fixtures first, then the seed (npm before PyPI), else a skip wit
   for (const c of ['no_runnable_artifact', 'unsupported_transport', 'policy_excluded', 'install_failed_registry', 'timeout_start', 'trace_unavailable', 'upstream_unavailable']) assert.ok(SKIP_REASONS.includes(c), c);
 });
 
-test('fixtures: valid, manifests in place, and the same as the dogfood manifests whose plan hashes they reuse', () => {
+test('R-WC-03: fixtures: valid; each runs its dogfood manifest byte for byte, under the plan hash accepted there', () => {
   const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
   assert.throws(() => validateFixtures({ format: 'x' }));
   assert.throws(() => validateFixtures({ format: 'isokron-writecheck-fixtures/1', fixtures: { a: { subject: 'a/b', launch: { kind: 'npm', package: 'x', version: 'latest' } } } }));
-  for (const [name, dog] of [['tiny-tracker', 'dogfood/tiny-tracker/writecheck.yaml'], ['kronicle-lite', 'dogfood/kronicle-lite/writecheck.yaml']]) {
-    const mine = readFileSync(join(root, 'loop', 'fixtures', f.fixtures[name].manifest), 'utf8');
-    const strip = (t) => t.split('\n').filter((l) => !/^#/.test(l) && !/^ {2}cwd: /.test(l)).join('\n');
-    assert.equal(strip(mine), strip(readFileSync(join(root, dog), 'utf8')), name);
-    assert.match(fillFixtureManifest(mine, { pkgdir: '/work/pkg/node_modules/x' }), /^ {2}cwd: "\/work\/pkg\/node_modules\/x"$/m);
-    // The accepted hash is the one the dogfood workflow accepts for the same version and manifest.
-    const wf = readFileSync(join(root, '.github', 'workflows', `dogfood-${name}.yml`), 'utf8');
-    assert.ok(wf.includes(f.fixtures[name].full.plan_hash), `${name} plan hash`);
+  const base = { subject: 'a/b', launch: { kind: 'npm', package: 'x', version: '1.0.0' }, manifest: 'dogfood/x/writecheck.yaml' };
+  for (const link of ['/work/out/x', '/work/pkg', '/work/m/x', '/etc/x', '/work/../x', 'work/x']) {
+    assert.throws(() => validateFixtures({ format: 'isokron-writecheck-fixtures/1', fixtures: { a: { ...base, link } } }), undefined, link);
   }
-  assert.throws(() => fillFixtureManifest('cwd: "{{pkgdir}}"', { pkgdir: 'relative; x' }));
+  for (const [name, dog] of [['tiny-tracker', 'dogfood/tiny-tracker/writecheck.yaml'], ['kronicle-lite', 'dogfood/kronicle-lite/writecheck.yaml']]) {
+    const fx1 = f.fixtures[name];
+    assert.equal(fx1.manifest, dog);
+    // The manifest's relative cwd, taken from where the driver writes it, is the link to the installed package.
+    const cwd = /^ {2}cwd: (\S+)/m.exec(readFileSync(join(root, dog), 'utf8'))[1];
+    assert.equal(join(dirname(FIXTURE_MANIFEST), cwd), fx1.link, name);
+    const wf = readFileSync(join(root, '.github', 'workflows', `dogfood-${name}.yml`), 'utf8');
+    assert.ok(wf.includes(`PLAN_HASH: ${fx1.full.plan_hash}`), `${name}: the plan hash the dogfood workflow accepts`);
+  }
 });
 
 test('the generic catalog manifest quotes every word and passes only the names it is given', () => {

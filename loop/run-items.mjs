@@ -38,7 +38,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { lookup } from 'node:dns/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { InputError, catalogManifest, checkId, fillFixtureManifest, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
+import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
 import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
 
@@ -352,7 +352,7 @@ class Shard {
 
   /**
    * One unit (an item or a control) end to end. Returns { steps, install, files, planStdout, fullRan, missing, error }.
-   * `u`: { tag, launch | null, forgery?, fixture?, env, init, manifestText?(vars), background?, setup?, full?, installHosts? }
+   * `u`: { tag, launch | null, forgery?, fixture?, env, init, manifestFile?, link?, background?, setup?, full?, installHosts? }
    */
   async runUnit(u, unitDeadline) {
     const M = this.M;
@@ -381,8 +381,15 @@ class Shard {
         u.entry = entry;
       }
       const passEnv = Object.keys(u.env ?? {}).sort();
-      const text = u.manifestText ? u.manifestText({ pkgdir }) : catalogManifest(serverCmd, passEnv, `loop-${u.tag}`);
-      await this.put(u.tag, work, MANIFEST, text);
+      // A fixture runs its dogfood manifest byte for byte (its plan hash is the one a person accepted there): written
+      // two levels below /work, with its relative cwd made to land on the installed package by a link.
+      const manifest = u.manifestFile ? FIXTURE_MANIFEST : MANIFEST;
+      if (u.manifestFile) {
+        if (!pkgdir) throw new M.HarnessError('a fixture manifest needs an npm package');
+        await this.dk.must(this.helper(u.tag, { mounts: [{ src: work, dst: '/work' }], cmd: ['sh', '-c', 'mkdir -p "$(dirname "$1")" "$(dirname "$3")" && ln -s "$2" "$1"', 'sh', u.link, pkgdir, FIXTURE_MANIFEST] }), 'fixture link');
+      }
+      const text = u.manifestFile ? readFileSync(u.manifestFile, 'utf8') : catalogManifest(serverCmd, passEnv, `loop-${u.tag}`);
+      await this.put(u.tag, work, manifest, text);
       const env = runEnv({ ...(u.env ?? {}) });
       const bg = u.background && u.entry ? { argv: ['node', u.entry.script, ...u.background.args], log: `${OUTD}/backend.log`, ready: u.background.ready, wait_ms: 15_000 } : null;
       const cli = (args) => (bg ? [NODE, `${LOOP}/bg.mjs`, JSON.stringify(bg), '--', NODE, CLI_MAIN, ...args] : [NODE, CLI_MAIN, ...args]);
@@ -394,14 +401,14 @@ class Shard {
           if (s.exit !== 0) return;
         }
         if (u.init !== false) await step({ step: 'init', cmd: [NODE, CLI_MAIN, 'init', '--out', `${OUTD}/init-draft.yaml`, ...passEnv.flatMap((k) => ['--env', k]), '--', ...serverCmd], timeoutMs: left(MS.step) });
-        const p = await step({ step: 'plan', cmd: cli(['plan', '-m', MANIFEST]), timeoutMs: left(MS.step), keepStdout: true });
+        const p = await step({ step: 'plan', cmd: cli(['plan', '-m', manifest]), timeoutMs: left(MS.step), keepStdout: true });
         res.planStdout = p.r.stdout.toString('utf8');
-        await step({ step: 'catalog', cmd: cli(['catalog', '-m', MANIFEST, '--out', `${OUTD}/results`]), timeoutMs: left(MS.step) });
+        await step({ step: 'catalog', cmd: cli(['catalog', '-m', manifest, '--out', `${OUTD}/results`]), timeoutMs: left(MS.step) });
         const accepted = u.full?.plan_hash ?? null;
         const seen = planHash(res.planStdout);
         if (accepted && seen === accepted && Date.now() + 60_000 < unitDeadline) {
           res.fullRan = true;
-          await step({ step: 'full', cmd: cli(['run', '-m', MANIFEST, '--confirm-target', u.full.confirm, '--plan-hash', accepted, '--out', `${OUTD}/full`, '--state', `${OUTD}/state`]), timeoutMs: left(MS.full) });
+          await step({ step: 'full', cmd: cli(['run', '-m', manifest, '--confirm-target', u.full.confirm, '--plan-hash', accepted, '--out', `${OUTD}/full`, '--state', `${OUTD}/state`]), timeoutMs: left(MS.full) });
         }
       });
       // Everything the steps left in /work/out, read by our helper after every target process has ended.
@@ -432,7 +439,7 @@ function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
   const f = resolved.fixture ? fixtures.fixtures[resolved.fixture] : null;
   const env = { ...(f?.env ?? {}), ...extraEnv };
   for (const k of f?.random_env ?? []) env[k] = randomBytes(16).toString('hex');
-  const manifestFile = f?.manifest ? join(here, 'fixtures', f.manifest) : null;
+  const manifestFile = f?.manifest ? join(here, '..', f.manifest) : null;
   return {
     tag, stepDir, launch: resolved.launch, fixture: resolved.fixture, env,
     init: f ? f.init !== false : true,
@@ -440,7 +447,7 @@ function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
     background: f?.background ?? null,
     setup: f?.setup ?? null,
     full: f?.full ?? null,
-    manifestText: manifestFile ? (vars) => fillFixtureManifest(readFileSync(manifestFile, 'utf8'), vars) : null,
+    manifestFile, link: f?.link ?? null,
   };
 }
 
