@@ -1,0 +1,82 @@
+{
+  "format": "isokron-writecheck-fixtures/1",
+  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. install_hosts adds hosts to the install's allowlist proxy for this fixture only: kronicle-lite's better-sqlite3 downloads its prebuilt binary from a GitHub release (github.com, which redirects to release-assets.githubusercontent.com).",
+  "fixtures": {
+    "tiny-tracker": {
+      "subject": "isokron-ai/mcp-write-safety",
+      "launch": {
+        "kind": "npm",
+        "package": "@mcp-write-safety/tiny-tracker",
+        "version": "0.1.0",
+        "bin": "tiny-tracker"
+      },
+      "lock": "loop/fixtures/tiny-tracker",
+      "integrity": "sha512-Yft+C5g5Ez3ocX+Yty3zqM69HNH4FN6MQuuM/e6vrhiJNOtEoAAc5R0rwONk7OBP59byRmBBPQ7pGzZ5cFHKxw==",
+      "manifest": "dogfood/tiny-tracker/writecheck.yaml",
+      "link": "/work/tt/examples/tiny-tracker",
+      "init": false,
+      "env": {
+        "TRACKER_BACKEND_URL": "http://127.0.0.1:4610"
+      },
+      "random_env": [
+        "TRACKER_BACKEND_TOKEN"
+      ],
+      "background": {
+        "args": [
+          "backend",
+          "--port",
+          "4610"
+        ],
+        "ready": "backend"
+      },
+      "full": {
+        "plan_hash": "d8ef7bb920c95d06",
+        "confirm": "tiny-tracker"
+      },
+      "known_answer": {
+        "env": "TRACKER_DEFECTS",
+        "defect": "missing-annotations",
+        "requirement": "MWS-ANN-4"
+      }
+    },
+    "kronicle-lite": {
+      "subject": "isokron-ai/kronicle-lite",
+      "launch": {
+        "kind": "npm",
+        "package": "kronicle-lite",
+        "version": "0.11.2",
+        "bin": "kronicle-lite",
+        "args": [
+          "serve"
+        ],
+        "install_scripts": true
+      },
+      "lock": "loop/fixtures/kronicle-lite",
+      "integrity": "sha512-4eA6yzHLqj/ox/fO87mUWy1p/6Epf/UOmVmd6h3gCXBDX4ZW8aox0uyFgvjpofwR4HMeJEto04xTtg4y5pxTWw==",
+      "install_hosts": [
+        "github.com",
+        "release-assets.githubusercontent.com"
+      ],
+      "manifest": "dogfood/kronicle-lite/writecheck.yaml",
+      "link": "/work/kl",
+      "init": true,
+      "env": {
+        "KRONICLE_LITE_DATA_DIR": "/work/out/kl-data",
+        "KRONICLE_LITE_PROJECT": "dogfood"
+      },
+      "setup": [
+        [
+          "sh",
+          "-c",
+          "set -e; mkdir -p /work/out/kl-data /work/out/kl-seed; printf '# Dogfood guard\\n\\nThis store belongs to one CI job and is thrown away after it.\\n' > /work/out/kl-seed/guard.md; printf '# Bystander one\\n\\nNot created by the tester.\\n' > /work/out/kl-seed/by1.md; printf '# Bystander two\\n\\nAlso not created by the tester.\\n' > /work/out/kl-seed/by2.md; node \"$1/dist/cli.js\" put dogfood-guard /work/out/kl-seed/guard.md --title 'dogfood guard'; node \"$1/dist/cli.js\" put dogfood-bystander-1 /work/out/kl-seed/by1.md --title 'bystander one'; node \"$1/dist/cli.js\" put dogfood-bystander-2 /work/out/kl-seed/by2.md --title 'bystander two'",
+          "sh",
+          "{{pkgdir}}"
+        ]
+      ],
+      "full": {
+        "plan_hash": "ddf41337c24a60ea",
+        "confirm": "kronicle-lite-dogfood"
+      }
+    }
+  }
+}

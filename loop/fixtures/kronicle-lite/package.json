@@ -1,0 +1,8 @@
+{
+  "name": "writecheck-fixture-kronicle-lite",
+  "private": true,
+  "description": "The locked install of the kronicle-lite fixture of the writecheck loop worker (loop/fixtures.json). Installed in the sandbox with npm ci.",
+  "dependencies": {
+    "kronicle-lite": "0.11.2"
+  }
+}
