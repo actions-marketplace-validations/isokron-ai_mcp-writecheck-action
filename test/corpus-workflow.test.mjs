@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
-const wf = readFileSync(join(root, '.github', 'workflows', 'corpus.yml'), 'utf8');
+const wf = readFileSync(join(root, '.github', 'workflows', 'corpus-batch.yml'), 'utf8');
 const body = wf.replace(/^\s*#.*$/gm, ''); // the YAML without comments
 const step = (name) => {
   const i = body.indexOf(`name: ${name}`);

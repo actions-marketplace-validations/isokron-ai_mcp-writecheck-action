@@ -1,0 +1,8 @@
+{
+  "name": "writecheck-fixture-tiny-tracker",
+  "private": true,
+  "description": "The locked install of the tiny-tracker fixture of the writecheck loop worker (loop/fixtures.json). Installed in the sandbox with npm ci.",
+  "dependencies": {
+    "@mcp-write-safety/tiny-tracker": "0.1.0"
+  }
+}

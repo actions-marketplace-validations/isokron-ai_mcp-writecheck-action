@@ -1,0 +1,19 @@
+{
+  "repo": "isokron-ai/tool-qa",
+  "commit": "b1f25a9b0b7655f45eb353f31562a93d9319d5a4",
+  "note": "Copies of tool-qa's result contract and ingest checks at the commit the workflows pin, for test/loop.test.mjs only. Refresh together with WORKER_KIT_REF.",
+  "files": {
+    "ingest/forgery.mjs": "8202428bac527ba107df1e0d9dd11e76b4db24011c9e834961d41915f2464aa4",
+    "ingest/redact.mjs": "a64664309095bd46718634dc33f0b1a1a86c3e2407ef8f0c9f7170562b303746",
+    "ingest/registry.mjs": "3ac157d5db73d8387f8d77b3408e1da278c9af2d4ccb72e232009cbf824e9a37",
+    "scripts/lib/yaml-lite.mjs": "d92162877ea957fef3c8b30170d9e2e23732fec3c43a51d3e55254f78fcf8289",
+    "worker-kit/contract.mjs": "74cf597cd6ca32feb897ad7d73742fbc9f1eba5da733e9f21c76a612880d4f47",
+    "worker-kit/manifest.schema.json": "772d3fbe83145c09e03d8eaaf7f5a6d5474b8bc0daa72dad91c16c3d3e7867ee"
+  },
+  "registry": {
+    "repo": "isokron-ai/mcp-results",
+    "commit": "d995bf6e235701503e58b7ee8b8b9736d3817bd5",
+    "path": "fields/registry.yaml",
+    "sha256": "2efd164ccd6f98c908199e5961ed62039e66e14035c53712197cc3974d7aaeb5"
+  }
+}
