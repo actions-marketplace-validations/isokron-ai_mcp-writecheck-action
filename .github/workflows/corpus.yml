@@ -1,116 +1,137 @@
-# Corpus: the CLI against pinned third-party open-source MCP servers, in batches dispatched by hand.
+# Loop worker: the writecheck lane of isokron-ai/tool-qa. The pump dispatches this workflow (tool-qa
+# pump/workflows.json, "writecheck": file corpus.yml, ref main, shard_size 10) with shard_id, attempt_id and items
+# (tool-qa docs/INTERFACES.md, "Worker dispatch"); each item names a subject (a public GitHub repository, owner/name)
+# with the run_key and fence its result must quote. loop/run-items.mjs maps each subject to its npm or PyPI package
+# (tool-qa's seed, or IsoKron's own fixture servers in loop/fixtures.json), installs and runs it in the hardened
+# sandbox of isokron-ai/mcp-surface-corpus (gVisor, deny-by-default egress, a DNS logger, a read-only root, uid 65534,
+# every capability dropped, no runner environment), and runs mcp-writecheck there, the CLI and the server in two
+# separate sandbox containers joined only by the protocol: init, plan and catalog for every
+# subject (tools/list only, no tool is called), and the full write test only for a fixture server whose plan hash a
+# person accepted, against a disposable backend inside the same sandbox. Nothing reaches a real external system.
+# tool-qa's worker-kit then seals one bundle per item to tool-qa's ingest key and uploads it as
+# result-<attempt_id>-<i>.tar.age. loop/README.md says what a bundle holds.
 #
-# Batches: on 17 Nov 2026 the owner set batches of 3 to 5 targets. On 18 Nov 2026 the owner asked to
-# run as many servers as possible during the day, still by hand dispatch only: one dispatch now takes
-# up to 40 target IDs, and a plan job (no environment, no secret, no checkout of anything but this
-# repository) splits them over min(16, n) shard jobs, 16 for an empty `only`. 16 stays below the 20
-# concurrent jobs GitHub-hosted runners give a free organization's public repository.
+# This file replaced the hand-dispatched corpus batch workflow, which is now corpus-batch.yml, unchanged (its own
+# sandbox, corpus/run-shard.mjs, is still used there and is to be retired once this lane has run its targets:
+# loop/README.md, "The older corpus path"). The dogfood workflows are not touched.
 #
-# What this is for: finding bugs in mcp-writecheck and this action on servers we did not write.
-# It is not a findings channel. Nothing target-specific appears here or in the logs:
-#   - the target list is not in the repository in clear text: corpus/targets.json.age is decrypted at
-#     run time with the CORPUS_TARGETS_KEY secret, inside one step, and the driver deletes the clear
-#     text before any target runs;
-#   - job and step names are generic; logs and the job summary print only the label
-#     "automated candidate, unreviewed: not a finding" and one "run finished, exit N" line per target,
-#     in an order shuffled per run (N is our tool's or the harness's status, never a verdict:
-#     corpus/README.md);
-#   - every install, backend, server and CLI output goes to files that are age-encrypted to IsoKron's
-#     archive key (corpus/recipients.txt) before upload. The private key is not in this repository
-#     or in CI. Nothing is cached;
-#   - a target's verdicts never fail a job. Only a CLI crash or error, a time limit or a harness error
-#     turns a shard red.
+# Order: mcp-surface-corpus's reusable sandbox-conformance.yml must pass first; then, in the job, the inputs are
+# checked whole; the CLI is built from its own lockfile before anything else; the sandbox guard action (gVisor, the
+# firewall, the hostile self test on this runner) must pass; the shard's controls (forgery,
+# known answer) must pass, or nothing is written or uploaded; the items run; then every container is removed and
+# Docker stopped, and only then do the worker-kit steps seal and upload. No untrusted code runs in a step that
+# could reach the upload token: targets run only inside the sandbox, and are gone before the first upload step.
 #
-# Isolation: every target is untrusted. Its install, set-up, CLI run and server run in containers of
-# a digest-pinned image (corpus/images.json) as user 10001, with no capabilities, no-new-privileges,
-# a read-only root, a tmpfs /tmp, and only Docker volumes mounted: never the workspace, RUNNER_TEMP,
-# _actions or the Docker socket. Install has egress; everything after it runs on an --internal
-# network shared only with that target's digest-pinned backends. corpus/net-guard.sh keeps the
-# install network away from the runner itself and the cloud metadata addresses. The host side (the
-# secrets, the clear-text list, the encrypt step, the upload) is out of the containers' reach.
-#
-# Security: manual dispatch only, from main; no pull_request or pull_request_target, so
-# no pull request (fork or branch) ever runs with a secret. CORPUS_TARGETS_KEY lives only in the
-# `corpus` environment, whose deployment branches are limited to main, and is used only by the
-# decrypt step. The CLI comes from the public isokron-ai/mcp-write-safety without a token: no step
-# of this workflow reads MWS_CLI_TOKEN or any secret but CORPUS_TARGETS_KEY. The job also stops
-# before the checkout unless the repository variable MWS_CLI_PUBLIC is 'true' (set by the owner).
-# The plan job that sizes the matrix runs without the environment, so it cannot read the key; it
-# reads only the `only` input, and each shard job checks that input again itself before the decrypt
-# step. Third-party actions are pinned by full SHA.
+# Security: workflow_dispatch only, from main; permissions: {} at the top and contents: read for the jobs that
+# check out this repository; no secrets. The inputs reach steps through env: only. The kill switch (loop/guard.mjs:
+# LOOP_ENABLED, LOOP_PAUSE_UNTIL, LANE_WRITECHECK_ENABLED) stops the lane without failing a run. Actions are pinned
+# by full SHA; the other repositories are fetched by full commit SHA (loop/prepare.sh).
 
-name: corpus
+name: writecheck
 
 on:
-  # Manual dispatch only (owner, 17 Nov 2026; wider batches 18 Nov 2026): targets are chosen per run,
-  # with their results kept private. There is no schedule, so enabling the workflow starts nothing.
   workflow_dispatch:
     inputs:
-      only:
-        description: Target IDs for this batch, comma-separated (e.g. t13,t09,t08), each once; at most 40, run on up to 16 parallel shards. Empty runs every target on 16 shards.
-        required: false
-        default: ''
-      cli-ref:
-        description: mcp-writecheck commit to test with (full 40-character SHA). Empty for the action's default.
-        required: false
-        default: ''
+      shard_id:
+        description: Shard id from the tool-qa pump.
+        required: true
+        type: string
+      attempt_id:
+        description: Attempt id from the tool-qa pump; every result quotes it.
+        required: true
+        type: string
+      items:
+        description: 'JSON list of 1 to 10 {"subject": "owner/name", "run_key": "<64 hex>", "fence": <n>}.'
+        required: true
+        type: string
 
-permissions:
-  contents: read
+run-name: shard ${{ inputs.shard_id }}
 
-# One run at a time; a dispatch made while one runs waits. Two dispatches therefore never run the same
-# target at once, whatever their `only` lists say. (A group keyed on the input would let two runs with
-# overlapping lists, such as t13,t09 and t09,t13, or any list and an empty one, run together, and two
-# runs of 16 shards would pass the 20-job limit.) GitHub keeps one waiting run per group: a third
-# dispatch replaces the waiting one, which is cancelled before it starts. Wider batches give the
-# throughput instead.
+permissions: {}
+
 concurrency:
-  group: corpus
+  group: writecheck-${{ inputs.shard_id }}
   cancel-in-progress: false
 
 env:
-  # age v1.3.2, linux-amd64 release tarball (sha256 recorded 16 Nov 2026).
-  AGE_URL: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
-  AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+  # isokron-ai/tool-qa: the worker-kit that seals and uploads (every worker-kit step below names this commit;
+  # test/loop-workflow.test.mjs checks), and the seed the subjects are mapped with.
+  WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
+  SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
+  # isokron-ai/mcp-surface-corpus main at 97bd96c (pull request 7: the sandbox guard action, the reusable
+  # conformance workflow, R-SBX-12 and later). The conformance job and the sandbox-guard step name this same commit.
+  SANDBOX_REF: '97bd96cae93b894fa3f891e3c05514a7c4bc0432'
 
 jobs:
-  # Derives the shard matrix from the `only` input alone. No environment, so CORPUS_TARGETS_KEY is out
-  # of reach; it reads no secret, decrypts nothing and runs no third-party code.
-  plan:
+  guard:
     if: github.repository == 'isokron-ai/mcp-writecheck-action' && github.ref == 'refs/heads/main'
-    name: corpus-plan
+    name: writecheck-guard
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    permissions:
+      contents: read
     outputs:
-      shards: ${{ steps.batch.outputs.shards }}
-      matrix: ${{ steps.batch.outputs.matrix }}
+      proceed: ${{ steps.guard.outputs.proceed }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # First, before anything is checked out: LOOP_ENABLED must be exactly "true". Off is a notice, not a failure.
+      - id: enabled
+        name: Kill switch (LOOP_ENABLED)
+        env:
+          LOOP_ENABLED: ${{ vars.LOOP_ENABLED }}
+        run: |
+          if [[ "$LOOP_ENABLED" == "true" ]]; then echo "on=true" >> "$GITHUB_OUTPUT"
+          else echo "::notice title=writecheck::LOOP_ENABLED is not \"true\"; the loop is off and nothing runs"; fi
+      - if: steps.enabled.outputs.on == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - id: batch
-        name: Plan the batch
+          sparse-checkout: loop/guard.mjs
+          sparse-checkout-cone-mode: false
+      - id: guard
+        if: steps.enabled.outputs.on == 'true'
+        name: Kill switch (pause, lane switch, pins)
         env:
-          ONLY_IN: ${{ inputs.only }}
-        run: corpus/check-batch.sh output "$GITHUB_OUTPUT"
+          LOOP_ENABLED: ${{ vars.LOOP_ENABLED }}
+          LOOP_PAUSE_UNTIL: ${{ vars.LOOP_PAUSE_UNTIL }}
+          LANE_WRITECHECK_ENABLED: ${{ vars.LANE_WRITECHECK_ENABLED }}
+        run: node loop/guard.mjs --lane writecheck
 
-  corpus:
-    needs: plan
-    if: github.repository == 'isokron-ai/mcp-writecheck-action' && github.ref == 'refs/heads/main'
-    name: corpus-shard-${{ matrix.shard }}
+  # mcp-surface-corpus's reusable conformance workflow at the pinned commit: the sandbox proven on today's runner
+  # image before any shard job starts. The job below still runs the sandbox guard on its own runner.
+  conformance:
+    needs: guard
+    if: needs.guard.outputs.proceed == 'true'
+    permissions:
+      contents: read
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@97bd96cae93b894fa3f891e3c05514a7c4bc0432 # SANDBOX_REF
+    with:
+      mutations: false
+      artifact-prefix: writecheck-conformance
+
+  writecheck:
+    needs: [guard, conformance]
+    if: needs.guard.outputs.proceed == 'true' && needs.conformance.outputs.verdict == 'pass'
+    name: writecheck
     runs-on: ubuntu-24.04
-    # CORPUS_TARGETS_KEY lives only in this environment, whose deployment branches are limited to
-    # main: a branch with an edited copy of this workflow (dispatch or push) cannot read it.
-    environment: corpus
-    # GitHub's hosted maximum; the driver keeps a shard's planned time under 330 minutes (SHARD_BUDGET_S).
-    timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      # At most 16 jobs at once, below the 20 GitHub-hosted runners allow; the plan gives at most 16.
-      max-parallel: 16
-      matrix:
-        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    # Below the pump's lease for a shard of 10: 1.5 x (4 + 10 x 2) + 10 = 46 minutes. The driver starts no item
+    # after 26 minutes of items; those not started report a retryable skip.
+    timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
+      - name: Check the inputs
+        env:
+          SHARD_ID: ${{ inputs.shard_id }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
+          ITEMS: ${{ inputs.items }}
+        run: |
+          # Whole-string checks: a newline or control character anywhere fails the match. loop/items.mjs checks the
+          # items in full (JSON, 1 to 10 entries, subject, run_key, fence) right after the checkout.
+          id_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+          items_re='^\[[^[:cntrl:]]+\]$'
+          if [[ ! "$SHARD_ID" =~ $id_re ]]; then echo "::error title=writecheck::shard_id is malformed"; exit 1; fi
+          if [[ ! "$ATTEMPT_ID" =~ $id_re ]]; then echo "::error title=writecheck::attempt_id is malformed"; exit 1; fi
+          if [[ ! "$ITEMS" =~ $items_re ]] || [ "${#ITEMS}" -gt 60000 ]; then echo "::error title=writecheck::items must be one line of JSON, a list of at most 60000 characters"; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -118,91 +139,138 @@ jobs:
         with:
           node-version: 22
           package-manager-cache: false
-      - id: cliref
-        name: Choose the CLI commit
+      - name: Check the items in full
         env:
-          INPUT_REF: ${{ inputs.cli-ref }}
+          ITEMS: ${{ inputs.items }}
+        run: node --input-type=module -e 'import { parseItems } from "./loop/items.mjs"; console.log(parseItems(process.env.ITEMS).length + " item(s)")'
+      - name: Choose the CLI commit
         run: dogfood/cli-ref.sh
-      - name: Check the batch
-        # why: the IDs reach a shell and the driver; only the list's own ID shape is accepted, before any secret is read.
-        # The input is checked again here, from inputs.only, not taken from the plan job; the plan's shard
-        # count must match it, this job's shard must be in it, and the matrix (strategy.job-total, job-index)
-        # must be exactly that many jobs with this one at its place. Writes CORPUS_ONLY and CORPUS_SHARDS.
+      # The CLI first, before any third-party code runs in this job; then the sandbox's own code and the seed.
+      - name: Fetch and build
+        run: loop/prepare.sh fetch
+      # gVisor, the firewall and the hostile self test on this very runner, before any target; the step fails
+      # unless the telemetry check recomputes a pass.
+      - id: sandbox
+        name: Sandbox guard (gVisor, firewall, self test)
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@97bd96cae93b894fa3f891e3c05514a7c4bc0432 # SANDBOX_REF
+      - name: The guard ran the pinned sandbox and passed
         env:
-          ONLY_IN: ${{ inputs.only }}
-          PLAN_SHARDS: ${{ needs.plan.outputs.shards }}
-          SHARD: ${{ matrix.shard }}
-          JOB_INDEX: ${{ strategy.job-index }}
-          JOB_TOTAL: ${{ strategy.job-total }}
-        run: corpus/check-batch.sh env "$GITHUB_ENV"
-      # The CLI first, before any third-party code runs in this job. Its repository is public, so the
-      # checkout has no token. Until the owner sets the repository variable MWS_CLI_PUBLIC to 'true',
-      # the job stops here, before the checkout and before anything is decrypted or run.
-      - name: Require MWS_CLI_PUBLIC
-        if: vars.MWS_CLI_PUBLIC != 'true'
+          VERDICT: ${{ steps.sandbox.outputs.verdict }}
+          GUARD_SHA: ${{ steps.sandbox.outputs.sandbox-sha }}
         run: |
-          echo "::error::set the repository variable MWS_CLI_PUBLIC to true (corpus/README.md)"
-          exit 1
-      - name: Require the CLI commit to be on mcp-write-safety main
-        # why: a dispatch may name any 40-character SHA, and GitHub serves fork-PR commits by SHA. The CLI is
-        # built on the host before the target list is decrypted, so only commits already on main are built.
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          status=$(gh api "repos/isokron-ai/mcp-write-safety/compare/${CLI_REF}...main" --jq .status || true)
-          if [ "$status" != "ahead" ] && [ "$status" != "identical" ]; then
-            echo "::error::cli-ref ${CLI_REF} is not on mcp-write-safety main (compare: ${status:-error})"
-            exit 1
-          fi
-      - name: Check out mcp-writecheck (public)
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: isokron-ai/mcp-write-safety
-          ref: ${{ steps.cliref.outputs.ref }}
-          path: mws-cli
-          # The spec document at the same commit: the driver records its sha256 (meta.env.spec_sha256).
-          sparse-checkout: |
-            /packages/writecheck/
-            /spec/mws.md
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-      - name: Build mcp-writecheck
-        run: dogfood/build-cli.sh
-      - name: Install age
-        run: corpus/install-age.sh
-      - name: Guard the container networks
-        run: sudo corpus/net-guard.sh
-      - name: Decrypt the target list
-        env:
-          CORPUS_TARGETS_KEY: ${{ secrets.CORPUS_TARGETS_KEY }}
-        run: corpus/decrypt-targets.sh
+          [ "$VERDICT" = pass ] || { echo "::error::the sandbox self test did not pass"; exit 1; }
+          [ "$GUARD_SHA" = "$SANDBOX_REF" ] || { echo "::error::the sandbox guard ran another commit than SANDBOX_REF"; exit 1; }
+          [ "$(git -C msc rev-parse HEAD)" = "$SANDBOX_REF" ] || { echo "::error::the driver's sandbox checkout is not SANDBOX_REF"; exit 1; }
       - id: run
-        name: Run the shard
+        name: Run the items in the sandbox
         env:
-          SHARD: ${{ matrix.shard }}
-        run: corpus/run-ci-shard.sh
-      - id: encrypt
-        name: Encrypt the results
-        if: always()
-        env:
-          SHARD: ${{ matrix.shard }}
-        run: corpus/encrypt-results.sh
-      - name: Upload the encrypted results
-        if: always() && steps.encrypt.outcome == 'success'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+          SHARD_ID: ${{ inputs.shard_id }}
+          ATTEMPT_ID: ${{ inputs.attempt_id }}
+          ITEMS: ${{ inputs.items }}
+        run: node loop/run-items.mjs --msc msc --cli "$MWSC_CLI_PATH" --seed toolqa/history/seed-v1.json --out "$RUNNER_TEMP/wc" --lane ci
+      - id: teardown
+        name: End the sandbox before anything is sealed
+        if: ${{ !cancelled() }}
+        run: loop/teardown.sh
+      # One step per item (at most 10, the shard size; has_<i> is set for every item that has a bundle). Only after
+      # the controls passed and the sandbox is gone. One item's failed upload does not stop the others.
+      - name: Seal and upload item 0
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_0 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
         with:
-          name: corpus-shard-${{ matrix.shard }}
-          path: ${{ runner.temp }}/corpus-upload/
-          if-no-files-found: error
-          retention-days: 90
-      - name: Job summary
-        if: always()
-        run: corpus/summary.sh
-      - name: Job status
-        if: always()
-        env:
-          RC: ${{ steps.run.outputs.rc }}
-        run: |
-          [[ "${RC:-}" =~ ^[0-9]{1,3}$ ]] || RC=125
-          echo "run finished, exit $RC"
-          [ "$RC" = "0" ]
+          bundle-dir: ${{ runner.temp }}/wc/0/bundle
+          meta-file: ${{ runner.temp }}/wc/0/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '0'
+          fence: ${{ steps.run.outputs.fence_0 }}
+          run-key: ${{ steps.run.outputs.run_key_0 }}
+      - name: Seal and upload item 1
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_1 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/1/bundle
+          meta-file: ${{ runner.temp }}/wc/1/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '1'
+          fence: ${{ steps.run.outputs.fence_1 }}
+          run-key: ${{ steps.run.outputs.run_key_1 }}
+      - name: Seal and upload item 2
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_2 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/2/bundle
+          meta-file: ${{ runner.temp }}/wc/2/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '2'
+          fence: ${{ steps.run.outputs.fence_2 }}
+          run-key: ${{ steps.run.outputs.run_key_2 }}
+      - name: Seal and upload item 3
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_3 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/3/bundle
+          meta-file: ${{ runner.temp }}/wc/3/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '3'
+          fence: ${{ steps.run.outputs.fence_3 }}
+          run-key: ${{ steps.run.outputs.run_key_3 }}
+      - name: Seal and upload item 4
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_4 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/4/bundle
+          meta-file: ${{ runner.temp }}/wc/4/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '4'
+          fence: ${{ steps.run.outputs.fence_4 }}
+          run-key: ${{ steps.run.outputs.run_key_4 }}
+      - name: Seal and upload item 5
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_5 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/5/bundle
+          meta-file: ${{ runner.temp }}/wc/5/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '5'
+          fence: ${{ steps.run.outputs.fence_5 }}
+          run-key: ${{ steps.run.outputs.run_key_5 }}
+      - name: Seal and upload item 6
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_6 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/6/bundle
+          meta-file: ${{ runner.temp }}/wc/6/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '6'
+          fence: ${{ steps.run.outputs.fence_6 }}
+          run-key: ${{ steps.run.outputs.run_key_6 }}
+      - name: Seal and upload item 7
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_7 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/7/bundle
+          meta-file: ${{ runner.temp }}/wc/7/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '7'
+          fence: ${{ steps.run.outputs.fence_7 }}
+          run-key: ${{ steps.run.outputs.run_key_7 }}
+      - name: Seal and upload item 8
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_8 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/8/bundle
+          meta-file: ${{ runner.temp }}/wc/8/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '8'
+          fence: ${{ steps.run.outputs.fence_8 }}
+          run-key: ${{ steps.run.outputs.run_key_8 }}
+      - name: Seal and upload item 9
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_9 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/9/bundle
+          meta-file: ${{ runner.temp }}/wc/9/meta.json
+          attempt-id: ${{ inputs.attempt_id }}
+          item-index: '9'
+          fence: ${{ steps.run.outputs.fence_9 }}
+          run-key: ${{ steps.run.outputs.run_key_9 }}

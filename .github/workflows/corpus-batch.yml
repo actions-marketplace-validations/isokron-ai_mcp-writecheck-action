@@ -1,0 +1,208 @@
+# Corpus: the CLI against pinned third-party open-source MCP servers, in batches dispatched by hand.
+#
+# Batches: on 17 Nov 2026 the owner set batches of 3 to 5 targets. On 18 Nov 2026 the owner asked to
+# run as many servers as possible during the day, still by hand dispatch only: one dispatch now takes
+# up to 40 target IDs, and a plan job (no environment, no secret, no checkout of anything but this
+# repository) splits them over min(16, n) shard jobs, 16 for an empty `only`. 16 stays below the 20
+# concurrent jobs GitHub-hosted runners give a free organization's public repository.
+#
+# What this is for: finding bugs in mcp-writecheck and this action on servers we did not write.
+# It is not a findings channel. Nothing target-specific appears here or in the logs:
+#   - the target list is not in the repository in clear text: corpus/targets.json.age is decrypted at
+#     run time with the CORPUS_TARGETS_KEY secret, inside one step, and the driver deletes the clear
+#     text before any target runs;
+#   - job and step names are generic; logs and the job summary print only the label
+#     "automated candidate, unreviewed: not a finding" and one "run finished, exit N" line per target,
+#     in an order shuffled per run (N is our tool's or the harness's status, never a verdict:
+#     corpus/README.md);
+#   - every install, backend, server and CLI output goes to files that are age-encrypted to IsoKron's
+#     archive key (corpus/recipients.txt) before upload. The private key is not in this repository
+#     or in CI. Nothing is cached;
+#   - a target's verdicts never fail a job. Only a CLI crash or error, a time limit or a harness error
+#     turns a shard red.
+#
+# Isolation: every target is untrusted. Its install, set-up, CLI run and server run in containers of
+# a digest-pinned image (corpus/images.json) as user 10001, with no capabilities, no-new-privileges,
+# a read-only root, a tmpfs /tmp, and only Docker volumes mounted: never the workspace, RUNNER_TEMP,
+# _actions or the Docker socket. Install has egress; everything after it runs on an --internal
+# network shared only with that target's digest-pinned backends. corpus/net-guard.sh keeps the
+# install network away from the runner itself and the cloud metadata addresses. The host side (the
+# secrets, the clear-text list, the encrypt step, the upload) is out of the containers' reach.
+#
+# Security: manual dispatch only, from main; no pull_request or pull_request_target, so
+# no pull request (fork or branch) ever runs with a secret. CORPUS_TARGETS_KEY lives only in the
+# `corpus` environment, whose deployment branches are limited to main, and is used only by the
+# decrypt step. The CLI comes from the public isokron-ai/mcp-write-safety without a token: no step
+# of this workflow reads MWS_CLI_TOKEN or any secret but CORPUS_TARGETS_KEY. The job also stops
+# before the checkout unless the repository variable MWS_CLI_PUBLIC is 'true' (set by the owner).
+# The plan job that sizes the matrix runs without the environment, so it cannot read the key; it
+# reads only the `only` input, and each shard job checks that input again itself before the decrypt
+# step. Third-party actions are pinned by full SHA.
+
+name: corpus-batch
+
+on:
+  # Manual dispatch only (owner, 17 Nov 2026; wider batches 18 Nov 2026): targets are chosen per run,
+  # with their results kept private. There is no schedule, so enabling the workflow starts nothing.
+  workflow_dispatch:
+    inputs:
+      only:
+        description: Target IDs for this batch, comma-separated (e.g. t13,t09,t08), each once; at most 40, run on up to 16 parallel shards. Empty runs every target on 16 shards.
+        required: false
+        default: ''
+      cli-ref:
+        description: mcp-writecheck commit to test with (full 40-character SHA). Empty for the action's default.
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# One run at a time; a dispatch made while one runs waits. Two dispatches therefore never run the same
+# target at once, whatever their `only` lists say. (A group keyed on the input would let two runs with
+# overlapping lists, such as t13,t09 and t09,t13, or any list and an empty one, run together, and two
+# runs of 16 shards would pass the 20-job limit.) GitHub keeps one waiting run per group: a third
+# dispatch replaces the waiting one, which is cancelled before it starts. Wider batches give the
+# throughput instead.
+concurrency:
+  group: corpus
+  cancel-in-progress: false
+
+env:
+  # age v1.3.2, linux-amd64 release tarball (sha256 recorded 16 Nov 2026).
+  AGE_URL: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+  AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
+
+jobs:
+  # Derives the shard matrix from the `only` input alone. No environment, so CORPUS_TARGETS_KEY is out
+  # of reach; it reads no secret, decrypts nothing and runs no third-party code.
+  plan:
+    if: github.repository == 'isokron-ai/mcp-writecheck-action' && github.ref == 'refs/heads/main'
+    name: corpus-plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      shards: ${{ steps.batch.outputs.shards }}
+      matrix: ${{ steps.batch.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: batch
+        name: Plan the batch
+        env:
+          ONLY_IN: ${{ inputs.only }}
+        run: corpus/check-batch.sh output "$GITHUB_OUTPUT"
+
+  corpus:
+    needs: plan
+    if: github.repository == 'isokron-ai/mcp-writecheck-action' && github.ref == 'refs/heads/main'
+    name: corpus-shard-${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    # CORPUS_TARGETS_KEY lives only in this environment, whose deployment branches are limited to
+    # main: a branch with an edited copy of this workflow (dispatch or push) cannot read it.
+    environment: corpus
+    # GitHub's hosted maximum; the driver keeps a shard's planned time under 330 minutes (SHARD_BUDGET_S).
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      # At most 16 jobs at once, below the 20 GitHub-hosted runners allow; the plan gives at most 16.
+      max-parallel: 16
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - id: cliref
+        name: Choose the CLI commit
+        env:
+          INPUT_REF: ${{ inputs.cli-ref }}
+        run: dogfood/cli-ref.sh
+      - name: Check the batch
+        # why: the IDs reach a shell and the driver; only the list's own ID shape is accepted, before any secret is read.
+        # The input is checked again here, from inputs.only, not taken from the plan job; the plan's shard
+        # count must match it, this job's shard must be in it, and the matrix (strategy.job-total, job-index)
+        # must be exactly that many jobs with this one at its place. Writes CORPUS_ONLY and CORPUS_SHARDS.
+        env:
+          ONLY_IN: ${{ inputs.only }}
+          PLAN_SHARDS: ${{ needs.plan.outputs.shards }}
+          SHARD: ${{ matrix.shard }}
+          JOB_INDEX: ${{ strategy.job-index }}
+          JOB_TOTAL: ${{ strategy.job-total }}
+        run: corpus/check-batch.sh env "$GITHUB_ENV"
+      # The CLI first, before any third-party code runs in this job. Its repository is public, so the
+      # checkout has no token. Until the owner sets the repository variable MWS_CLI_PUBLIC to 'true',
+      # the job stops here, before the checkout and before anything is decrypted or run.
+      - name: Require MWS_CLI_PUBLIC
+        if: vars.MWS_CLI_PUBLIC != 'true'
+        run: |
+          echo "::error::set the repository variable MWS_CLI_PUBLIC to true (corpus/README.md)"
+          exit 1
+      - name: Require the CLI commit to be on mcp-write-safety main
+        # why: a dispatch may name any 40-character SHA, and GitHub serves fork-PR commits by SHA. The CLI is
+        # built on the host before the target list is decrypted, so only commits already on main are built.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(gh api "repos/isokron-ai/mcp-write-safety/compare/${CLI_REF}...main" --jq .status || true)
+          if [ "$status" != "ahead" ] && [ "$status" != "identical" ]; then
+            echo "::error::cli-ref ${CLI_REF} is not on mcp-write-safety main (compare: ${status:-error})"
+            exit 1
+          fi
+      - name: Check out mcp-writecheck (public)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: isokron-ai/mcp-write-safety
+          ref: ${{ steps.cliref.outputs.ref }}
+          path: mws-cli
+          # The spec document at the same commit: the driver records its sha256 (meta.env.spec_sha256).
+          sparse-checkout: |
+            /packages/writecheck/
+            /spec/mws.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - name: Build mcp-writecheck
+        run: dogfood/build-cli.sh
+      - name: Install age
+        run: corpus/install-age.sh
+      - name: Guard the container networks
+        run: sudo corpus/net-guard.sh
+      - name: Decrypt the target list
+        env:
+          CORPUS_TARGETS_KEY: ${{ secrets.CORPUS_TARGETS_KEY }}
+        run: corpus/decrypt-targets.sh
+      - id: run
+        name: Run the shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: corpus/run-ci-shard.sh
+      - id: encrypt
+        name: Encrypt the results
+        if: always()
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: corpus/encrypt-results.sh
+      - name: Upload the encrypted results
+        if: always() && steps.encrypt.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: corpus-shard-${{ matrix.shard }}
+          path: ${{ runner.temp }}/corpus-upload/
+          if-no-files-found: error
+          retention-days: 90
+      - name: Job summary
+        if: always()
+        run: corpus/summary.sh
+      - name: Job status
+        if: always()
+        env:
+          RC: ${{ steps.run.outputs.rc }}
+        run: |
+          [[ "${RC:-}" =~ ^[0-9]{1,3}$ ]] || RC=125
+          echo "run finished, exit $RC"
+          [ "$RC" = "0" ]
