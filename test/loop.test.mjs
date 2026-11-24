@@ -317,3 +317,17 @@ test('R-WC-01: the tools volume carries what its code imports (the network logge
   // Our own in-sandbox code imports nothing outside loop/sandbox.
   assert.deepEqual(missingImports(join(root, 'loop', 'sandbox')), []);
 });
+
+test('R-WC-02: every name the driver takes from mcp-surface-corpus is in the list it checks at load', async () => {
+  const { MSC_MODULES, MSC_NEEDS } = await import('../loop/run-items.mjs');
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  const used = [...new Set([...src.matchAll(/\b(?:this\.M|M)\.([A-Za-z_][A-Za-z0-9_]*)/g)].map((m) => m[1]))].filter((n) => !['dir', 'images'].includes(n)).sort();
+  assert.deepEqual(used, [...MSC_NEEDS].sort());
+  assert.ok(MSC_MODULES.includes('src/sandbox-env.mjs'), 'settingsManifest and settingsDigest live in sandbox-env.mjs');
+  // With a checkout of mcp-surface-corpus at hand (MSC_DIR), check the names against its exports too.
+  if (process.env.MSC_DIR) {
+    const { pathToFileURL } = await import('node:url');
+    const M = Object.assign({}, ...(await Promise.all(MSC_MODULES.map((p) => import(pathToFileURL(join(process.env.MSC_DIR, p)).href)))));
+    assert.deepEqual(MSC_NEEDS.filter((n) => M[n] === undefined), []);
+  }
+});

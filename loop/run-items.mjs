@@ -102,13 +102,21 @@ export function parseArgs(argv) {
   return o;
 }
 
-/** mcp-surface-corpus's sandbox library, from a checkout at a pinned commit. */
+/** The modules of mcp-surface-corpus the driver uses, and every name it takes from them (R-WC-02). */
+export const MSC_MODULES = ['src/docker.mjs', 'src/sandbox-run.mjs', 'src/sandbox-net.mjs', 'src/sandbox-env.mjs', 'src/runsc.mjs', 'src/telemetry.mjs', 'src/targets.mjs'];
+export const MSC_NEEDS = [
+  'Docker', 'HarnessError', 'LIMITS', 'NETS', 'RUNTIME', 'Telemetry', 'checkDockerVersion', 'checkPinned', 'fromProxy', 'helperRunArgs',
+  'hostDropsFor', 'isPublicIp4', 'jsonLines', 'launchPlan', 'loadRunscConfig', 'preflight', 'readHostLog', 'rolesOn', 'sandboxRunArgs',
+  'settingsDigest', 'settingsManifest', 'startNetlogOn', 'stopNetlog', 'sweepTraces', 'takeTrace', 'watchTraces', 'writeDrops', 'writeNetlog',
+];
+
+/** mcp-surface-corpus's sandbox library, from a checkout at a pinned commit; every name the driver uses must be there. */
 async function loadMsc(dir) {
-  const imp = (p) => import(pathToFileURL(join(dir, p)).href);
-  const [docker, run, net, runsc, tel, targets] = await Promise.all([
-    imp('src/docker.mjs'), imp('src/sandbox-run.mjs'), imp('src/sandbox-net.mjs'), imp('src/runsc.mjs'), imp('src/telemetry.mjs'), imp('src/targets.mjs'),
-  ]);
-  return { ...docker, ...run, ...net, ...runsc, ...tel, ...targets, dir, images: JSON.parse(readFileSync(join(dir, 'images.json'), 'utf8')) };
+  const mods = await Promise.all(MSC_MODULES.map((p) => import(pathToFileURL(join(dir, p)).href)));
+  const M = Object.assign({}, ...mods);
+  const missing = MSC_NEEDS.filter((n) => M[n] === undefined);
+  if (missing.length) throw new Error(`mcp-surface-corpus at this commit does not export ${missing.join(', ')}`);
+  return { ...M, dir, images: JSON.parse(readFileSync(join(dir, 'images.json'), 'utf8')) };
 }
 
 const runEnv = (extra = {}) => ({ HOME: '/tmp/home', TMPDIR: '/tmp', NO_COLOR: '1', DO_NOT_TRACK: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONUNBUFFERED: '1', npm_config_update_notifier: 'false', SURFACE_SANDBOX: '1', ...extra });

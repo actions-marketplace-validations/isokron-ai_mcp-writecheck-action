@@ -84,6 +84,11 @@ jobs:
         name: End the sandbox before anything is sealed
         if: ${{ !cancelled() }}
         run: loop/teardown.sh
+      - name: Loop unit tests against the pinned sandbox's exports
+        if: ${{ !cancelled() }}
+        env:
+          MSC_DIR: msc
+        run: node --test test/loop.test.mjs
       - id: kit0
         name: Build bundle 0 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_0 == 'true' }}
