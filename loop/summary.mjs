@@ -23,7 +23,9 @@ const MAX_TOOLS = 1000;
 const MAX_PARAMS = 200;
 
 /** A tool, resource or parameter name kept as data, or null (with the reason counted by the caller). */
-export const safeName = (v) => (typeof v === 'string' && NAME_RE.test(v) ? v : null);
+export const safeName = (v) => (typeof v === 'string' && (NAME_RE.test(v) || CLI_PLACEHOLDER_RE.test(v)) ? v : null);
+/** The CLI's own names for a record that is about no single tool or resource. */
+const CLI_PLACEHOLDER_RE = /^\((?:catalog|server|no tool called)\)$/;
 
 const sha256 = (b) => createHash('sha256').update(b).digest('hex');
 

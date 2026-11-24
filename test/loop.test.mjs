@@ -334,3 +334,18 @@ test('R-WC-02: every name the driver takes from mcp-surface-corpus is in the lis
     assert.deepEqual(MSC_NEEDS.filter((n) => M[n] === undefined), []);
   }
 });
+
+test('R-WC-04: the collector brings the files the summary reads first, ahead of thousands of capture files', () => {
+  const d = mkdtempSync(join(tmpdir(), 'wc-collect-order-'));
+  mkdirSync(join(d, 'full', 'r1', 'capture'), { recursive: true });
+  mkdirSync(join(d, 'results', 'catalog-0123456789'), { recursive: true });
+  for (let i = 0; i < 40; i++) writeFileSync(join(d, 'full', 'r1', 'capture', `f${i}`), 'x');
+  writeFileSync(join(d, 'full', 'r1', 'results.json'), '{}');
+  writeFileSync(join(d, 'results', 'catalog-0123456789', 'results.json'), '{}');
+  writeFileSync(join(d, 'results', 'catalog-0123456789', 'catalog.json'), '{}');
+  const r = spawnSync(process.execPath, [join(root, 'loop', 'sandbox', 'collect.mjs'), d, '100', '1000', '10'], { encoding: 'utf8' });
+  const p = parseCollected(r.stdout);
+  for (const f of ['full/r1/results.json', 'results/catalog-0123456789/results.json', 'results/catalog-0123456789/catalog.json']) assert.ok(p.files.has(f), f);
+  assert.equal(p.entries.length, 10);
+  assert.equal(p.done.capped, true);
+});

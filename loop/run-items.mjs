@@ -540,6 +540,16 @@ async function runItem(ctx, item, deadline) {
       const reason = res.install.timed_out ? 'timeout_start' : 'install_failed_registry';
       for (const st of ['init', 'plan', 'catalog']) skips.push({ stage: st, reason, evidence: 'logs/driver.json' });
     }
+    // The stages that did not run are recorded too: init where the fixture's server is not started over stdio,
+    // and the full write test wherever it did not start (never for a third-party server; for a fixture, only
+    // under the plan hash a person accepted).
+    if (res.error !== 'harness' && res.install?.ok) {
+      if (!stages.init && u.init === false) { skips.push({ stage: 'init', reason: 'unsupported_transport', evidence: 'logs/driver.json' }); driver.init_detail = 'the fixture server is started over streamable HTTP by its manifest; init drafts from a stdio command'; }
+      if (!res.fullRan) {
+        skips.push({ stage: 'full', reason: 'policy_excluded', evidence: 'logs/driver.json' });
+        driver.full_detail = !u.full ? 'a third-party server is never given a manifest that writes' : 'the plan hash is not the accepted one (or the plan did not run), so the full write test did not start';
+      }
+    }
     summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.full?.plan_hash ?? null });
     const evidenceComplete = ctx.lane !== 'ci' || driver.evidence_missing.length === 0;
     if (!evidenceComplete) skips.push({ stage: 'catalog', reason: 'trace_unavailable', evidence: 'logs/driver.json' });
