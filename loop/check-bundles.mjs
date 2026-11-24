@@ -10,8 +10,8 @@
  *        GITHUB_REPOSITORY, GITHUB_WORKFLOW_REF, GITHUB_WORKFLOW_SHA, GITHUB_RUN_ID, GITHUB_RUN_ATTEMPT
  *
  * Expectations by subject: every bundle accepted; tiny-tracker (isokron-ai/mcp-write-safety) with its catalog
- * read, its plan hash the accepted one, and the full write test run to completion; kronicle-lite with its catalog
- * read; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
+ * read, its plan hash the accepted one, and the full write test run to completion; kronicle-lite the same, built
+ * from source in the build image with install egress to registry.npmjs.org only; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
  * first item that does not meet them (all items are still printed).
  */
 import { readFileSync } from 'node:fs';
@@ -41,7 +41,14 @@ const EXPECT = {
     ['plan hash is the accepted one', r.plan?.hash !== null && r.plan?.drift === false],
     ['full write test ran to completion', r.full?.ran === true && r.full?.status === 'complete'],
   ],
-  'isokron-ai/kronicle-lite': (r) => [['catalog read', r.catalog?.found === true && r.catalog.tool_count >= 1]],
+  'isokron-ai/kronicle-lite': (r, d) => [
+    ['catalog read', r.catalog?.found === true && r.catalog.tool_count >= 1],
+    ['plan hash is the accepted one', r.plan?.hash !== null && r.plan?.drift === false],
+    ['full write test ran to completion', r.full?.ran === true && r.full?.status === 'complete'],
+    // R-WC-09: better-sqlite3 built from source in the build image; the install reached registry.npmjs.org only.
+    ['installed in the build image', d?.install?.image === 'node24-build'],
+    ['install egress to registry.npmjs.org only', JSON.stringify(d?.install?.egress_hosts) === '["registry.npmjs.org"]' && d?.install?.egress_refused === 0],
+  ],
 };
 
 let failed = 0;
@@ -64,7 +71,9 @@ for (const it of items) {
   if (res) {
     const r = JSON.parse(res.toString('utf8'));
     console.log(`item ${it.index}: package ${r.package} ${r.resolved_version ?? ''}; steps ${r.steps.map((s) => `${s.step}=${s.exit}`).join(' ')}; catalog ${r.catalog.found ? `${r.catalog.tool_count} tools` : r.catalog.why}; plan ${r.plan.hash ?? '-'}${r.plan.drift ? ' (drift)' : ''}; full ${r.full.ran ? r.full.status : 'not run'}`);
-    for (const [what, ok] of (EXPECT[it.subject.toLowerCase()] ?? (() => []))(r)) say(ok, what);
+    const d = files.get('logs/driver.json') ? JSON.parse(files.get('logs/driver.json').toString('utf8')) : null;
+    if (d?.install) console.log(`item ${it.index}: install in ${d.install.image}, ${d.install.steps.map((s) => `${s.name}=${s.exit} ${s.ms} ms`).join(', ')}; egress ${JSON.stringify(d.install.egress_hosts)}`);
+    for (const [what, ok] of (EXPECT[it.subject.toLowerCase()] ?? (() => []))(r, d)) say(ok, what);
   } else {
     say(manifest.skips.length > 0, `no results; skips ${manifest.skips.map((s) => `${s.stage}:${s.reason}`).join(', ')}`);
   }

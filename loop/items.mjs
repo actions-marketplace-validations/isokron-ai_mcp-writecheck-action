@@ -68,6 +68,7 @@ export function loadSeed(file) {
 
 const FIXTURE_FORMAT = 'isokron-writecheck-fixtures/1';
 const HEX16 = /^[0-9a-f]{16}$/;
+const FIXTURE_KEYS = ['subject', 'launch', 'lock', 'integrity', 'manifest', 'link', 'init', 'env', 'random_env', 'background', 'setup', 'full', 'known_answer'];
 /** Where a fixture's manifest is written (two levels below /work, so a dogfood manifest's ../../<dir> cwd lands in /work). */
 export const FIXTURE_MANIFEST = '/work/m/x/writecheck.yaml';
 const LINK_RE = /^\/work\/(?!(?:out|pkg|home|lock|venv|bin|m)(?:\/|$))[a-z0-9_-]{1,40}(?:\/[a-z0-9_-]{1,40}){0,4}$/;
@@ -121,7 +122,8 @@ export function validateFixtures(doc) {
     for (const k of f.random_env ?? []) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.random_env: bad name ${k}`);
     if (!/^loop\/fixtures\/[a-z0-9-]{1,40}$/.test(f.lock ?? '')) throw new Error(`fixtures.${name}.lock must name a folder in loop/fixtures/ with package.json and package-lock.json`);
     if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(f.integrity ?? '')) throw new Error(`fixtures.${name}.integrity must be the package's sha512 integrity`);
-    for (const h of f.install_hosts ?? []) if (!/^[a-z0-9.-]{1,100}$/.test(h)) throw new Error(`fixtures.${name}.install_hosts: bad host ${h}`);
+    // R-WC-09: no fixture widens the install's allowlist; a native module builds from source (registry.npmjs.org only).
+    for (const k of Object.keys(f)) if (!FIXTURE_KEYS.includes(k)) throw new Error(`fixtures.${name}: unknown field ${k}`);
     if (f.full !== undefined) {
       if (!f.manifest) throw new Error(`fixtures.${name}.full needs a manifest`);
       if (!(f.full.plan_hash === null || HEX16.test(f.full.plan_hash ?? ''))) throw new Error(`fixtures.${name}.full.plan_hash must be 16 hex characters or null`);

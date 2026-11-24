@@ -1,6 +1,6 @@
 {
   "format": "isokron-writecheck-fixtures/1",
-  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. install_hosts adds hosts to the install's allowlist proxy for this fixture only: kronicle-lite's better-sqlite3 downloads its prebuilt binary from a GitHub release (github.com, which redirects to release-assets.githubusercontent.com).",
+  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. A fixture with install_scripts installs in the sandbox's build image (node24-build) with the sandbox's native build env: its native modules (kronicle-lite's better-sqlite3) compile from source against the image's own Node headers, and the install reaches registry.npmjs.org only.",
   "fixtures": {
     "tiny-tracker": {
       "subject": "isokron-ai/mcp-write-safety",
@@ -53,10 +53,6 @@
       },
       "lock": "loop/fixtures/kronicle-lite",
       "integrity": "sha512-4eA6yzHLqj/ox/fO87mUWy1p/6Epf/UOmVmd6h3gCXBDX4ZW8aox0uyFgvjpofwR4HMeJEto04xTtg4y5pxTWw==",
-      "install_hosts": [
-        "github.com",
-        "release-assets.githubusercontent.com"
-      ],
       "manifest": "dogfood/kronicle-lite/writecheck.yaml",
       "link": "/work/kl",
       "init": true,

@@ -54,7 +54,7 @@ const MANIFEST = `${OUTD}/writecheck.yaml`;
 const PROXY_PORT = 8080;
 /** The bridge's port in the server's container (split runs). */
 const BRIDGE_PORT = 7300;
-const MS = { install: 300_000, setup: 120_000, step: 150_000, full: 900_000, helper: 120_000 };
+const MS = { build: 900_000, install: 300_000, setup: 120_000, step: 150_000, full: 900_000, helper: 120_000 };
 /** No item starts after this long (the pump's lease for 10 items is 46 minutes; the job stops at 45). */
 const SHARD_BUDGET_MS = Number(process.env.LOOP_SHARD_BUDGET_S || 26 * 60) * 1000;
 const COLLECT = { file: 4 * 1024 * 1024, total: 24 * 1024 * 1024, entries: 2000 };
@@ -108,7 +108,7 @@ export function parseArgs(argv) {
 export const MSC_MODULES = ['src/docker.mjs', 'src/sandbox-run.mjs', 'src/sandbox-net.mjs', 'src/sandbox-env.mjs', 'src/runsc.mjs', 'src/telemetry.mjs', 'src/targets.mjs'];
 export const MSC_NEEDS = [
   'Docker', 'HarnessError', 'LIMITS', 'NETS', 'RUNTIME', 'Telemetry', 'checkDockerVersion', 'checkPinned', 'fromProxy', 'helperRunArgs',
-  'hostDropsFor', 'isPublicIp4', 'jsonLines', 'launchPlan', 'loadRunscConfig', 'preflight', 'readHostLog', 'rolesOn', 'sandboxRunArgs',
+  'hostDropsFor', 'isPublicIp4', 'NATIVE_BUILD_ENV', 'jsonLines', 'launchPlan', 'loadRunscConfig', 'preflight', 'readHostLog', 'rolesOn', 'sandboxRunArgs',
   'settingsDigest', 'settingsManifest', 'startNetlogOn', 'stopNetlog', 'sweepTraces', 'takeTrace', 'watchTraces', 'writeDrops', 'writeNetlog',
 ];
 
@@ -176,7 +176,7 @@ class Shard {
     const ncpu = Number((await this.dk.d(['info', '--format', '{{.NCPU}}'], { keepStdout: true, logStdout: false })).stdout.toString().trim());
     this.cpus = Number.isInteger(ncpu) && ncpu >= 1 ? Math.min(this.M.LIMITS.cpus, ncpu) : 1;
     this.images = this.M.images;
-    for (const k of ['node24', 'node22', 'python']) this.M.checkPinned(this.images[k], k);
+    for (const k of ['node24', 'node22', 'node24-build', 'node22-build', 'python']) this.M.checkPinned(this.images[k], k);
     await this.dk.image(this.images.node24, 'node24');
   }
 
@@ -244,15 +244,20 @@ class Shard {
       const tar = spawnSync('tar', ['-C', u.lock, '-cf', '-', '--owner=0', '--group=0', 'package.json', 'package-lock.json'], { maxBuffer: 16 * 1024 * 1024 });
       if (tar.status !== 0) throw new M.HarnessError('packing the fixture lockfile failed');
       await this.dk.must(this.helper(u.tag, { stdin: true, mounts: [{ src: work, dst: '/work' }], cmd: ['sh', '-c', 'mkdir -p /work/pkg && tar -x -f - --no-same-owner -C /work/pkg'] }, { input: tar.stdout }), 'fixture lockfile');
+      // R-WC-09: with install scripts on, the same build as the sandbox's own npm install: launchPlan put it in the
+      // build image (node24-build) and the step carries NATIVE_BUILD_ENV, so a native module compiles from source
+      // against the image's Node headers and nothing is fetched from outside registry.npmjs.org.
+      const native = u.launch.install_scripts === true;
+      if (native && (!/-build$/.test(plan.image) || !plan.runImage)) throw new M.HarnessError('a fixture with install scripts must install in the build image');
       plan.install = [
-        { name: 'install', cmd: ['npm', 'ci', '--prefix', '/work/pkg', '--no-audit', '--no-fund', '--loglevel=error', '--omit=dev', ...(u.launch.install_scripts ? [] : ['--ignore-scripts'])] },
+        { name: 'install', cmd: ['npm', 'ci', '--prefix', '/work/pkg', '--no-audit', '--no-fund', '--loglevel=error', '--omit=dev', ...(native ? [] : ['--ignore-scripts'])], ...(native ? { env: { ...M.NATIVE_BUILD_ENV } } : {}) },
         { name: 'entry', cmd: ['node', `${TOOLS}/sandbox/npm-entry.mjs`, '/work/pkg', u.launch.package, u.launch.bin ?? ''], out: 'entry.json' },
       ];
     }
     const image = this.images[plan.image];
     await this.dk.image(image, plan.image);
     const inst = { kind: u.launch.kind, steps: [], ok: false, image: plan.image, resolved_version: null, egress: [] };
-    const registries = [...plan.registries, ...(u.installHosts ?? [])];
+    const registries = [...plan.registries];
     const inNet = await this.dk.network(`surface-${this.runId}-${u.tag}-in`, true, u.tag, { sandbox: 'install' });
     const netlog = await M.startNetlogOn(u.tdk, { net: 'install', network: inNet, image: this.images.node24, toolsVol: this.toolsVol, labels: this.dk.labels(u.tag), target: u.tag });
     const proxy = this.name(u.tag, 'proxy');
@@ -284,13 +289,11 @@ class Shard {
           npm_config_cache: '/work/home/.npm', npm_config_update_notifier: 'false', npm_config_fund: 'false', npm_config_audit: 'false',
           PIP_CACHE_DIR: '/work/home/.cache/pip', PIP_DISABLE_PIP_VERSION_CHECK: '1', PIP_NO_INPUT: '1',
           HTTPS_PROXY: proxyUrl, https_proxy: proxyUrl, HTTP_PROXY: proxyUrl, http_proxy: proxyUrl, NO_PROXY: '', no_proxy: '',
-          // An install script that fetches a prebuilt binary (a fixture's native module) reads npm's proxy settings.
-          npm_config_proxy: proxyUrl, npm_config_https_proxy: proxyUrl,
           ...(step.env ?? {}),
         };
         const argv = M.sandboxRunArgs({ name, image, network: inNet, ip: M.NETS.install.target, resolv: 'install', cidfile, labels: this.dk.labels(u.tag), cpus: this.cpus, workdir: '/work', mounts: [{ src: work, dst: '/work' }, { src: this.toolsVol, dst: TOOLS, ro: true }], env, cmd: step.cmd });
         this.writeSettings(argv, { subject: u.tag, role: 'install' });
-        const r = await u.tdk.d(argv, { deadline: Math.min(deadline, Date.now() + MS.install), keepStdout: !!step.out, logStdout: !step.out, cap: 1024 * 1024, onTimeout: () => this.dk.kill(name) });
+        const r = await u.tdk.d(argv, { deadline: Math.min(deadline, Date.now() + (/-build$/.test(plan.image) && step.name === 'install' ? MS.build : MS.install)), keepStdout: !!step.out, logStdout: !step.out, cap: 1024 * 1024, onTimeout: () => this.dk.kill(name) });
         await this.recordContainer({ id: this.readCid(cidfile), t0: s1, exit: r.exit, signal: r.signal, timedOut: r.timed_out, meta: { subject: u.tag, role: 'install' } });
         inst.steps.push({ name: step.name, exit: r.exit, timed_out: r.timed_out, ms: Date.now() - s1 });
         if (step.out && step.name === 'entry') {
@@ -422,7 +425,7 @@ class Shard {
 
   /**
    * One unit (an item or a control) end to end. Returns { steps, install, files, planStdout, fullRan, missing, error }.
-   * `u`: { tag, launch | null, forgery?, fixture?, env, init, manifestFile?, link?, background?, setup?, full?, installHosts? }
+   * `u`: { tag, launch | null, forgery?, fixture?, env, init, manifestFile?, link?, background?, setup?, full? }
    */
   async runUnit(u, unitDeadline) {
     const M = this.M;
@@ -442,7 +445,7 @@ class Shard {
       if (u.forgery) {
         serverCmd = [NODE, `${LOOP}/forgery-server.mjs`];
       } else {
-        const { inst, plan, entry } = await this.install(u, work, Math.min(unitDeadline, Date.now() + MS.install * 2));
+        const { inst, plan, entry } = await this.install(u, work, Math.min(unitDeadline, Date.now() + MS.build + MS.install));
         res.install = inst;
         if (!inst.ok) return res;
         image = this.images[plan.runImage ?? plan.image];
@@ -509,6 +512,14 @@ class Shard {
   }
 }
 
+/**
+ * The distinct hosts the install's proxy was asked for, allowed or not (R-WC-09): names of DNS shape only, the rest
+ * counted as "(other)". The proxy log is the install's own requests, so it is checked before it leaves raw/.
+ */
+export function egressHosts(egress) {
+  return [...new Set(egress.map((e) => (typeof e.host === 'string' && /^[a-z0-9.-]{1,253}$/.test(e.host) ? `${e.host}${e.allowed ? '' : ' (refused)'}` : '(other)')))].sort().slice(0, 50);
+}
+
 /** The unit description for a subject (or a fixture), from its resolution. */
 function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
   const f = resolved.fixture ? fixtures.fixtures[resolved.fixture] : null;
@@ -518,7 +529,6 @@ function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
   return {
     tag, stepDir, launch: resolved.launch, fixture: resolved.fixture, env,
     init: f ? f.init !== false : true,
-    installHosts: f?.install_hosts ?? [],
     background: f?.background ?? null,
     setup: f?.setup ?? null,
     full: f?.full ?? null,
@@ -604,7 +614,7 @@ async function runItem(ctx, item, deadline) {
     const shardTel = shard.tel;
     shard.tel = new shard.M.Telemetry(telFile, { run: shard.runId });
     try { res = await shard.runUnit(u, Math.min(deadline + 15 * 60_000, Date.now() + 20 * 60_000)); } finally { shard.tel = shardTel; }
-    driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length } : null;
+    driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress) } : null;
     driver.error = res.error;
     driver.evidence_missing = [...new Set(res.missing)];
     driver.collected = res.collected;

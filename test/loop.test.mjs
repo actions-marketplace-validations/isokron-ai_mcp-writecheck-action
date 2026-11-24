@@ -407,7 +407,7 @@ test('R-WC-05: every subject and the forgery control run split; only our locked 
   for (const x of Object.values(f.fixtures)) assert.ok(x.subject.startsWith('isokron-ai/') && x.manifest && x.lock, x.subject);
 });
 
-test('R-WC-07: fixtures install from committed lockfiles pinned by integrity, with the narrowest extra install hosts', () => {
+test('R-WC-07: fixtures install from committed lockfiles pinned by integrity', () => {
   const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
   for (const [name, x] of Object.entries(f.fixtures)) {
     const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
@@ -415,8 +415,6 @@ test('R-WC-07: fixtures install from committed lockfiles pinned by integrity, wi
     assert.equal(lock.packages[`node_modules/${x.launch.package}`].integrity, x.integrity);
     assert.deepEqual(JSON.parse(readFileSync(join(root, x.lock, 'package.json'), 'utf8')).dependencies, { [x.launch.package]: x.launch.version });
   }
-  assert.deepEqual(f.fixtures['kronicle-lite'].install_hosts, ['github.com', 'release-assets.githubusercontent.com']);
-  assert.equal(f.fixtures['tiny-tracker'].install_hosts, undefined);
   const x = f.fixtures['kronicle-lite'];
   const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
   assert.ok(lockProblems({ ...x, integrity: `sha512-${'A'.repeat(86)}==` }, lock).length > 0, 'another integrity is refused');
@@ -430,4 +428,31 @@ test('R-WC-08: teardown fails while a process of the sandbox user is left on the
   assert.match(t, /pgrep -u 65534/);
   assert.match(t, /left\(\) \{ pgrep -f 'runsc-sandbox\|runsc-gofer\|containerd-shim-runsc' \|\| pgrep -u 65534; \}/);
   assert.match(t, /exit 1\n?$/);
+});
+
+test('R-WC-09: a native fixture builds from source in the build image; no fixture widens the install allowlist', async () => {
+  const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
+  for (const x of Object.values(f.fixtures)) assert.equal(x.install_hosts, undefined);
+  assert.equal(f.fixtures['kronicle-lite'].launch.install_scripts, true);
+  const base = JSON.parse(readFileSync(join(root, 'loop', 'fixtures.json'), 'utf8'));
+  base.fixtures['kronicle-lite'].install_hosts = ['github.com'];
+  assert.throws(() => validateFixtures(base), /unknown field install_hosts/);
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  // The locked install keeps launchPlan's build image and carries the sandbox's native build env.
+  assert.match(src, /\.\.\.\(native \? \{ env: \{ \.\.\.M\.NATIVE_BUILD_ENV \} \} : \{\}\)/);
+  assert.match(src, /if \(native && \(!\/-build\$\/\.test\(plan\.image\) \|\| !plan\.runImage\)\) throw/);
+  assert.match(src, /const registries = \[\.\.\.plan\.registries\];/);
+  assert.doesNotMatch(src, /npm_config_proxy|installHosts/);
+  const { egressHosts, MSC_NEEDS } = await import('../loop/run-items.mjs');
+  assert.ok(MSC_NEEDS.includes('NATIVE_BUILD_ENV'));
+  assert.deepEqual(egressHosts([{ host: 'registry.npmjs.org', allowed: true }, { host: 'registry.npmjs.org', allowed: true }, { host: 'github.com', allowed: false }, { host: 'Attempt_ID=x', allowed: false }]), ['(other)', 'github.com (refused)', 'registry.npmjs.org']);
+  if (process.env.MSC_DIR) {
+    const { pathToFileURL } = await import('node:url');
+    const T = await import(pathToFileURL(join(process.env.MSC_DIR, 'src', 'targets.mjs')).href);
+    const plan = T.launchPlan({ kind: 'npm', package: 'kronicle-lite', version: '0.11.2', install_scripts: true });
+    assert.equal(plan.image, 'node24-build');
+    assert.equal(plan.runImage, 'node24');
+    assert.deepEqual(plan.registries, ['registry.npmjs.org']);
+    assert.deepEqual({ ...T.NATIVE_BUILD_ENV }, { npm_config_nodedir: '/usr/local', npm_config_build_from_source: 'true' });
+  }
 });
