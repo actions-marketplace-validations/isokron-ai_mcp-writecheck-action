@@ -58,10 +58,11 @@ env:
   # test/loop-workflow.test.mjs checks), and the seed the subjects are mapped with.
   WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
   SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  # isokron-ai/mcp-surface-corpus main at 066c15d (pull requests 9 and 10: the guard's install-network hostile cases
+  # isokron-ai/mcp-surface-corpus main at 94b0a4a (pull request 11: capped work volumes, data-root and container logs,
+  # the link-safe readout, and the guard's link, socket, flood and archive-bomb cases; 9 and 10: the install-network cases
   # and the proxy positive control, which this lane's npm installs with scripts need; 8: native npm modules built from
   # source in the node*-build images; 7: the sandbox guard action, the reusable conformance workflow). The conformance job and the sandbox-guard step name this same commit.
-  SANDBOX_REF: '066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5'
+  SANDBOX_REF: '94b0a4a1e5c0d273d412a2962754ba7044b37923'
 
 jobs:
   guard:
@@ -104,7 +105,7 @@ jobs:
     if: needs.guard.outputs.proceed == 'true'
     permissions:
       contents: read
-    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5 # SANDBOX_REF
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@94b0a4a1e5c0d273d412a2962754ba7044b37923 # SANDBOX_REF
     with:
       mutations: false
       artifact-prefix: writecheck-conformance
@@ -153,7 +154,7 @@ jobs:
       # unless the telemetry check recomputes a pass.
       - id: sandbox
         name: Sandbox guard (gVisor, firewall, self test)
-        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5 # SANDBOX_REF
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@94b0a4a1e5c0d273d412a2962754ba7044b37923 # SANDBOX_REF
       - name: The guard ran the pinned sandbox and passed
         env:
           VERDICT: ${{ steps.sandbox.outputs.verdict }}

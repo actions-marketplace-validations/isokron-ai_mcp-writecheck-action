@@ -31,14 +31,14 @@ concurrency:
 env:
   WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
   SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  SANDBOX_REF: '066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5'
+  SANDBOX_REF: '94b0a4a1e5c0d273d412a2962754ba7044b37923'
 
 jobs:
   conformance:
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
-    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5 # SANDBOX_REF
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@94b0a4a1e5c0d273d412a2962754ba7044b37923 # SANDBOX_REF
     with:
       mutations: false
       artifact-prefix: loop-fixture-conformance
@@ -83,7 +83,7 @@ jobs:
       # unless the telemetry check recomputes a pass.
       - id: sandbox
         name: Sandbox guard (gVisor, firewall, self test)
-        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@066c15dbac1e1ef59ea6ba1705b5be344a3dfdc5 # SANDBOX_REF
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@94b0a4a1e5c0d273d412a2962754ba7044b37923 # SANDBOX_REF
       - name: The guard ran the pinned sandbox and passed
         env:
           VERDICT: ${{ steps.sandbox.outputs.verdict }}
