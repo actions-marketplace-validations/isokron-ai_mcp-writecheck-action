@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { FIXTURE_MANIFEST, InputError, catalogManifest, loadFixtures, parseItems, resolveSubject, seedPackages, validateFixtures } from '../loop/items.mjs';
+import { FIXTURE_MANIFEST, InputError, catalogManifest, loadFixtures, lockProblems, parseItems, resolveSubject, seedPackages, validateFixtures } from '../loop/items.mjs';
 import { findRunFolder, observations, planHash, publicSummary, readCatalog, readResults, summarize, ndjson } from '../loop/summary.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, hasIdentityKeys, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from '../loop/bundle.mjs';
 import { evaluateGuard, laneVariable, main as guardMain, refProblem } from '../loop/guard.mjs';
@@ -348,4 +348,86 @@ test('R-WC-04: the collector brings the files the summary reads first, ahead of 
   for (const f of ['full/r1/results.json', 'results/catalog-0123456789/results.json', 'results/catalog-0123456789/catalog.json']) assert.ok(p.files.has(f), f);
   assert.equal(p.entries.length, 10);
   assert.equal(p.done.capped, true);
+});
+
+test('R-WC-05: the forgery control fails when the verdict was tampered with, not only when text leaked', async () => {
+  const { FORGED_PLAN_HASH } = await import('../loop/bundle.mjs');
+  assert.ok(readFileSync(join(root, 'loop', 'sandbox', 'forgery-server.mjs'), 'utf8').includes(`FORGED_PLAN_HASH = '${FORGED_PLAN_HASH}'`));
+  const marker = `wcforgery${'3'.repeat(32)}`;
+  const { tools } = forgeryCatalog(marker);
+  const real = { run: { status: 'complete' }, results: [
+    { requirement: 'MWS-ANN-4', verdict: 'violated', write_path: { resource: '(catalog)', tool: 'attempt_id' } },
+    { requirement: 'MWS-ANN-4', verdict: 'held', write_path: { resource: '(catalog)', tool: 'fence' } },
+  ] };
+  const verdictOf = (files, planStdout) => {
+    const s = summarize({ files: filesOf(files), steps: [], planStdout });
+    const output = { summary: publicSummary(s), observations: observations(s, { versions: {}, stagesRan: {} }) };
+    return forgeryVerdict({ marker, output, rawTexts: [marker], toolCount: s.catalog.tool_count, summary: s });
+  };
+  const cat = 'results/catalog-0123456789';
+  // Split from the CLI: the real verdict.
+  assert.equal(verdictOf({ [`${cat}/catalog.json`]: { tools }, [`${cat}/results.json`]: real }, 'plan hash: 1111222233334444\n'), 'contained');
+  // What the server could do sharing the CLI's container: rewrite results.json, write a plan hash into the CLI's stdout, plant a folder.
+  const allHeld = { run: { status: 'complete' }, results: real.results.map((r) => ({ ...r, verdict: 'held' })) };
+  assert.equal(verdictOf({ [`${cat}/catalog.json`]: { tools }, [`${cat}/results.json`]: allHeld }, 'plan hash: 1111222233334444\n'), 'tampered');
+  assert.equal(verdictOf({ [`${cat}/catalog.json`]: { tools }, [`${cat}/results.json`]: real }, `plan hash: ${FORGED_PLAN_HASH}\n`), 'tampered');
+  assert.equal(verdictOf({ [`${cat}/catalog.json`]: { tools }, [`${cat}/results.json`]: real }, `plan hash: 1111222233334444\nplan hash: ${FORGED_PLAN_HASH}\n`), 'tampered');
+  const forgedRec = { run: { status: 'complete' }, results: [...real.results, { requirement: 'MWS-ANN-4', verdict: 'held', write_path: { resource: '(catalog)', tool: 'forged' } }] };
+  assert.equal(verdictOf({ [`${cat}/catalog.json`]: { tools }, [`${cat}/results.json`]: forgedRec }, 'plan hash: 1111222233334444\n'), 'tampered');
+  assert.equal(verdictOf({ [`${cat}/catalog.json`]: { tools }, [`${cat}/results.json`]: real, 'results/catalog-ffffffffff/results.json': allHeld }, 'plan hash: 1111222233334444\n'), 'not_read');
+  // The tampering runs only where the driver asks for it: a test that starts the server must not write into its runner's processes.
+  assert.match(readFileSync(join(root, 'loop', 'sandbox', 'forgery-server.mjs'), 'utf8'), /if \(process\.env\.FORGERY_TAMPER === '1'\)/);
+});
+
+test('R-WC-05: bridge and relay carry a stdio server over TCP, both ways, and the server answers after stdin ends', async () => {
+  const port = 47000 + Math.floor(Math.random() * 900);
+  const { spawn } = await import('node:child_process');
+  const bridge = spawn(process.execPath, [join(root, 'loop', 'sandbox', 'bridge.mjs'), String(port), '--', process.execPath, join(root, 'loop', 'sandbox', 'forgery-server.mjs')], { env: { ...process.env, FORGERY_MARKER: 'm'.repeat(20) }, stdio: ['ignore', 'pipe', 'ignore'] });
+  try {
+    await new Promise((ok, no) => { bridge.stdout.on('data', (d) => { if (String(d).includes('"listening"')) ok(); }); bridge.on('exit', no); setTimeout(no, 10_000); });
+    const r = spawnSync(process.execPath, [join(root, 'loop', 'sandbox', 'relay.mjs'), '127.0.0.1', String(port)], { input: `${JSON.stringify({ jsonrpc: '2.0', id: 7, method: 'tools/list' })}\n`, encoding: 'utf8', timeout: 10_000 });
+    assert.equal(r.status, 0);
+    const msg = JSON.parse(r.stdout.trim().split('\n')[0]);
+    assert.equal(msg.id, 7);
+    assert.deepEqual(msg.result.tools.map((t) => t.name), ['attempt_id', 'fence']);
+    const bad = spawnSync(process.execPath, [join(root, 'loop', 'sandbox', 'relay.mjs'), 'localhost', String(port)], { encoding: 'utf8' });
+    assert.equal(bad.status, 2, 'an address that is not IPv4 is refused');
+  } finally { bridge.kill('SIGKILL'); }
+});
+
+test('R-WC-05: every subject and the forgery control run split; only our locked fixtures share the CLI\'s container', () => {
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  assert.match(src, /if \(!u\.manifestFile\) \{\n\s*\/\/ Every subject and the forgery control[^\n]*\n\s*await this\.splitRun\(/);
+  const split = src.slice(src.indexOf('async splitRun('), src.indexOf('One unit (an item or a control) end to end'));
+  // The server's container: the install volume read-only and the tools, never the output volume.
+  assert.match(split, /mounts: \[\{ src: work, dst: '\/work', ro: true \}, \{ src: this\.toolsVol, dst: TOOLS, ro: true \}\], env: runEnv/);
+  // The CLI's container: our helper at the probe address, with the output volume.
+  assert.match(split, /helperRunArgs\(\{ name: cname, image: this\.images\.node24, network, ip: M\.NETS\.run\.probe/);
+  const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
+  for (const x of Object.values(f.fixtures)) assert.ok(x.subject.startsWith('isokron-ai/') && x.manifest && x.lock, x.subject);
+});
+
+test('R-WC-07: fixtures install from committed lockfiles pinned by integrity, with the narrowest extra install hosts', () => {
+  const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
+  for (const [name, x] of Object.entries(f.fixtures)) {
+    const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
+    assert.deepEqual(lockProblems(x, lock), [], name);
+    assert.equal(lock.packages[`node_modules/${x.launch.package}`].integrity, x.integrity);
+    assert.deepEqual(JSON.parse(readFileSync(join(root, x.lock, 'package.json'), 'utf8')).dependencies, { [x.launch.package]: x.launch.version });
+  }
+  assert.deepEqual(f.fixtures['kronicle-lite'].install_hosts, ['github.com', 'release-assets.githubusercontent.com']);
+  assert.equal(f.fixtures['tiny-tracker'].install_hosts, undefined);
+  const x = f.fixtures['kronicle-lite'];
+  const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
+  assert.ok(lockProblems({ ...x, integrity: `sha512-${'A'.repeat(86)}==` }, lock).length > 0, 'another integrity is refused');
+  const loose = structuredClone(lock);
+  loose.packages['node_modules/zod'].resolved = 'https://example.com/zod.tgz';
+  assert.ok(lockProblems(x, loose).some((p) => p.includes('node_modules/zod')));
+});
+
+test('R-WC-08: teardown fails while a process of the sandbox user is left on the host', () => {
+  const t = readFileSync(join(root, 'loop', 'teardown.sh'), 'utf8');
+  assert.match(t, /pgrep -u 65534/);
+  assert.match(t, /left\(\) \{ pgrep -f 'runsc-sandbox\|runsc-gofer\|containerd-shim-runsc' \|\| pgrep -u 65534; \}/);
+  assert.match(t, /exit 1\n?$/);
 });

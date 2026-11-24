@@ -42,13 +42,23 @@ for (const [name, text] of [['corpus.yml', worker], ['loop-fixture.yml', fixture
     const jobs = b.slice(b.indexOf('\njobs:\n'));
     const jobNames = [...jobs.matchAll(/^ {2}([a-z][a-z0-9-]*):$/gm)].map((m) => m[1]);
     assert.ok(jobNames.length >= 1);
-    assert.equal((jobs.match(/^ {4}timeout-minutes: \d+$/gm) ?? []).length, jobNames.length, 'a timeout on every job');
+    // A job that calls a reusable workflow cannot set a timeout (the called jobs have theirs); every other job does.
+    const called = (jobs.match(/^ {4}uses: /gm) ?? []).length;
+    assert.equal((jobs.match(/^ {4}timeout-minutes: \d+$/gm) ?? []).length, jobNames.length - called, 'a timeout on every job');
     for (const m of b.matchAll(/uses: (\S+)/g)) assert.match(m[1], /^[^@]+@[0-9a-f]{40}$/, m[1]);
     for (const r of runBlocks(b)) assert.doesNotMatch(r, /\$\{\{/, r.slice(0, 80));
     const kit = b.match(/isokron-ai\/tool-qa\/worker-kit@([0-9a-f]{40})/g);
     const pin = /WORKER_KIT_REF: '([0-9a-f]{40})'/.exec(b)[1];
     for (const k of kit) assert.ok(k.endsWith(pin), 'every worker-kit step names WORKER_KIT_REF');
-    assert.match(b, /SANDBOX_REF: '[0-9a-f]{40}'/);
+    // R-WC-06: the sandbox at 97bd96c or later, the reusable conformance workflow and the in-job guard both at it.
+    const sbx = /SANDBOX_REF: '([0-9a-f]{40})'/.exec(b)[1];
+    assert.equal(sbx, '97bd96cae93b894fa3f891e3c05514a7c4bc0432');
+    assert.match(b, new RegExp(`\\n {4}uses: isokron-ai/mcp-surface-corpus/\\.github/workflows/sandbox-conformance\\.yml@${sbx} `));
+    assert.match(b, new RegExp(`uses: isokron-ai/mcp-surface-corpus/sandbox-guard@${sbx} `));
+    assert.match(b, /needs\.conformance\.outputs\.verdict == 'pass'/);
+    assert.doesNotMatch(b, /prepare\.sh (sandbox|selftest)/);
+    const job = b.slice(b.lastIndexOf('\n  ', b.indexOf('timeout-minutes: 45')));
+    assert.ok(job.indexOf('sandbox-guard@') < job.indexOf('loop/run-items.mjs'), 'the guard runs on this runner before any target');
     assert.match(b, /SEED_REF: '[0-9a-f]{40}'/);
   });
 }
@@ -64,7 +74,7 @@ test('corpus.yml: the pump\'s worker contract (dispatch only, three inputs, run 
   assert.ok(guard.indexOf('LOOP_ENABLED') < guard.indexOf('actions/checkout'), 'LOOP_ENABLED is checked before any checkout');
   assert.match(guard, /LANE_WRITECHECK_ENABLED: \$\{\{ vars\.LANE_WRITECHECK_ENABLED \}\}/);
   assert.match(guard, /LOOP_PAUSE_UNTIL: \$\{\{ vars\.LOOP_PAUSE_UNTIL \}\}/);
-  assert.match(b, /\n {2}writecheck:\n {4}needs: guard\n {4}if: needs\.guard\.outputs\.proceed == 'true'/);
+  assert.match(b, /\n {2}writecheck:\n {4}needs: \[guard, conformance\]\n {4}if: needs\.guard\.outputs\.proceed == 'true' && needs\.conformance\.outputs\.verdict == 'pass'/);
   // The inputs are checked whole before anything else in the job.
   const job = b.slice(b.indexOf('\n  writecheck:'));
   assert.ok(job.indexOf('name: Check the inputs') < job.indexOf('uses: actions/checkout'));
@@ -74,8 +84,8 @@ test('corpus.yml: the pump\'s worker contract (dispatch only, three inputs, run 
     assert.match(job, new RegExp(`- name: Seal and upload item ${i}\\n {8}if: \\$\\{\\{ !cancelled\\(\\) && steps\\.teardown\\.outcome == 'success' && steps\\.run\\.outputs\\.controls_ok == 'true' && steps\\.run\\.outputs\\.has_${i} == 'true' \\}\\}\\n`));
     assert.match(job, new RegExp(`item-index: '${i}'\\n {10}fence: \\$\\{\\{ steps\\.run\\.outputs\\.fence_${i} \\}\\}\\n {10}run-key: \\$\\{\\{ steps\\.run\\.outputs\\.run_key_${i} \\}\\}`));
   }
-  assert.ok(job.indexOf('name: Sandbox self test') < job.indexOf('name: Run the items in the sandbox'));
-  assert.ok(job.indexOf('loop/prepare.sh fetch') < job.indexOf('loop/prepare.sh sandbox'), 'the CLI is built before gVisor and before any target');
+  assert.ok(job.indexOf('name: Sandbox guard') < job.indexOf('name: Run the items in the sandbox'));
+  assert.ok(job.indexOf('loop/prepare.sh fetch') < job.indexOf('sandbox-guard@'), 'the CLI is built before gVisor and before any target');
   assert.ok(job.indexOf('loop/teardown.sh') < job.indexOf('Seal and upload item 0'));
   assert.doesNotMatch(job, /dry-run/);
 });

@@ -31,11 +31,21 @@ concurrency:
 env:
   WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
   SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  SANDBOX_REF: '3b43c19a3b84950732379ea5beee06a8f73512a6'
+  SANDBOX_REF: '97bd96cae93b894fa3f891e3c05514a7c4bc0432'
 
 jobs:
-  fixture:
+  conformance:
     if: github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@97bd96cae93b894fa3f891e3c05514a7c4bc0432 # SANDBOX_REF
+    with:
+      mutations: false
+      artifact-prefix: loop-fixture-conformance
+
+  fixture:
+    needs: conformance
+    if: github.event.pull_request.head.repo.full_name == github.repository && needs.conformance.outputs.verdict == 'pass'
     name: loop-fixture
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -69,10 +79,19 @@ jobs:
       # The CLI first, before any third-party code runs in this job; then the sandbox's own code and the seed.
       - name: Fetch and build
         run: loop/prepare.sh fetch
-      - name: Install gVisor and guard the container networks
-        run: loop/prepare.sh sandbox
-      - name: Sandbox self test
-        run: loop/prepare.sh selftest
+      # gVisor, the firewall and the hostile self test on this very runner, before any target; the step fails
+      # unless the telemetry check recomputes a pass.
+      - id: sandbox
+        name: Sandbox guard (gVisor, firewall, self test)
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@97bd96cae93b894fa3f891e3c05514a7c4bc0432 # SANDBOX_REF
+      - name: The guard ran the pinned sandbox and passed
+        env:
+          VERDICT: ${{ steps.sandbox.outputs.verdict }}
+          GUARD_SHA: ${{ steps.sandbox.outputs.sandbox-sha }}
+        run: |
+          [ "$VERDICT" = pass ] || { echo "::error::the sandbox self test did not pass"; exit 1; }
+          [ "$GUARD_SHA" = "$SANDBOX_REF" ] || { echo "::error::the sandbox guard ran another commit than SANDBOX_REF"; exit 1; }
+          [ "$(git -C msc rev-parse HEAD)" = "$SANDBOX_REF" ] || { echo "::error::the driver's sandbox checkout is not SANDBOX_REF"; exit 1; }
       - id: run
         name: Run the items in the sandbox
         env:
@@ -164,6 +183,6 @@ jobs:
           path: |
             ${{ runner.temp }}/wc/
             ${{ runner.temp }}/tool-qa-result/
-            ${{ runner.temp }}/selftest/telemetry.jsonl
+            ${{ runner.temp }}/sandbox-selftest/telemetry.jsonl
           if-no-files-found: warn
           retention-days: 7

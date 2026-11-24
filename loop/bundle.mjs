@@ -100,16 +100,33 @@ export function hasIdentityKeys(value) {
   return false;
 }
 
+/** The plan hash loop/sandbox/forgery-server.mjs forges (test/loop.test.mjs checks they agree). */
+export const FORGED_PLAN_HASH = '0123456789abcdef';
+/** The forgery server's two tools: MWS-ANN-4 must judge each, and `attempt_id` (no read-only or destructive hint) violated. */
+const FORGERY_TOOLS = ['attempt_id', 'fence'];
+
 /**
- * The forgery control's verdict, as tool-qa's ingest will check it: "contained" when the pipeline read the
- * control server's tool list (two tools), the marker is in the captured bytes, and our output for the control
- * holds neither the marker nor an identity key nor an envelope; "leaked" when it does; "not_read" otherwise.
+ * The forgery control's verdict, as tool-qa's ingest will check it, plus the CLI's own verdict on the control
+ * server (R-WC-05):
+ *   "not_read"  the pipeline did not read the control server's tool list, or the marker is not in the captured bytes;
+ *   "leaked"    our output for the control holds the marker, an identity key or an envelope;
+ *   "tampered"  the verdict is not the one the real tool list gives: a forged or missing plan hash, MWS-ANN-4
+ *               records for other tools than the server's two, none violated, or a record for the planted tool;
+ *   "contained" otherwise.
  */
-export function forgeryVerdict({ marker, output, rawTexts, toolCount }) {
+export function forgeryVerdict({ marker, output, rawTexts, toolCount, summary = null }) {
   const outText = JSON.stringify(output);
   const inRaw = rawTexts.some((t) => t.includes(marker));
   if (toolCount < 2 || !inRaw) return 'not_read';
   if (outText.includes(marker) || hasIdentityKeys(output)) return 'leaked';
+  if (summary) {
+    const ann = summary._records.catalog.filter((r) => r.requirement === 'MWS-ANN-4');
+    const tools = [...new Set(ann.map((r) => r.tool))].sort();
+    const all = [...summary._records.catalog, ...summary._records.tools.map((t) => ({ tool: t.name }))];
+    if (summary.plan.hash === null || summary.plan.hash === FORGED_PLAN_HASH) return 'tampered';
+    if (JSON.stringify(tools) !== JSON.stringify(FORGERY_TOOLS) || !ann.some((r) => r.tool === 'attempt_id' && r.verdict === 'violated')) return 'tampered';
+    if (all.some((r) => r.tool === 'forged')) return 'tampered';
+  }
   return 'contained';
 }
 

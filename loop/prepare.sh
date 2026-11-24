@@ -5,14 +5,9 @@
 #   loop/prepare.sh fetch      mcp-writecheck at CLI_REF (built by dogfood/build-cli.sh), mcp-surface-corpus at
 #                              SANDBOX_REF (the sandbox), tool-qa's seed at SEED_REF; every checkout is a public
 #                              repository fetched by its full commit SHA, with no token, and checked to be at it
-#   loop/prepare.sh sandbox    gVisor and the host firewall from that checkout: install-runsc.sh, then net-guard.sh
-#                              (registering runsc restarts the Docker daemon, so the firewall comes second)
-#   loop/prepare.sh selftest   mcp-surface-corpus's sandbox self test (hostile target, eleven escape attempts) and
-#                              its telemetry check. The check decides, as in that repository's sandbox-selftest.yml;
-#                              a failure stops the job before any target runs.
 #
-# TODO(sandbox-conformance): call mcp-surface-corpus's reusable sandbox-conformance.yml for the self test once it
-# is merged there; until then the self test runs inline here, from the same pinned checkout.
+# gVisor, the firewall and the sandbox self test are not here: the workflows call mcp-surface-corpus's reusable
+# sandbox-conformance.yml and, in the job itself, its sandbox-guard action, both at SANDBOX_REF.
 #
 # Nothing here runs third-party server code: the CLI is built before anything else, from its own lockfile with
 # install scripts off (dogfood/build-cli.sh).
@@ -44,17 +39,8 @@ case "${1:-}" in
     fetch_at isokron-ai/mcp-surface-corpus "$SANDBOX_REF" msc
     fetch_at isokron-ai/tool-qa "$SEED_REF" toolqa /history/seed-v1.json
     ;;
-  sandbox)
-    sudo msc/scripts/install-runsc.sh "$(command -v node)"
-    sudo msc/scripts/net-guard.sh
-    ;;
-  selftest)
-    out="${RUNNER_TEMP:?}/selftest"
-    node msc/bin/sandbox-selftest.mjs --out "$out" --lane ci || echo "::warning::the self test harness reported a failure; the telemetry check decides"
-    node msc/scripts/check-selftest.mjs "$out/telemetry.jsonl"
-    ;;
   *)
-    echo "usage: loop/prepare.sh fetch|sandbox|selftest" >&2
+    echo "usage: loop/prepare.sh fetch" >&2
     exit 2
     ;;
 esac

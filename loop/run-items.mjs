@@ -52,6 +52,8 @@ const LOOP = `${TOOLS}/loop`;
 const OUTD = '/work/out';
 const MANIFEST = `${OUTD}/writecheck.yaml`;
 const PROXY_PORT = 8080;
+/** The bridge's port in the server's container (split runs). */
+const BRIDGE_PORT = 7300;
 const MS = { install: 300_000, setup: 120_000, step: 150_000, full: 900_000, helper: 120_000 };
 /** No item starts after this long (the pump's lease for 10 items is 46 minutes; the job stops at 45). */
 const SHARD_BUDGET_MS = Number(process.env.LOOP_SHARD_BUDGET_S || 26 * 60) * 1000;
@@ -236,6 +238,17 @@ class Shard {
   async install(u, work, deadline) {
     const M = this.M;
     const plan = M.launchPlan(u.launch);
+    if (u.lock) {
+      // A fixture installs from its committed lockfile (loop/fixtures/<name>/), every tarball checked against the
+      // lock's integrity by npm ci; the package itself must match the integrity pinned in loop/fixtures.json.
+      const tar = spawnSync('tar', ['-C', u.lock, '-cf', '-', '--owner=0', '--group=0', 'package.json', 'package-lock.json'], { maxBuffer: 16 * 1024 * 1024 });
+      if (tar.status !== 0) throw new M.HarnessError('packing the fixture lockfile failed');
+      await this.dk.must(this.helper(u.tag, { stdin: true, mounts: [{ src: work, dst: '/work' }], cmd: ['sh', '-c', 'mkdir -p /work/pkg && tar -x -f - --no-same-owner -C /work/pkg'] }, { input: tar.stdout }), 'fixture lockfile');
+      plan.install = [
+        { name: 'install', cmd: ['npm', 'ci', '--prefix', '/work/pkg', '--no-audit', '--no-fund', '--loglevel=error', '--omit=dev', ...(u.launch.install_scripts ? [] : ['--ignore-scripts'])] },
+        { name: 'entry', cmd: ['node', `${TOOLS}/sandbox/npm-entry.mjs`, '/work/pkg', u.launch.package, u.launch.bin ?? ''], out: 'entry.json' },
+      ];
+    }
     const image = this.images[plan.image];
     await this.dk.image(image, plan.image);
     const inst = { kind: u.launch.kind, steps: [], ok: false, image: plan.image, resolved_version: null, egress: [] };
@@ -351,6 +364,63 @@ class Shard {
   }
 
   /**
+   * A split run (R-WC-05), for every subject and for the forgery control: the server under test runs in a sandbox
+   * container of its own at .3 of the run network, behind our bridge (loop/sandbox/bridge.mjs), with its install
+   * volume read-only and nothing else of ours; the CLI runs in another sandbox container at .4, as our helper, with
+   * the output volume that the server's container never mounts, and reaches the server over TCP through our relay
+   * (loop/sandbox/relay.mjs) as if it were a stdio server. Two gVisor sandboxes: the server cannot see the CLI's
+   * files or processes, write to its stdout, or signal or trace it. Its only channel to the CLI is the protocol.
+   */
+  async splitRun(u, { work, image, serverCmd, res, unitDeadline }) {
+    const M = this.M;
+    const out = await this.dk.volume(`surface-${this.runId}-${u.tag}-out`, u.tag);
+    await this.dk.must(this.helper(u.tag, { user: '0:0', mounts: [{ src: out, dst: OUTD }], capAdd: ['CHOWN'], cmd: ['sh', '-c', `chown 65534:65534 ${OUTD}`] }), 'output volume');
+    const relay = [NODE, `${LOOP}/relay.mjs`, M.NETS.run.target, String(BRIDGE_PORT)];
+    await this.dk.must(this.helper(u.tag, { stdin: true, mounts: [{ src: out, dst: OUTD }], cmd: ['sh', '-c', 'cat > "$1"', 'sh', MANIFEST] }, { input: Buffer.from(catalogManifest(relay, [], `loop-${u.tag}`)) }), 'write the manifest');
+    const left = (cap) => Math.max(1000, Math.min(cap, unitDeadline - Date.now()));
+    await this.withRunNet(u, async (network) => {
+      const name = this.name(u.tag, 's');
+      const cidfile = join(this.cidDir, `${name}.cid`);
+      const argv = M.sandboxRunArgs({ name, image, network, ip: M.NETS.run.target, resolv: 'run', cidfile, detach: true, labels: this.dk.labels(u.tag), cpus: this.cpus, mounts: [{ src: work, dst: '/work', ro: true }, { src: this.toolsVol, dst: TOOLS, ro: true }], env: runEnv({ ...(u.env ?? {}) }), cmd: [NODE, `${LOOP}/bridge.mjs`, String(BRIDGE_PORT), '--', ...serverCmd] });
+      this.writeSettings(argv, { subject: u.tag, role: 'server' });
+      const t0 = Date.now();
+      await this.dk.must(u.tdk.d(argv, { deadline: Date.now() + 60_000 }), 'server container');
+      try {
+        for (let until = Date.now() + 30_000; ;) {
+          const l = await u.tdk.d(['logs', name], { keepStdout: true, logStdout: false, cap: 64 * 1024, deadline: Date.now() + 10_000 });
+          if (M.jsonLines(l.stdout).some((x) => x.listening === BRIDGE_PORT)) break;
+          if (Date.now() >= until) throw new M.HarnessError('the server bridge did not start');
+          await sleep(250);
+        }
+        const cliStep = async (step, args, { keepStdout = false } = {}) => {
+          const cname = this.name(u.tag, 'c');
+          const ccid = join(this.cidDir, `${cname}.cid`);
+          const cargv = M.helperRunArgs({ name: cname, image: this.images.node24, network, ip: M.NETS.run.probe, resolv: 'run', cidfile: ccid, labels: this.dk.labels(u.tag), cpus: this.cpus, mounts: [{ src: out, dst: OUTD }, { src: this.toolsVol, dst: TOOLS, ro: true }], env: { HOME: '/tmp', TMPDIR: '/tmp', NO_COLOR: '1' }, cmd: ['sh', '-c', `cd ${OUTD} && exec "$@"`, 'sh', NODE, CLI_MAIN, ...args] });
+          this.writeSettings(cargv, { subject: u.tag, role: 'probe' });
+          const c0 = Date.now();
+          const r = await this.dk.d(cargv, { log: join(u.stepDir, `${step}.log`), deadline: Date.now() + left(MS.step), keepStdout, cap: 1024 * 1024, logCap: 4 * 1024 * 1024, onTimeout: () => this.dk.kill(cname) });
+          await this.dk.kill(cname);
+          await this.recordContainer({ id: this.readCid(ccid), t0: c0, exit: r.exit, signal: r.signal, timedOut: r.timed_out, meta: { subject: u.tag, role: 'probe' } });
+          res.steps.push({ step, exit: r.exit, timed_out: r.timed_out, ms: Date.now() - c0 });
+          return r;
+        };
+        if (u.init !== false) await cliStep('init', ['init', '--out', `${OUTD}/init-draft.yaml`, '--', ...relay]);
+        res.planStdout = (await cliStep('plan', ['plan', '-m', MANIFEST], { keepStdout: true })).stdout.toString('utf8');
+        await cliStep('catalog', ['catalog', '-m', MANIFEST, '--out', `${OUTD}/results`]);
+      } finally {
+        const l = await u.tdk.d(['logs', name], { keepStdout: true, logStdout: false, cap: 4 * 1024 * 1024 });
+        writeFileSync(join(u.stepDir, 'server.log'), l.stdout);
+        await this.dk.kill(name);
+        await this.recordContainer({ id: this.readCid(cidfile), t0, exit: null, meta: { subject: u.tag, role: 'server' } });
+      }
+    });
+    const c = await this.helper(u.tag, { mounts: [{ src: out, dst: OUTD, ro: true }, { src: this.toolsVol, dst: TOOLS, ro: true }], cmd: ['node', `${LOOP}/collect.mjs`, OUTD, String(COLLECT.file), String(COLLECT.total), String(COLLECT.entries)] }, { keepStdout: true, logStdout: false, cap: 48 * 1024 * 1024 });
+    const parsed = parseCollected(c.stdout.toString('utf8'));
+    res.files = parsed.files;
+    res.collected = { exit: c.exit, entries: parsed.entries.length, bad: parsed.bad, done: parsed.done, truncated: c.stdout_truncated, split: true };
+  }
+
+  /**
    * One unit (an item or a control) end to end. Returns { steps, install, files, planStdout, fullRan, missing, error }.
    * `u`: { tag, launch | null, forgery?, fixture?, env, init, manifestFile?, link?, background?, setup?, full?, installHosts? }
    */
@@ -379,6 +449,11 @@ class Shard {
         serverCmd = plan.run(entry);
         if (u.launch.kind === 'npm') pkgdir = `/work/pkg/node_modules/${u.launch.package}`;
         u.entry = entry;
+      }
+      if (!u.manifestFile) {
+        // Every subject and the forgery control: the server in a sandbox container of its own, the CLI in another.
+        await this.splitRun(u, { work, image, serverCmd, res, unitDeadline });
+        return res;
       }
       const passEnv = Object.keys(u.env ?? {}).sort();
       // A fixture runs its dogfood manifest byte for byte (its plan hash is the one a person accepted there): written
@@ -448,13 +523,14 @@ function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
     setup: f?.setup ?? null,
     full: f?.full ?? null,
     manifestFile, link: f?.link ?? null,
+    lock: f?.lock ? join(here, '..', f.lock) : null,
   };
 }
 
 /** The raw/ copies of one unit's captured output: the files its steps left, the step logs and its telemetry. */
 function addRaw(b, prefix, res, stepDir) {
   for (const [p, data] of res.files) b.raw(safeRawPath(`${prefix}/out`, p), data);
-  for (const f of ['init', 'plan', 'catalog', 'full', 'docker', 'harness-error', ...Array.from({ length: 5 }, (_, k) => `setup-${k}`)]) {
+  for (const f of ['init', 'plan', 'catalog', 'full', 'server', 'docker', 'harness-error', ...Array.from({ length: 5 }, (_, k) => `setup-${k}`)]) {
     const p = join(stepDir, `${f}.log`);
     if (existsSync(p)) b.raw(`${prefix}/steps/${f}.log`, readFileSync(p));
   }
@@ -474,14 +550,14 @@ async function runControls(ctx) {
   const ctlDir = (n) => join(shard.shardDir, 'controls', n);
   // Forgery: our hostile server, through the same steps as a subject (init, plan, catalog), with a fresh marker.
   const marker = `wcforgery${randomBytes(16).toString('hex')}`;
-  const fu = { tag: 'ctl-forgery', stepDir: ctlDir('forgery'), launch: null, forgery: true, env: { FORGERY_MARKER: marker }, init: true };
+  const fu = { tag: 'ctl-forgery', stepDir: ctlDir('forgery'), launch: null, forgery: true, env: { FORGERY_MARKER: marker, FORGERY_TAMPER: '1' }, init: true };
   const fr = await shard.runUnit(fu, Date.now() + 10 * 60_000);
   const fs = summarize({ files: fr.files, steps: fr.steps, planStdout: fr.planStdout });
   const fOut = { format: 'isokron-writecheck-control/1', control: 'forgery', summary: publicSummary(fs), observations: observations(fs, { versions: ctx.versions, stagesRan: { install: false, init: true, plan: true, catalog: true, full: false } }) };
   const fb = new BundleFiles(CONTROL_RAW);
   addRaw(fb, 'raw/control-forgery', fr, fu.stepDir);
   const rawTexts = [...fb.files.values()].map((d) => d.toString('latin1'));
-  const fObserved = forgeryVerdict({ marker, output: fOut, rawTexts, toolCount: fs.catalog.tool_count });
+  const fObserved = forgeryVerdict({ marker, output: fOut, rawTexts, toolCount: fs.catalog.tool_count, summary: fs });
   out.push({ kind: 'forgery', expected: 'contained', observed: fObserved, output: 'controls/forgery.json', marker, file: fOut, raw: fb });
 
   // Known answer: tiny-tracker, installed through the sandbox like a subject, catalog with and without the defect.

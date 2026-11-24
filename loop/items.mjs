@@ -11,6 +11,7 @@
 // Only Node's standard library: the workflow's input check imports this file before anything else is installed.
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 /** The pump's shard size for this lane (tool-qa pump/workflows.json, writecheck). */
 export const MAX_ITEMS = 10;
@@ -72,10 +73,37 @@ export const FIXTURE_MANIFEST = '/work/m/x/writecheck.yaml';
 const LINK_RE = /^\/work\/(?!(?:out|pkg|home|lock|venv|bin|m)(?:\/|$))[a-z0-9_-]{1,40}(?:\/[a-z0-9_-]{1,40}){0,4}$/;
 const ENV_NAME = /^[A-Z][A-Z0-9_]{0,63}$/;
 
-/** loop/fixtures.json, checked. */
+/** loop/fixtures.json, checked, with each fixture's lockfile checked against it (lockProblems). */
 export function loadFixtures(file) {
   const buf = readFileSync(file);
-  return { ...validateFixtures(JSON.parse(buf.toString('utf8'))), sha256: createHash('sha256').update(buf).digest('hex') };
+  const doc = validateFixtures(JSON.parse(buf.toString('utf8')));
+  const root = join(dirname(file), '..');
+  for (const [name, f] of Object.entries(doc.fixtures)) {
+    const p = lockProblems(f, JSON.parse(readFileSync(join(root, f.lock, 'package-lock.json'), 'utf8')));
+    if (p.length) throw new Error(`fixtures.${name}: ${p.join('; ')}`);
+  }
+  return { ...doc, sha256: createHash('sha256').update(buf).digest('hex') };
+}
+
+/**
+ * A fixture's lockfile (R-WC-07): it pins the package at the fixture's version with the integrity in fixtures.json,
+ * and every package in it comes from registry.npmjs.org with an integrity hash. Returns the problems, or [].
+ */
+export function lockProblems(f, lock) {
+  const out = [];
+  const pk = lock?.packages ?? {};
+  const own = pk[`node_modules/${f.launch.package}`];
+  if (!own) out.push('the lockfile does not install the package');
+  else {
+    if (own.version !== f.launch.version) out.push(`the lockfile has version ${own.version}, not ${f.launch.version}`);
+    if (own.integrity !== f.integrity) out.push('the lockfile\'s integrity for the package is not the one pinned in fixtures.json');
+  }
+  if (pk['']?.dependencies?.[f.launch.package] !== f.launch.version) out.push('the lockfile\'s root does not depend on the exact version');
+  for (const [k, v] of Object.entries(pk)) {
+    if (!k) continue;
+    if (!/^sha512-/.test(v.integrity ?? '') || !String(v.resolved ?? '').startsWith('https://registry.npmjs.org/')) out.push(`${k} is not pinned to registry.npmjs.org with a sha512 integrity`);
+  }
+  return out;
 }
 
 export function validateFixtures(doc) {
@@ -91,6 +119,9 @@ export function validateFixtures(doc) {
     if (f.manifest !== undefined && !LINK_RE.test(f.link ?? '')) throw new Error(`fixtures.${name}.link must be a path under /work outside the driver's own folders`);
     for (const k of Object.keys(f.env ?? {})) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.env: bad name ${k}`);
     for (const k of f.random_env ?? []) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.random_env: bad name ${k}`);
+    if (!/^loop\/fixtures\/[a-z0-9-]{1,40}$/.test(f.lock ?? '')) throw new Error(`fixtures.${name}.lock must name a folder in loop/fixtures/ with package.json and package-lock.json`);
+    if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(f.integrity ?? '')) throw new Error(`fixtures.${name}.integrity must be the package's sha512 integrity`);
+    for (const h of f.install_hosts ?? []) if (!/^[a-z0-9.-]{1,100}$/.test(h)) throw new Error(`fixtures.${name}.install_hosts: bad host ${h}`);
     if (f.full !== undefined) {
       if (!f.manifest) throw new Error(`fixtures.${name}.full needs a manifest`);
       if (!(f.full.plan_hash === null || HEX16.test(f.full.plan_hash ?? ''))) throw new Error(`fixtures.${name}.full.plan_hash must be 16 hex characters or null`);
