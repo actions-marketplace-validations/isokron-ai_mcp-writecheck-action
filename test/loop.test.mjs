@@ -301,3 +301,19 @@ test('kill switch: LOOP_ENABLED exactly true, pause, lane switch, pins', () => {
   assert.equal(guardMain([], { LOOP_ENABLED: 'true', WORKER_KIT_REF: 'b'.repeat(40), SANDBOX_REF: 'c'.repeat(40) }, { out, now }), 0);
   assert.equal(guardMain([], { LOOP_ENABLED: 'no' }, { out, now }), 0);
 });
+
+test('R-WC-01: the tools volume carries what its code imports (the network logger needs src/)', async () => {
+  const { MSC_TOOL_DIRS, missingImports } = await import('../loop/run-items.mjs');
+  assert.deepEqual(MSC_TOOL_DIRS, ['sandbox', 'src']);
+  const d = mkdtempSync(join(tmpdir(), 'wc-tools-'));
+  mkdirSync(join(d, 'sandbox'));
+  writeFileSync(join(d, 'sandbox', 'netlog.mjs'), "import { a } from '../src/dns.mjs';\nexport { b } from './x.mjs';\nconst c = await import('./y.mjs');\nimport fs from 'node:fs';\n");
+  writeFileSync(join(d, 'sandbox', 'x.mjs'), 'export const b = 1;\n');
+  assert.deepEqual(missingImports(d), ['sandbox/netlog.mjs -> ../src/dns.mjs', 'sandbox/netlog.mjs -> ./y.mjs']);
+  mkdirSync(join(d, 'src'));
+  writeFileSync(join(d, 'src', 'dns.mjs'), 'export const a = 1;\n');
+  writeFileSync(join(d, 'sandbox', 'y.mjs'), 'export {};\n');
+  assert.deepEqual(missingImports(d), []);
+  // Our own in-sandbox code imports nothing outside loop/sandbox.
+  assert.deepEqual(missingImports(join(root, 'loop', 'sandbox')), []);
+});

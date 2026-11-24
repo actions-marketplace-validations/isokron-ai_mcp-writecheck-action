@@ -30,16 +30,16 @@
  * GITHUB_OUTPUT. The log prints positions and codes only, never a subject's output.
  */
 import { createHash, randomBytes } from 'node:crypto';
-import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { arch, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { lookup } from 'node:dns/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 
 import { InputError, catalogManifest, checkId, fillFixtureManifest, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
-import { ndjson, observations, publicSummary, summarize } from './summary.mjs';
+import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -60,6 +60,31 @@ const COLLECT = { file: 4 * 1024 * 1024, total: 24 * 1024 * 1024, entries: 2000 
 const CONTROL_RAW = { fileCap: 1024 * 1024, totalCap: 3 * 1024 * 1024 };
 
 const sha256 = (b) => createHash('sha256').update(b).digest('hex');
+/** The folders of mcp-surface-corpus that go into the tools volume: its in-container helpers and what they import. */
+export const MSC_TOOL_DIRS = ['sandbox', 'src'];
+
+/**
+ * Relative imports of the .mjs files under `dir` (the staged tools volume) that name a file not there, as
+ * "<importer> -> <specifier>". R-WC-01: the network logger imports ../src/dns.mjs, and a volume without src/ made
+ * every unit fail at the logger's start.
+ */
+export function missingImports(dir) {
+  const out = [];
+  const walk = (abs) => {
+    for (const e of readdirSync(abs, { withFileTypes: true })) {
+      const p = join(abs, e.name);
+      if (e.isDirectory()) { if (e.name !== 'node_modules') walk(p); continue; }
+      if (!e.name.endsWith('.mjs')) continue;
+      const text = readFileSync(p, 'utf8');
+      for (const m of text.matchAll(/(?:^|\n)\s*(?:import|export)\s[^'"]*?from\s+['"](\.{1,2}\/[^'"]+)['"]|import\(\s*['"](\.{1,2}\/[^'"]+)['"]\s*\)/g)) {
+        const spec = m[1] ?? m[2];
+        if (!existsSync(resolve(dirname(p), spec))) out.push(`${relative(dir, p)} -> ${spec}`);
+      }
+    }
+  };
+  walk(dir);
+  return out;
+}
 const json = (v) => `${JSON.stringify(v, null, 2)}\n`;
 const iso = (ms = Date.now()) => new Date(ms).toISOString();
 
@@ -159,13 +184,16 @@ class Shard {
     this.toolsVol = await this.dk.volume(`surface-${this.runId}-tools`);
     const stage = mkdtempSync(join(tmpdir(), 'wc-tools-'));
     try {
-      cpSync(join(this.M.dir, 'sandbox'), join(stage, 'sandbox'), { recursive: true });
+      // mcp-surface-corpus's helpers (the network logger, the egress proxy, the npm entry reader) import its src/.
+      for (const d of MSC_TOOL_DIRS) cpSync(join(this.M.dir, d), join(stage, d), { recursive: true });
       cpSync(join(here, 'sandbox'), join(stage, 'loop'), { recursive: true });
       mkdirSync(join(stage, 'wc', 'node_modules'), { recursive: true });
       cpSync(join(this.o.cli, 'dist'), join(stage, 'wc', 'dist'), { recursive: true });
       cpSync(join(this.o.cli, 'package.json'), join(stage, 'wc', 'package.json'));
       cpSync(join(this.o.cli, 'node_modules', 'yaml'), join(stage, 'wc', 'node_modules', 'yaml'), { recursive: true });
-      const tar = spawnSync('tar', ['-C', stage, '-cf', '-', '--owner=0', '--group=0', '--mode=a+rX,go-w', 'sandbox', 'loop', 'wc'], { maxBuffer: 256 * 1024 * 1024 });
+      const unresolved = missingImports(stage);
+      if (unresolved.length) throw new this.M.HarnessError(`the tools volume would miss what its code imports: ${unresolved.slice(0, 5).join(', ')}`);
+      const tar = spawnSync('tar', ['-C', stage, '-cf', '-', '--owner=0', '--group=0', '--mode=a+rX,go-w', ...MSC_TOOL_DIRS, 'loop', 'wc'], { maxBuffer: 256 * 1024 * 1024 });
       if (tar.status !== 0) throw new this.M.HarnessError('packing the tools failed');
       this.toolsSha = sha256(tar.stdout);
       await this.dk.must(this.dk.d(this.M.helperRunArgs({ name: this.name(null, 'h'), image: this.images.node24, user: '0:0', labels: this.dk.labels(), stdin: true, mounts: [{ src: this.toolsVol, dst: TOOLS }], cmd: ['tar', '-x', '-f', '-', '--no-same-owner', '-C', TOOLS] }), { input: tar.stdout, deadline: Date.now() + MS.helper }), 'tools volume');
@@ -362,7 +390,7 @@ class Shard {
         res.planStdout = p.r.stdout.toString('utf8');
         await step({ step: 'catalog', cmd: cli(['catalog', '-m', MANIFEST, '--out', `${OUTD}/results`]), timeoutMs: left(MS.step) });
         const accepted = u.full?.plan_hash ?? null;
-        const seen = (/^plan hash: ([0-9a-f]{16})$/m.exec(res.planStdout) ?? [])[1] ?? null;
+        const seen = planHash(res.planStdout);
         if (accepted && seen === accepted && Date.now() + 60_000 < unitDeadline) {
           res.fullRan = true;
           await step({ step: 'full', cmd: cli(['run', '-m', MANIFEST, '--confirm-target', u.full.confirm, '--plan-hash', accepted, '--out', `${OUTD}/full`, '--state', `${OUTD}/state`]), timeoutMs: left(MS.full) });
