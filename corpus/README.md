@@ -1,6 +1,6 @@
 # Corpus: batch runs against third-party MCP servers
 
-`.github/workflows/corpus.yml` runs `mcp-writecheck`, dispatched by hand in batches of up to 40 targets on up to 16 parallel jobs, against a pinned
+`.github/workflows/corpus-batch.yml` (until 23 Nov 2026 `corpus.yml`, which is now the loop worker: [loop/README.md](../loop/README.md)) runs `mcp-writecheck`, dispatched by hand in batches of up to 40 targets on up to 16 parallel jobs, against a pinned
 list of open-source MCP servers that IsoKron did not write. Its purpose is to test this action and the CLI on servers
 built by other people: crashes, time limits, harness errors and false positives are what it is
 looking for. It is not a findings channel, and it publishes no verdicts.
