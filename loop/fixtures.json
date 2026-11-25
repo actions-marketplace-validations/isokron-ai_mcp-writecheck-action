@@ -99,7 +99,7 @@
       "lock": "loop/fixtures/pg-tracker",
       "source": {
         "dir": "loop/fixtures/pg-tracker",
-        "sha256": "f13110b0b6bd0014ba362b7ee11ea0900f9353085142b2a389aa5a45e5a10626",
+        "sha256": "40e7a9a54741300edd16de5e6674b7540471db1cf0dae73c6c85f5d48deed47c",
         "bin": "src/cli.mjs"
       },
       "backend": {

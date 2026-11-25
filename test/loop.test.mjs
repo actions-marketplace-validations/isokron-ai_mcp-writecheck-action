@@ -411,17 +411,17 @@ test('R-WC-07: fixtures install from committed lockfiles pinned by integrity', (
   const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
   for (const [name, x] of Object.entries(f.fixtures)) {
     const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
-    assert.deepEqual(lockProblems(x, lock), [], name);
+    assert.deepEqual(lockProblems(x, lock, name), [], name);
     if (x.source) continue; // WC12: a source fixture is the committed folder; test/pg-fixture.test.mjs pins it
     assert.equal(lock.packages[`node_modules/${x.launch.package}`].integrity, x.integrity);
     assert.deepEqual(JSON.parse(readFileSync(join(root, x.lock, 'package.json'), 'utf8')).dependencies, { [x.launch.package]: x.launch.version });
   }
   const x = f.fixtures['kronicle-lite'];
   const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
-  assert.ok(lockProblems({ ...x, integrity: `sha512-${'A'.repeat(86)}==` }, lock).length > 0, 'another integrity is refused');
+  assert.ok(lockProblems({ ...x, integrity: `sha512-${'A'.repeat(86)}==` }, lock, 'kronicle-lite').length > 0, 'another integrity is refused');
   const loose = structuredClone(lock);
   loose.packages['node_modules/zod'].resolved = 'https://example.com/zod.tgz';
-  assert.ok(lockProblems(x, loose).some((p) => p.includes('node_modules/zod')));
+  assert.ok(lockProblems(x, loose, 'kronicle-lite').some((p) => p.includes('node_modules/zod')));
 });
 
 test('R-WC-08: teardown fails while a process of the sandbox user is left on the host', () => {

@@ -59,7 +59,7 @@ jobs:
         run: |
           shard="fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           key() { printf '%s' "$1-$shard" | sha256sum | cut -d' ' -f1; }
-          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4},{"subject":"isokron-ai/mcp-writecheck-action","run_key":"%s","fence":5}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)" "$(key pg)")
+          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4},{"subject":"isokron-ai/mcp-writecheck-action","fixture":"pg-tracker","run_key":"%s","fence":5}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)" "$(key pg)")
           {
             echo "shard_id=$shard"
             echo "attempt_id=$shard"

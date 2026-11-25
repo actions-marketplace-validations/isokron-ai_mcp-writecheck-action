@@ -608,7 +608,7 @@ async function runItem(ctx, item, deadline) {
   const startedAt = iso();
   const b = new BundleFiles();
   const skips = [];
-  const resolved = resolveSubject(item.subject, { seed, fixtures });
+  const resolved = resolveSubject(item.subject, { seed, fixtures }, item.fixture ?? null);
   const driver = { format: 'isokron-writecheck-loop-driver/1', index: item.index, source: resolved.source ?? null, package: resolved.package ?? null, install: null, steps: [], error: null, evidence_missing: [], collected: null };
   let summary = null;
   let res = null;

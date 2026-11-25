@@ -45,14 +45,15 @@ export function parseItems(text) {
   const seen = new Set();
   return list.map((it, index) => {
     if (!it || typeof it !== 'object' || Array.isArray(it)) throw new InputError(`items[${index}] must be an object`);
-    for (const k of Object.keys(it)) if (!['subject', 'run_key', 'fence'].includes(k)) throw new InputError(`items[${index}] has an unknown key`);
+    for (const k of Object.keys(it)) if (!['subject', 'run_key', 'fence', 'fixture'].includes(k)) throw new InputError(`items[${index}] has an unknown key`);
     if (typeof it.subject !== 'string' || !SUBJECT_RE.test(it.subject)) throw new InputError(`items[${index}].subject must be owner/name`);
     if (typeof it.run_key !== 'string' || !RUN_KEY_RE.test(it.run_key)) throw new InputError(`items[${index}].run_key must be 64 lower-case hex characters`);
     if (!Number.isSafeInteger(it.fence) || it.fence < 1) throw new InputError(`items[${index}].fence must be a whole number from 1`);
+    if (it.fixture !== undefined && (typeof it.fixture !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(it.fixture))) throw new InputError(`items[${index}].fixture must be a fixture id`);
     const key = it.subject.toLowerCase();
     if (seen.has(key)) throw new InputError(`items[${index}].subject appears twice`);
     seen.add(key);
-    return { index, subject: it.subject, run_key: it.run_key, fence: it.fence };
+    return { index, subject: it.subject, run_key: it.run_key, fence: it.fence, ...(it.fixture !== undefined ? { fixture: it.fixture } : {}) };
   });
 }
 
@@ -82,7 +83,7 @@ export function loadFixtures(file) {
   const doc = validateFixtures(JSON.parse(buf.toString('utf8')));
   const root = join(dirname(file), '..');
   for (const [name, f] of Object.entries(doc.fixtures)) {
-    const p = lockProblems(f, JSON.parse(readFileSync(join(root, f.lock, 'package-lock.json'), 'utf8')));
+    const p = lockProblems(f, JSON.parse(readFileSync(join(root, f.lock, 'package-lock.json'), 'utf8')), name);
     if (p.length) throw new Error(`fixtures.${name}: ${p.join('; ')}`);
     if (f.source) {
       const got = sourceDigest(join(root, f.source.dir));
@@ -115,9 +116,24 @@ export function sourceDigest(dir) {
  * A fixture's lockfile (R-WC-07): it pins the package at the fixture's version with the integrity in fixtures.json,
  * and every package in it comes from registry.npmjs.org with an integrity hash. Returns the problems, or [].
  */
-export function lockProblems(f, lock) {
+/**
+ * The packages a fixture's lockfile may let run an install script (WC12), by lock path. A script of any other package
+ * is a problem: it would run at install, next to the build image's tools, with only the registry reachable. For
+ * pg-tracker: the optional platform packages of embedded-postgres (they link the PostgreSQL libraries; on a Linux
+ * runner only linux-x64 is installed, the others are skipped by their `os`/`cpu`). For kronicle-lite: better-sqlite3's build.
+ */
+export const INSTALL_SCRIPT_ALLOW = Object.freeze({
+  'pg-tracker': /^node_modules\/@embedded-postgres\/(?:linux|darwin|windows)-[a-z0-9]+$/,
+  'kronicle-lite': /^node_modules\/better-sqlite3$/,
+  'tiny-tracker': /^$/,
+});
+
+export function lockProblems(f, lock, name = null) {
   const out = [];
   const pk = lock?.packages ?? {};
+  const allow = INSTALL_SCRIPT_ALLOW[name] ?? /^$/; // a fixture not on the list may run no install script
+  for (const [k, v] of Object.entries(pk)) if (k && v.hasInstallScript === true && !allow.test(k)) out.push(`${k} has an install script and is not on the list of packages that may run one`);
+  for (const [k, v] of Object.entries(pk)) if (k && v.hasInstallScript === true && allow.test(k) && k.includes('@embedded-postgres/') && !(v.optional === true && Array.isArray(v.os))) out.push(`${k} must be optional with an os restriction`);
   if (f.source) {
     // A fixture whose package is the committed folder (WC12): the lockfile's root is that package, and every
     // dependency it locks is pinned below. The folder's own bytes are pinned by source.sha256.
@@ -194,8 +210,16 @@ export function seedPackages(entry) {
  * What to do with one subject: { fixture, launch, source, package } or { skip: { stage, reason, detail } }.
  * `launch` is mcp-surface-corpus's launch block (src/targets.mjs validateLaunch), stdio transport.
  */
-export function resolveSubject(subject, { seed, fixtures }) {
+export function resolveSubject(subject, { seed, fixtures }, fixtureId = null) {
+  // A source fixture (WC12) is selected by its id, named in the item, and by nothing else: a subject that happens to be
+  // its subject (this repository, if the seed ever lists it) is an ordinary subject and never gets the full write test.
+  if (fixtureId !== null) {
+    const f = fixtures?.fixtures?.[fixtureId];
+    if (!f || f.subject.toLowerCase() !== subject.toLowerCase()) return { skip: { stage: 'install', reason: 'policy_excluded', detail: 'the item names a fixture that does not exist or is for another subject' } };
+    return { fixture: fixtureId, launch: { ...f.launch }, source: 'fixture', package: f.source ? `local:${f.launch.package}@${f.launch.version}` : `npm:${f.launch.package}@${f.launch.version}` };
+  }
   for (const [name, f] of Object.entries(fixtures?.fixtures ?? {})) {
+    if (f.source) continue;
     if (f.subject.toLowerCase() === subject.toLowerCase()) {
       return { fixture: name, launch: { ...f.launch }, source: 'fixture', package: f.source ? `local:${f.launch.package}@${f.launch.version}` : `npm:${f.launch.package}@${f.launch.version}` };
     }

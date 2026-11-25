@@ -8,7 +8,8 @@
 //
 // Everything lives in the sandbox container next to the CLI and the server. Nothing leaves loopback.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash, timingSafeEqual } from 'node:crypto';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -18,16 +19,31 @@ import { FIELDS, SCHEMA, Store } from './db.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * The sha256 of the two executables this fixture runs, from @embedded-postgres/<platform>@18.7.0-beta.19 (npm pack, 25 Nov 2026).
+ * Checked before every start: an install script or a later change to node_modules that altered a binary stops the backend.
+ */
+export const BINARY_SHA256 = {
+  'linux-x64': { postgres: '18ffe5aa6231bf3b34c0000e32ea9775610168e8ab6e4eb6d444ceee8134e704', initdb: '18c718ec27784b411f0a1fa625e6cfb06442fa3cd4eb4be7d850ce66af485158' },
+  'linux-arm64': { postgres: '7b94ef8fad066e815f1b64b14f783aaeb1467b62443001bc1b2e489981d18851', initdb: 'c247d861916801ba21173e183df4a69d0fbe825420ec9dd67274611fd2d93aa4' },
+  'darwin-arm64': { postgres: '5789058c715792c239d2c6986dbba5ea204d2b71e7782f26707453242faff86f', initdb: '03a8d2c25df060541b34f131baca3ea2e6d5f390f0c4e9d5fcc569f33f2d0409' },
+};
+/** The version the pinned binaries are (and the only one startBackend accepts from the server it measured). */
+export const PINNED_SERVER_VERSION = '18.7';
+
 export function binaries() {
   const key = `${process.platform}-${process.arch}`;
   const pkg = `@embedded-postgres/${key}`;
-  let dir = null;
-  for (let d = here; dir === null; d = dirname(d)) {
-    if (existsSync(join(d, 'node_modules', pkg, 'native', 'bin'))) dir = join(d, 'node_modules', pkg, 'native', 'bin');
-    if (dirname(d) === d) break;
+  const pins = BINARY_SHA256[key];
+  if (!pins) throw new Error(`no pinned PostgreSQL binaries for ${key}`);
+  // From the fixture's own folder only, never from a parent's node_modules.
+  const dir = join(here, '..', 'node_modules', pkg, 'native', 'bin');
+  for (const name of ['initdb', 'postgres']) {
+    const file = join(dir, name);
+    if (!existsSync(file)) throw new Error(`${pkg} has no ${name}`);
+    const got = createHash('sha256').update(readFileSync(file)).digest('hex');
+    if (got !== pins[name]) throw new Error(`${pkg}/native/bin/${name} has sha256 ${got}, not the pinned ${pins[name]}`);
   }
-  if (dir === null) throw new Error(`no PostgreSQL binaries for ${key}`);
-  for (const b of ['initdb', 'postgres']) if (!existsSync(join(dir, b))) throw new Error(`${pkg} has no ${b}`);
   return { initdb: join(dir, 'initdb'), postgres: join(dir, 'postgres'), pkg };
 }
 
@@ -35,11 +51,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const json = (res, status, body) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
 const wipe = (dir) => rmSync(dir, { recursive: true, force: true });
 
+const digest = (s) => createHash('sha256').update(String(s ?? '')).digest();
+/** Constant-time comparison (of the two digests, so lengths do not leak). */
+export const sameToken = (a, b) => timingSafeEqual(digest(a), digest(b)) && typeof a === 'string';
+
 /** The control channel: the platform-side API the tester uses to read and change objects without the MCP server. */
 export function controlServer(store, token) {
   return createServer(async (req, res) => {
     try {
-      if (req.headers.authorization !== `Bearer ${token}`) return json(res, 401, { error: 'unauthorized' });
+      if (!sameToken(req.headers.authorization, `Bearer ${token}`)) return json(res, 401, { error: 'unauthorized' });
       const url = new URL(req.url, 'http://x');
       const m = /^\/items(?:\/([A-Za-z0-9_-]{1,40}))?$/.exec(url.pathname);
       if (!m) return json(res, 404, { error: 'not found' });
@@ -66,7 +86,13 @@ export function controlServer(store, token) {
         return json(res, 200, { item: r.rows[0] });
       }
       return json(res, 405, { error: 'method not allowed' });
-    } catch { return json(res, 500, { error: 'backend error' }); }
+    } catch (e) {
+      // A value the database refuses (a foreign key, a not-null, a bad type) is the caller's, not a backend failure.
+      const c = String(e?.code ?? '');
+      if (c === '23505') return json(res, 409, { error: 'conflict' });
+      if (/^(22|23)/.test(c)) return json(res, 400, { error: 'refused by the database' });
+      return json(res, e instanceof SyntaxError ? 400 : 500, { error: e instanceof SyntaxError ? 'bad json' : 'backend error' });
+    }
   });
 }
 
@@ -106,6 +132,7 @@ export async function startBackend({ port, password, log = (m) => process.stderr
   await db.query(SCHEMA);
   const version = (await db.query('SHOW server_version')).rows[0].server_version;
   await db.end();
+  if (version.split('.').slice(0, 2).join('.') !== PINNED_SERVER_VERSION) { await stop(); throw new Error(`the server says it is PostgreSQL ${version}, not the pinned ${PINNED_SERVER_VERSION}`); }
   log(`postgres ${version} ready in ${Date.now() - t0} ms`);
   return { stop, version, url: `postgres://mws@127.0.0.1:${port}/mws`, config: { ...cfg, database: 'mws' } };
 }

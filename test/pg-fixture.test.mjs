@@ -13,7 +13,7 @@ import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { BACKEND_HERMETIC, loadFixtures, lockProblems, sourceDigest, validateFixtures } from '../loop/items.mjs';
+import { BACKEND_HERMETIC, INSTALL_SCRIPT_ALLOW, loadFixtures, lockProblems, parseItems, resolveSubject, sourceDigest, validateFixtures } from '../loop/items.mjs';
 import { findRunFolder, observations, summarize } from '../loop/summary.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -36,12 +36,19 @@ test('R-WC-14: pg-tracker is a source fixture: its folder is pinned by digest, i
   assert.equal(f.integrity, undefined);
   assert.equal(f.launch.install_scripts, true, 'the PostgreSQL binaries are linked by the platform package\'s install script, so it installs in the build image');
   const lock = JSON.parse(readFileSync(join(FIX, 'package-lock.json'), 'utf8'));
-  assert.deepEqual(lockProblems(f, lock), []);
+  assert.deepEqual(lockProblems(f, lock, 'pg-tracker'), []);
   assert.deepEqual(Object.keys(lock.packages[''].dependencies).sort(), ['embedded-postgres', 'pg']);
   // Every dependency is an exact version (the lock root, the package.json), every package from the registry with a sha512.
   for (const v of Object.values(lock.packages[''].dependencies)) assert.match(v, /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/);
   // The runtime never loads embedded-postgres's JavaScript, only its binaries; a change to that is a reviewed one.
-  for (const file of readdirSync(join(FIX, 'src'))) assert.doesNotMatch(readFileSync(join(FIX, 'src', file), 'utf8'), /from 'embedded-postgres'|require\('embedded-postgres'\)/);
+  // Every import form: static, dynamic, require, createRequire, import.meta.resolve. Only guard.mjs may name the package (to block it).
+  for (const file of readdirSync(join(FIX, 'src'))) {
+    const src = readFileSync(join(FIX, 'src', file), 'utf8').replace(/\/\/[^\n]*/g, '');
+    const named = [...src.matchAll(/['"`]embedded-postgres(?:\/[^'"`]*)?['"`]/g)];
+    if (file === 'guard.mjs') continue;
+    assert.deepEqual(named.map((m) => m[0]), [], `${file} names the embedded-postgres module`);
+  }
+  assert.match(readFileSync(join(FIX, 'src', 'cli.mjs'), 'utf8'), /^import '\.\/guard\.mjs';/m);
 });
 
 test('R-WC-14: a changed byte of the fixture, a loosened lock or a lost label is refused (mutations)', () => {
@@ -67,10 +74,22 @@ test('R-WC-14: a changed byte of the fixture, a loosened lock or a lost label is
   const lock = JSON.parse(readFileSync(join(FIX, 'package-lock.json'), 'utf8'));
   const loose = structuredClone(lock);
   loose.packages['node_modules/pg'].resolved = 'https://example.com/pg.tgz';
-  assert.ok(lockProblems(f, loose).some((p) => p.includes('node_modules/pg')));
+  assert.ok(lockProblems(f, loose, 'pg-tracker').some((p) => p.includes('node_modules/pg')));
   const ranged = structuredClone(lock);
   ranged.packages[''].dependencies.pg = '^8.23.1';
-  assert.ok(lockProblems(f, ranged).some((p) => p.includes('exact version')));
+  assert.ok(lockProblems(f, ranged, 'pg-tracker').some((p) => p.includes('exact version')));
+  // An install script on any package outside the allowlist is a problem (the allowlist: embedded-postgres's platform packages only).
+  const sneaky = structuredClone(lock);
+  sneaky.packages['node_modules/pg'].hasInstallScript = true;
+  assert.ok(lockProblems(f, sneaky, 'pg-tracker').some((p) => p.includes('node_modules/pg') && p.includes('install script')));
+  const wrapper = structuredClone(lock);
+  wrapper.packages['node_modules/embedded-postgres'].hasInstallScript = true;
+  assert.ok(lockProblems(f, wrapper, 'pg-tracker').some((p) => p.includes('node_modules/embedded-postgres ')));
+  const nonOptional = structuredClone(lock);
+  delete nonOptional.packages['node_modules/@embedded-postgres/linux-x64'].optional;
+  assert.ok(lockProblems(f, nonOptional, 'pg-tracker').some((p) => p.includes('optional')));
+  assert.deepEqual(lock.packages['node_modules/@embedded-postgres/linux-x64'].hasInstallScript, true);
+  for (const [k, v] of Object.entries(lock.packages)) if (v.hasInstallScript) assert.match(k, INSTALL_SCRIPT_ALLOW['pg-tracker']);
 });
 
 test('R-WC-15: every result of a full write test is labelled hermetic; nothing else is', () => {
@@ -131,7 +150,8 @@ test('R-WC-16: the backend runs inside the sandbox container, for the full write
   assert.match(be, /unix_socket_directories=/);
   assert.match(be, /listen\(port \+ 1, '127\.0\.0\.1'/);
   assert.match(be, /PGFX_PASSWORD \(at least 16 characters\) is required/);
-  assert.match(be, /authorization !== `Bearer \$\{token\}`/);
+  assert.match(be, /!sameToken\(req\.headers\.authorization, `Bearer \$\{token\}`\)/);
+  assert.match(be, /timingSafeEqual/);
   // The PR proof runs the fixture in the sandbox with the other fixture servers, and judges the label.
   assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action"/);
   assert.match(read('loop/check-bundles.mjs'), /labelled hermetic/);
@@ -170,6 +190,9 @@ const CLI_DIR = process.env.CLI_DIR ? join(process.cwd(), process.env.CLI_DIR) :
 const cliMain = CLI_DIR && (existsSync(CLI_DIR) ? join(CLI_DIR, 'dist', 'src', 'cli', 'main.js') : null);
 const haveDeps = existsSync(join(FIX, 'node_modules', 'pg'));
 const live = cliMain && existsSync(cliMain) && haveDeps ? false : 'needs CLI_DIR (a built packages/writecheck) and `npm ci --omit=dev` in loop/fixtures/pg-tracker';
+// In the CI job that runs them (CI and CLI_DIR set, or PG_LIVE_REQUIRED) a skip is a failure: the job cannot pass with nothing run.
+const required = process.env.PG_LIVE_REQUIRED === '1' || (process.env.CI && process.env.CLI_DIR);
+if (required && live) test('R-WC-17: the live tests are required here and cannot run', () => assert.fail(live));
 
 const PORT = 4620;
 const waitLine = (child, re, ms) => new Promise((resolve, reject) => {
@@ -193,10 +216,11 @@ async function cliRun({ defect = '', mode = 'run' }) {
   delete env.PGFX_DEFECTS;
   if (defect) env.PGFX_DEFECTS = defect;
   let backend = null;
+  let bufOut = '{"postgres":""}';
   try {
     if (mode === 'run') {
       backend = spawn(process.execPath, [join(FIX, 'src', 'cli.mjs'), ...f.background.args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
-      await waitLine(backend, /"backend":/, 60_000);
+      bufOut = await waitLine(backend, /"backend":.*\}/, 60_000);
     }
     const cli = (args) => spawnSync(process.execPath, [cliMain, ...args], { cwd: join(work, 'm', 'x'), env, encoding: 'utf8', timeout: 240_000, maxBuffer: 64 * 1024 * 1024 });
     const plan = cli(['plan', '-m', manifest]);
@@ -209,7 +233,7 @@ async function cliRun({ defect = '', mode = 'run' }) {
       : cli(['catalog', '-m', manifest, '--out', out]);
     const dir = readdirSync(out)[0];
     const results = JSON.parse(readFileSync(join(out, dir, 'results.json'), 'utf8'));
-    return { plan: plan.stdout, hash, status: r.status, results, log: `${r.stdout}${r.stderr}`.slice(-3000) };
+    return { plan: plan.stdout, hash, status: r.status, results, pgVersion: /"postgres":"([^"]*)"/.exec(bufOut)?.[1] ?? '', log: `${r.stdout}${r.stderr}`.slice(-3000) };
   } finally {
     if (backend) { backend.kill('SIGTERM'); await new Promise((res) => { backend.once('exit', res); setTimeout(res, 15_000); }); }
   }
@@ -227,6 +251,8 @@ test('R-WC-17: known good: the correct build against a real PostgreSQL holds eve
   assert.equal(run.plan.trim(), read('dogfood/pg-tracker/plan.txt').trim());
   assert.equal(run.status, 0, run.log);
   assert.equal(run.results.run.status, 'complete');
+  // The version the backend measured is the one the label records.
+  assert.ok(f.backend.version.includes(`PostgreSQL ${run.pgVersion} `), `measured ${run.pgVersion}, labelled ${f.backend.version}`);
   assert.deepEqual(run.results.results.filter((r) => r.verdict === 'violated').map((r) => `${r.requirement} ${r.write_path?.tool}`), [], 'no violated record in the correct build');
   for (const req of ['MWS-CONC-1', 'MWS-CONC-2', 'MWS-CONC-4', 'MWS-TGT-1', 'MWS-TGT-2', 'MWS-TGT-3', 'MWS-UPD-1', 'MWS-RES-3', 'MWS-RES-4', 'MWS-RETRY-1', 'MWS-RETRY-2', 'MWS-ANN-4', 'MWS-IN-1', 'MWS-IN-7']) expectHeld(run, req);
   // The mutation of the oracle: the same results do not satisfy "violated", so the checks below cannot pass vacuously.
@@ -254,4 +280,64 @@ test('R-WC-17: known bad (missing-annotations): the catalog read, which needs no
   const bad = await cliRun({ mode: 'catalog', defect: 'missing-annotations' });
   expectViolated(bad, 'MWS-ANN-4');
   assert.ok(verdicts(bad.results, 'MWS-ANN-4').every((v) => v === 'violated'));
+});
+
+test('R-WC-14: embedded-postgres cannot be loaded at runtime (a hook refuses it), where Node has the hook', async () => {
+  const { hooked } = await import('../loop/fixtures/pg-tracker/src/guard.mjs');
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', "import './src/guard.mjs'; try { await import('embedded-postgres'); console.log('LOADED'); } catch (e) { console.log('BLOCKED ' + e.message); }"], { cwd: FIX, encoding: 'utf8' });
+  if (!hooked) return; // Node before 22.15: the source scan above is the check
+  assert.match(r.stdout, /BLOCKED embedded-postgres must not be loaded/);
+});
+
+test('R-WC-14: the binaries the backend runs are pinned by sha256, and the measured server version must be the pinned one', () => {
+  const be = read('loop/fixtures/pg-tracker/src/backend.mjs');
+  for (const key of ['linux-x64', 'linux-arm64']) assert.match(be, new RegExp(`'${key}': \\{ postgres: '[0-9a-f]{64}', initdb: '[0-9a-f]{64}' \\}`));
+  assert.match(be, /has sha256 \$\{got\}, not the pinned/);
+  assert.match(be, /join\(here, '\.\.', 'node_modules'/, 'resolved from the fixture\'s own folder, never a parent\'s');
+  assert.doesNotMatch(be, /dirname\(d\)/);
+  const pinned = /PINNED_SERVER_VERSION = '([0-9.]+)'/.exec(be)[1];
+  assert.ok(fixtures().fixtures['pg-tracker'].backend.version.includes(`PostgreSQL ${pinned} `), 'the label records the version the backend is checked to be');
+  assert.match(be, /the server says it is PostgreSQL/);
+});
+
+test('R-WC-18: a source fixture is selected by its id in the item, never by its subject alone', () => {
+  const fx = fixtures();
+  const sub = 'isokron-ai/mcp-writecheck-action';
+  const seed = { map: new Map([[sub, { id: sub, packages: [{ registry: 'npm', identifier: 'some-package' }] }]]) };
+  // Seeded as a normal subject, with no fixture id: the generic path, never the fixture.
+  const plain = resolveSubject(sub, { seed, fixtures: fx });
+  assert.equal(plain.fixture, null);
+  assert.equal(plain.source, 'seed');
+  assert.equal(resolveSubject(sub, { seed: { map: new Map() }, fixtures: fx }).skip.reason, 'policy_excluded');
+  // With the id: the fixture. With the wrong subject, or an id that does not exist: a skip.
+  assert.equal(resolveSubject(sub, { seed, fixtures: fx }, 'pg-tracker').fixture, 'pg-tracker');
+  assert.equal(resolveSubject('isokron-ai/kronicle-lite', { seed, fixtures: fx }, 'pg-tracker').skip.reason, 'policy_excluded');
+  assert.equal(resolveSubject(sub, { seed, fixtures: fx }, 'no-such').skip.reason, 'policy_excluded');
+  // The items carry it, checked; the proof shard names it.
+  const key = 'a'.repeat(64);
+  assert.equal(parseItems(JSON.stringify([{ subject: sub, fixture: 'pg-tracker', run_key: key, fence: 1 }]))[0].fixture, 'pg-tracker');
+  assert.throws(() => parseItems(JSON.stringify([{ subject: sub, fixture: 'Bad Id', run_key: key, fence: 1 }])), /fixture id/);
+  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action","fixture":"pg-tracker"/);
+  // The older fixtures keep their subject mapping (unchanged since the lane started).
+  assert.equal(resolveSubject('isokron-ai/kronicle-lite', { seed, fixtures: fx }).fixture, 'kronicle-lite');
+});
+
+test('R-WC-17: the control channel answers a bad foreign key with 400, a wrong token with 401, a duplicate with a client error', { skip: live, timeout: 120_000 }, async () => {
+  const work = tmp('wc12-ctl-');
+  const f = fixtures().fixtures['pg-tracker'];
+  const password = 'c'.repeat(8) + 'd'.repeat(12);
+  const env = { ...process.env, PGFX_PASSWORD: password, PGFX_DATA_DIR: work };
+  const backend = spawn(process.execPath, [join(FIX, 'src', 'cli.mjs'), ...f.background.args], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  try {
+    await waitLine(backend, /"backend":.*\}/, 60_000);
+    const url = f.env.PGFX_CONTROL_URL;
+    const post = (body, token = password) => fetch(`${url}/items`, { method: 'POST', headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    assert.equal((await post({ project: 'no-such-project', title: 'x' })).status, 400);
+    assert.equal((await post({ project: 'inbox' })).status, 400, 'a missing title is the caller\'s');
+    assert.equal((await post({ title: 'x' }, 'wrong')).status, 401);
+    assert.equal((await post({ title: 'ok' })).status, 201);
+  } finally {
+    backend.kill('SIGTERM');
+    await new Promise((res) => { backend.once('exit', res); setTimeout(res, 15_000); });
+  }
 });

@@ -2,6 +2,7 @@
 // pg-tracker: IsoKron's PostgreSQL-backed fixture MCP server for the writecheck loop.
 //   cli.mjs server                  the MCP server on stdio (env PGFX_DATABASE_URL, PGFX_PASSWORD, PGFX_DEFECTS)
 //   cli.mjs backend --port <n>      a disposable PostgreSQL on 127.0.0.1:<n> and its control channel on <n+1>
+import './guard.mjs';
 import { runBackend } from './backend.mjs';
 import { serve } from './mcp.mjs';
 
