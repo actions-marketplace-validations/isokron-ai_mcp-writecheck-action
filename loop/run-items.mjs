@@ -248,7 +248,8 @@ class Shard {
     if (u.lock) {
       // A fixture installs from its committed lockfile (loop/fixtures/<name>/), every tarball checked against the
       // lock's integrity by npm ci; the package itself must match the integrity pinned in loop/fixtures.json.
-      const tar = spawnSync('tar', ['-C', u.lock, '-cf', '-', '--owner=0', '--group=0', 'package.json', 'package-lock.json'], { maxBuffer: 16 * 1024 * 1024 });
+      // A source fixture (WC12) is the committed folder itself: its package.json, lockfile and src/ (never a node_modules).
+      const tar = spawnSync('tar', ['-C', u.lock, '-cf', '-', '--owner=0', '--group=0', 'package.json', 'package-lock.json', ...(u.source ? ['src'] : [])], { maxBuffer: 16 * 1024 * 1024 });
       if (tar.status !== 0) throw new M.HarnessError('packing the fixture lockfile failed');
       await this.dk.must(this.helper(u.tag, { stdin: true, mounts: [{ src: work, dst: '/work' }], cmd: ['sh', '-c', 'mkdir -p /work/pkg && tar -x -f - --no-same-owner -C /work/pkg'] }, { input: tar.stdout }), 'fixture lockfile');
       // R-WC-09: with install scripts on, the same build as the sandbox's own npm install: launchPlan put it in the
@@ -258,7 +259,8 @@ class Shard {
       if (native && (!/-build$/.test(plan.image) || !plan.runImage)) throw new M.HarnessError('a fixture with install scripts must install in the build image');
       plan.install = [
         { name: 'install', cmd: ['npm', 'ci', '--prefix', '/work/pkg', '--no-audit', '--no-fund', '--loglevel=error', '--omit=dev', ...(native ? [] : ['--ignore-scripts'])], ...(native ? { env: { ...M.NATIVE_BUILD_ENV } } : {}) },
-        { name: 'entry', cmd: ['node', `${TOOLS}/sandbox/npm-entry.mjs`, '/work/pkg', u.launch.package, u.launch.bin ?? ''], out: 'entry.json' },
+        // A source fixture's entry is the file its fixtures.json entry names, inside the folder it just installed.
+        ...(u.source ? [] : [{ name: 'entry', cmd: ['node', `${TOOLS}/sandbox/npm-entry.mjs`, '/work/pkg', u.launch.package, u.launch.bin ?? ''], out: 'entry.json' }]),
       ];
     }
     const image = this.images[plan.image];
@@ -269,7 +271,7 @@ class Shard {
     const netlog = await M.startNetlogOn(u.tdk, { net: 'install', network: inNet, image: this.images.node24, toolsVol: this.toolsVol, labels: this.dk.labels(u.tag), target: u.tag });
     const proxy = this.name(u.tag, 'proxy');
     let proxyUp = false;
-    let entry = null;
+    let entry = u.source ? { script: `/work/pkg/${u.source.bin}`, version: u.launch.version } : null;
     try {
       const publicHosts = await this.resolveRegistries(registries);
       const proxyArgs = M.helperRunArgs({ name: proxy, image: this.images.node24, network: this.outNet, create: true, labels: this.dk.labels(u.tag), memory: '256m', publicHosts, mounts: [{ src: this.toolsVol, dst: TOOLS, ro: true }], cmd: ['node', `${TOOLS}/sandbox/egress-proxy.mjs`, String(PROXY_PORT), ...registries] });
@@ -457,7 +459,7 @@ class Shard {
         if (!inst.ok) return res;
         image = this.images[plan.runImage ?? plan.image];
         serverCmd = plan.run(entry);
-        if (u.launch.kind === 'npm') pkgdir = `/work/pkg/node_modules/${u.launch.package}`;
+        if (u.launch.kind === 'npm') pkgdir = u.source ? '/work/pkg' : `/work/pkg/node_modules/${u.launch.package}`;
         u.entry = entry;
       }
       if (!u.manifestFile) {
@@ -477,7 +479,9 @@ class Shard {
       await this.put(u.tag, work, manifest, text);
       const env = runEnv({ ...(u.env ?? {}) });
       const bg = u.background && u.entry ? { argv: ['node', u.entry.script, ...u.background.args], log: `${OUTD}/backend.log`, ready: u.background.ready, wait_ms: 15_000 } : null;
-      const cli = (args) => (bg ? [NODE, `${LOOP}/bg.mjs`, JSON.stringify(bg), '--', NODE, CLI_MAIN, ...args] : [NODE, CLI_MAIN, ...args]);
+      // A fixture's backend starts only for the CLI commands its entry lists (`only`), so that plan and catalog, which
+      // call no tool, do not pay for a database that starts in a second or three and is never asked anything.
+      const cli = (args) => (bg && (!u.background.only || u.background.only.includes(args[0])) ? [NODE, `${LOOP}/bg.mjs`, JSON.stringify(bg), '--', NODE, CLI_MAIN, ...args] : [NODE, CLI_MAIN, ...args]);
       const left = (cap) => Math.max(1000, Math.min(cap, unitDeadline - Date.now()));
       await this.withRunNet(u, async (network) => {
         const step = (o) => this.sandboxStep(u, { network, work, image, env, record: res.steps, ...o });
@@ -536,6 +540,8 @@ function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
   return {
     tag, stepDir, launch: resolved.launch, fixture: resolved.fixture, env,
     init: f ? f.init !== false : true,
+    source: f?.source ?? null,
+    backend: f?.backend ?? null,
     background: f?.background ?? null,
     setup: f?.setup ?? null,
     full: f?.full ?? null,
@@ -602,7 +608,7 @@ async function runItem(ctx, item, deadline) {
   const startedAt = iso();
   const b = new BundleFiles();
   const skips = [];
-  const resolved = resolveSubject(item.subject, { seed, fixtures });
+  const resolved = resolveSubject(item.subject, { seed, fixtures }, item.fixture ?? null);
   const driver = { format: 'isokron-writecheck-loop-driver/1', index: item.index, source: resolved.source ?? null, package: resolved.package ?? null, install: null, steps: [], error: null, evidence_missing: [], collected: null };
   let summary = null;
   let res = null;
@@ -649,7 +655,7 @@ async function runItem(ctx, item, deadline) {
     const evidenceComplete = ctx.lane !== 'ci' || driver.evidence_missing.length === 0;
     if (!evidenceComplete) skips.push({ stage: 'catalog', reason: 'trace_unavailable', evidence: 'logs/driver.json' });
     b.put('results/writecheck.json', json({ subject: item.subject, source: resolved.source, package: resolved.package, resolved_version: res.install?.resolved_version ?? null, ...publicSummary(summary) }));
-    b.put('observations/writecheck.ndjson', ndjson(observations(summary, { versions: ctx.versions, stagesRan: stages, evidenceComplete })));
+    b.put('observations/writecheck.ndjson', ndjson(observations(summary, { versions: ctx.versions, stagesRan: stages, evidenceComplete, backend: u.backend })));
     addRaw(b, 'raw', res, u.stepDir);
     if (existsSync(telFile)) b.raw('raw/sandbox-telemetry.jsonl', readFileSync(telFile));
     driver.steps = publicSummary(summary).steps;

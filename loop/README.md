@@ -56,6 +56,10 @@ Everything the CLI wrote ran next to the server under test, in the same containe
 
 With incomplete sandbox evidence (a container that left no syscall trace, an unreadable firewall log) only the first four are written, with a `trace_unavailable` skip.
 
+## Backends
+
+The fixtures' backends are disposable and live inside the sandbox container: tiny-tracker's in-memory store, kronicle-lite's data folder and, since WC12, a real PostgreSQL server for `pg-tracker` (`loop/fixtures/pg-tracker/`, a fixture whose package is the committed folder, pinned by a digest in `fixtures.json`). Every result of a full write test is labelled `hermetic` (`backend_environment` in `observation_coverage` and in each full-run verdict record). The design, the cells that run against PostgreSQL, the known-bad builds, the cost per item and what is left for Redis are in [`BACKENDS.md`](BACKENDS.md). pg-tracker is not in tool-qa's seed, so the live lane does not dispatch it; the pull-request proof (`loop-fixture.yml`) runs it in the sandbox with the other fixtures, and `test.yml` runs the pinned CLI over it against a real PostgreSQL on the runner, known good and known bad.
+
 ## Controls
 
 Run once per shard, after the self test and before any item, and copied into every bundle. If any control fails, the driver exits 1 and nothing is written or uploaded.
@@ -90,7 +94,8 @@ The guard job runs first, before any checkout but its own file: `LOOP_ENABLED` m
 | `loop/bundle.mjs` | Bundle layout, raw caps, control verdicts, the meta file |
 | `loop/teardown.sh` | Removes every container and stops Docker before anything is sealed |
 | `loop/check-bundles.mjs` | The pull-request proof's judge |
-| `loop/fixtures.json`, `loop/fixtures/<name>/` | Our fixture servers: package, version and sha512 integrity, the committed lockfile they install from with `npm ci`, which dogfood manifest they run, and the plan hash accepted for it |
+| `loop/fixtures.json`, `loop/fixtures/<name>/` | Our fixture servers: package, version and sha512 integrity (or, for a source fixture, the digest of its committed folder), the committed lockfile they install from with `npm ci`, which dogfood manifest they run, the plan hash accepted for it, and what their backend is (`hermetic`) |
+| `loop/BACKENDS.md` | Write-safety cells against more backends: the PostgreSQL fixture, the `hermetic` label, cost per item, Redis next |
 | `loop/sandbox/` | Our code inside the sandbox: the bridge and the relay of a split run, the forgery server, the output collector, the backend starter |
 
-What went wrong while building this lane, and the test that pins each fix, is in `REGRESSIONS.md` (`R-WC-*`; R-WC-05 to R-WC-08 came from the security review of pull request 61, R-WC-09 from its follow-up).
+What went wrong while building this lane, and the test that pins each fix, is in `REGRESSIONS.md` (`R-WC-*`; R-WC-05 to R-WC-08 came from the security review of pull request 61, R-WC-09 from its follow-up, R-WC-14 to R-WC-17 from the PostgreSQL fixture).
