@@ -2,8 +2,10 @@
 # steps as the worker, in the same order (test/loop-workflow.test.mjs checks they match), on a fixture shard of
 # IsoKron's own servers: tiny-tracker (isokron-ai/mcp-write-safety; catalog, plan and the full write test against
 # its in-sandbox backend), kronicle-lite (catalog, plan and the full write test on its own data folder),
-# mcp-check (the generic path from tool-qa's seed: the latest npm version, init, plan and catalog) and a subject
-# with no npm or PyPI package (its skips). The worker-kit then builds each bundle in a dry run (no encryption, no
+# mcp-check (the generic path from tool-qa's seed: the latest npm version, init, plan and catalog), a subject
+# with no npm or PyPI package (its skips) and pg-tracker (the fixture of this repository, whose backend is a real
+# PostgreSQL server that the sandbox container starts for the full write test: catalog, plan and the full write
+# test, every result labelled hermetic; its subject here is this repository, which the pump's seed does not list). The worker-kit then builds each bundle in a dry run (no encryption, no
 # upload), and loop/check-bundles.mjs judges each one with tool-qa's own ingest code at the pinned commit: every
 # bundle must be accepted, with its controls passed, and each fixture must show what it is known to show.
 #
@@ -57,7 +59,7 @@ jobs:
         run: |
           shard="fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           key() { printf '%s' "$1-$shard" | sha256sum | cut -d' ' -f1; }
-          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)")
+          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4},{"subject":"isokron-ai/mcp-writecheck-action","run_key":"%s","fence":5}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)" "$(key pg)")
           {
             echo "shard_id=$shard"
             echo "attempt_id=$shard"
@@ -156,6 +158,18 @@ jobs:
           fence: ${{ steps.run.outputs.fence_3 }}
           run-key: ${{ steps.run.outputs.run_key_3 }}
           dry-run: 'true'
+      - id: kit4
+        name: Build bundle 4 (dry run)
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_4 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/4/bundle
+          meta-file: ${{ runner.temp }}/wc/4/meta.json
+          attempt-id: ${{ steps.inputs.outputs.attempt_id }}
+          item-index: '4'
+          fence: ${{ steps.run.outputs.fence_4 }}
+          run-key: ${{ steps.run.outputs.run_key_4 }}
+          dry-run: 'true'
       - name: Fetch tool-qa's ingest at the pinned commit
         if: ${{ !cancelled() && steps.run.outputs.controls_ok == 'true' }}
         run: |
@@ -174,6 +188,7 @@ jobs:
           BUNDLE_1: ${{ steps.kit1.outputs.bundle-path }}
           BUNDLE_2: ${{ steps.kit2.outputs.bundle-path }}
           BUNDLE_3: ${{ steps.kit3.outputs.bundle-path }}
+          BUNDLE_4: ${{ steps.kit4.outputs.bundle-path }}
         run: node loop/check-bundles.mjs --toolqa toolqa-ingest
       - name: Keep the plaintext bundles and the shard record (7 days)
         if: always()

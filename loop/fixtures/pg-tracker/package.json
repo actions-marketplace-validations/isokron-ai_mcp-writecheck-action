@@ -1,0 +1,14 @@
+{
+  "name": "@isokron-fixtures/pg-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "IsoKron's PostgreSQL-backed fixture MCP server for the writecheck loop: a correct build and builds with one named defect. Hermetic: its PostgreSQL runs inside the sandbox container.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "bin": { "pg-tracker": "src/cli.mjs" },
+  "dependencies": {
+    "embedded-postgres": "18.7.0-beta.19",
+    "pg": "8.23.1"
+  }
+}

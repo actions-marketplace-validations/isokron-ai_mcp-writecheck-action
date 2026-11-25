@@ -412,6 +412,7 @@ test('R-WC-07: fixtures install from committed lockfiles pinned by integrity', (
   for (const [name, x] of Object.entries(f.fixtures)) {
     const lock = JSON.parse(readFileSync(join(root, x.lock, 'package-lock.json'), 'utf8'));
     assert.deepEqual(lockProblems(x, lock), [], name);
+    if (x.source) continue; // WC12: a source fixture is the committed folder; test/pg-fixture.test.mjs pins it
     assert.equal(lock.packages[`node_modules/${x.launch.package}`].integrity, x.integrity);
     assert.deepEqual(JSON.parse(readFileSync(join(root, x.lock, 'package.json'), 'utf8')).dependencies, { [x.launch.package]: x.launch.version });
   }

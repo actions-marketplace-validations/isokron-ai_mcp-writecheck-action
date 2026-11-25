@@ -11,6 +11,7 @@
 // by a name the target chose (an object key such as "attempt_id" would read as an identity claim to tool-qa's
 // ingest). That is what the forgery control checks.
 import { createHash } from 'node:crypto';
+import { BACKEND_HERMETIC } from './items.mjs';
 
 export const SUMMARY_FORMAT = 'isokron-writecheck-loop/1';
 export const VERDICTS = Object.freeze(['held', 'violated', 'not tested', 'not applicable', 'not observed', 'self-attested']);
@@ -170,12 +171,16 @@ export function publicSummary(s) {
  * The field records (registry ids of isokron-ai/mcp-results fields/registry.yaml) for one unit. Values are the
  * checked ones above; per-tool values are lists of { tool, ... }, never objects keyed by a tool name.
  */
-export function observations(s, { versions, stagesRan, evidenceComplete = true }) {
+export function observations(s, { versions, stagesRan, evidenceComplete = true, backend = null }) {
   const recs = [];
   const add = (field, value, stage, why) => recs.push({ field, value, ...(value === null ? { why } : {}), ...(stage ? { stage } : {}) });
   add('our_tool_versions', versions, null);
   add('sandbox_tier', 'gvisor', null);
-  add('observation_coverage', { ...stagesRan, sandbox_evidence_complete: evidenceComplete }, null);
+  // WC12: every write-test result says what its backend was. A fixture's backend is hermetic (it starts with the
+  // sandbox container and ends with it, on loopback, with nothing else able to reach it); a run that made no write
+  // test used none. The values come from loop/fixtures.json, never from the target.
+  const env = backend && s.full.found ? BACKEND_HERMETIC : 'none';
+  add('observation_coverage', { ...stagesRan, sandbox_evidence_complete: evidenceComplete, backend_environment: env, backend_kind: env === BACKEND_HERMETIC ? backend.kind : 'none' }, null);
   add('step_telemetry', { steps: publicSummary(s).steps }, null);
   if (!evidenceComplete) return recs;
   const r = s._records;
@@ -189,8 +194,9 @@ export function observations(s, { versions, stagesRan, evidenceComplete = true }
   }
   if (s.plan.hash !== null || s.plan.accepted !== null) add('plan_hash_and_drift', { plan_hash: s.plan.hash, accepted: s.plan.accepted, drift: s.plan.drift, full_run: s.full.ran }, 'plan');
   if (s.full.found) {
-    add('requirement_verdicts', r.full.map((x) => ({ ...x, mode: 'full' })), 'full');
-    const pick = (p) => ({ records: byReq(r.full, p).map((x) => ({ requirement: x.requirement, verdict: x.verdict, tool: x.tool, resource: x.resource })), counts: verdictCounts(byReq(r.full, p)) });
+    if (backend) add('backend_version', backend.version, 'full');
+    add('requirement_verdicts', r.full.map((x) => ({ ...x, mode: 'full', backend_environment: env })), 'full');
+    const pick = (p) => ({ backend_environment: env, records: byReq(r.full, p).map((x) => ({ requirement: x.requirement, verdict: x.verdict, tool: x.tool, resource: x.resource })), counts: verdictCounts(byReq(r.full, p)) });
     add('annotation_honesty_behaviour_confirmed', pick('MWS-ANN-'), 'full');
     add('idempotency_evidence_behaviour', pick('MWS-RETRY-'), 'full');
     add('conflict_behaviour', pick('MWS-CONC-'), 'full');

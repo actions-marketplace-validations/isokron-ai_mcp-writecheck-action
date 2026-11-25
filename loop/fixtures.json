@@ -1,6 +1,6 @@
 {
   "format": "isokron-writecheck-fixtures/1",
-  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. A fixture with install_scripts installs in the sandbox's build image (node24-build) with the sandbox's native build env: its native modules (kronicle-lite's better-sqlite3) compile from source against the image's own Node headers, and the install reaches registry.npmjs.org only.",
+  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. A fixture with install_scripts installs in the sandbox's build image (node24-build) with the sandbox's native build env: its native modules (kronicle-lite's better-sqlite3) compile from source against the image's own Node headers, and the install reaches registry.npmjs.org only. A fixture with `source` (pg-tracker) is the committed folder itself, not an npm package: package.json, package-lock.json and src/ are pinned by `source.sha256` (sourceDigest in loop/items.mjs), its dependencies by the lockfile, and it has no integrity of its own. Every fixture names its `backend` ({ kind, environment: \"hermetic\", version }): the label every result of its full write test carries. `background.only` lists the CLI commands (plan, catalog, run) that start the backend. known_answers lists the defect builds of a source fixture and the requirement each is caught as (test/pg-fixture.test.mjs runs them).",
   "fixtures": {
     "tiny-tracker": {
       "subject": "isokron-ai/mcp-write-safety",
@@ -37,6 +37,11 @@
         "env": "TRACKER_DEFECTS",
         "defect": "missing-annotations",
         "requirement": "MWS-ANN-4"
+      },
+      "backend": {
+        "kind": "in_memory_http",
+        "environment": "hermetic",
+        "version": "tiny-tracker 0.1.0 in-memory store"
       }
     },
     "kronicle-lite": {
@@ -72,7 +77,87 @@
       "full": {
         "plan_hash": "ddf41337c24a60ea",
         "confirm": "kronicle-lite-dogfood"
+      },
+      "backend": {
+        "kind": "sqlite_files",
+        "environment": "hermetic",
+        "version": "kronicle-lite 0.11.2 data folder"
       }
+    },
+    "pg-tracker": {
+      "subject": "isokron-ai/mcp-writecheck-action",
+      "launch": {
+        "kind": "npm",
+        "package": "@isokron-fixtures/pg-tracker",
+        "version": "0.1.0",
+        "bin": "pg-tracker",
+        "args": [
+          "server"
+        ],
+        "install_scripts": true
+      },
+      "lock": "loop/fixtures/pg-tracker",
+      "source": {
+        "dir": "loop/fixtures/pg-tracker",
+        "sha256": "f13110b0b6bd0014ba362b7ee11ea0900f9353085142b2a389aa5a45e5a10626",
+        "bin": "src/cli.mjs"
+      },
+      "backend": {
+        "kind": "postgresql",
+        "environment": "hermetic",
+        "version": "PostgreSQL 18.7 (embedded-postgres 18.7.0-beta.19)"
+      },
+      "manifest": "dogfood/pg-tracker/writecheck.yaml",
+      "link": "/work/pg",
+      "init": true,
+      "env": {
+        "PGFX_DATABASE_URL": "postgres://mws@127.0.0.1:4620/mws",
+        "PGFX_CONTROL_URL": "http://127.0.0.1:4621"
+      },
+      "random_env": [
+        "PGFX_PASSWORD"
+      ],
+      "background": {
+        "args": [
+          "backend",
+          "--port",
+          "4620"
+        ],
+        "ready": "backend",
+        "only": [
+          "run"
+        ]
+      },
+      "full": {
+        "plan_hash": "36b151549223fe4e",
+        "confirm": "pg-tracker"
+      },
+      "known_answers": [
+        {
+          "env": "PGFX_DEFECTS",
+          "defect": "missing-annotations",
+          "requirement": "MWS-ANN-4",
+          "mode": "catalog"
+        },
+        {
+          "env": "PGFX_DEFECTS",
+          "defect": "lost-update",
+          "requirement": "MWS-CONC-2",
+          "mode": "full"
+        },
+        {
+          "env": "PGFX_DEFECTS",
+          "defect": "empty-filter-deletes-all",
+          "requirement": "MWS-TGT-2",
+          "mode": "full"
+        },
+        {
+          "env": "PGFX_DEFECTS",
+          "defect": "idempotency-key-dropped",
+          "requirement": "MWS-RETRY-2",
+          "mode": "full"
+        }
+      ]
     }
   }
 }

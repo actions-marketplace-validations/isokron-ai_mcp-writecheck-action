@@ -10,7 +10,7 @@
 //
 // Only Node's standard library: the workflow's input check imports this file before anything else is installed.
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 /** The pump's shard size for this lane (tool-qa pump/workflows.json, writecheck). */
@@ -68,7 +68,9 @@ export function loadSeed(file) {
 
 const FIXTURE_FORMAT = 'isokron-writecheck-fixtures/1';
 const HEX16 = /^[0-9a-f]{16}$/;
-const FIXTURE_KEYS = ['subject', 'launch', 'lock', 'integrity', 'manifest', 'link', 'init', 'env', 'random_env', 'background', 'setup', 'full', 'known_answer'];
+const FIXTURE_KEYS = ['subject', 'launch', 'lock', 'integrity', 'source', 'backend', 'manifest', 'link', 'init', 'env', 'random_env', 'background', 'setup', 'full', 'known_answer', 'known_answers'];
+/** What every write-test result of a fixture is labelled with: its backend lives and dies inside the sandbox container (WC12). */
+export const BACKEND_HERMETIC = 'hermetic';
 /** Where a fixture's manifest is written (two levels below /work, so a dogfood manifest's ../../<dir> cwd lands in /work). */
 export const FIXTURE_MANIFEST = '/work/m/x/writecheck.yaml';
 const LINK_RE = /^\/work\/(?!(?:out|pkg|home|lock|venv|bin|m)(?:\/|$))[a-z0-9_-]{1,40}(?:\/[a-z0-9_-]{1,40}){0,4}$/;
@@ -82,8 +84,31 @@ export function loadFixtures(file) {
   for (const [name, f] of Object.entries(doc.fixtures)) {
     const p = lockProblems(f, JSON.parse(readFileSync(join(root, f.lock, 'package-lock.json'), 'utf8')));
     if (p.length) throw new Error(`fixtures.${name}: ${p.join('; ')}`);
+    if (f.source) {
+      const got = sourceDigest(join(root, f.source.dir));
+      if (got !== f.source.sha256) throw new Error(`fixtures.${name}: the committed source of ${f.source.dir} has digest ${got}, not the ${f.source.sha256} pinned in fixtures.json (a reviewed change moves both)`);
+    }
   }
   return { ...doc, sha256: createHash('sha256').update(buf).digest('hex') };
+}
+
+/**
+ * The digest of a source fixture's committed folder: package.json, package-lock.json and every file under src/, by
+ * relative path and content sha256, in path order (WC12). node_modules and anything else in the folder is not part of it.
+ */
+export function sourceDigest(dir) {
+  const files = ['package.json', 'package-lock.json'];
+  const walk = (rel) => {
+    for (const e of readdirSync(join(dir, rel), { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const p = `${rel}/${e.name}`;
+      if (e.isDirectory()) walk(p);
+      else if (e.isFile() && statSync(join(dir, p)).size <= 1024 * 1024) files.push(p);
+    }
+  };
+  walk('src');
+  const h = createHash('sha256');
+  for (const p of files) h.update(`${p}\0${createHash('sha256').update(readFileSync(join(dir, p))).digest('hex')}\n`);
+  return h.digest('hex');
 }
 
 /**
@@ -93,13 +118,20 @@ export function loadFixtures(file) {
 export function lockProblems(f, lock) {
   const out = [];
   const pk = lock?.packages ?? {};
-  const own = pk[`node_modules/${f.launch.package}`];
-  if (!own) out.push('the lockfile does not install the package');
-  else {
-    if (own.version !== f.launch.version) out.push(`the lockfile has version ${own.version}, not ${f.launch.version}`);
-    if (own.integrity !== f.integrity) out.push('the lockfile\'s integrity for the package is not the one pinned in fixtures.json');
+  if (f.source) {
+    // A fixture whose package is the committed folder (WC12): the lockfile's root is that package, and every
+    // dependency it locks is pinned below. The folder's own bytes are pinned by source.sha256.
+    if (pk['']?.name !== f.launch.package || pk['']?.version !== f.launch.version) out.push('the lockfile\'s root is not the fixture package at its version');
+    for (const [dep, v] of Object.entries(pk['']?.dependencies ?? {})) if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(v)) out.push(`the root depends on ${dep} at ${v}, not an exact version`);
+  } else {
+    const own = pk[`node_modules/${f.launch.package}`];
+    if (!own) out.push('the lockfile does not install the package');
+    else {
+      if (own.version !== f.launch.version) out.push(`the lockfile has version ${own.version}, not ${f.launch.version}`);
+      if (own.integrity !== f.integrity) out.push('the lockfile\'s integrity for the package is not the one pinned in fixtures.json');
+    }
+    if (pk['']?.dependencies?.[f.launch.package] !== f.launch.version) out.push('the lockfile\'s root does not depend on the exact version');
   }
-  if (pk['']?.dependencies?.[f.launch.package] !== f.launch.version) out.push('the lockfile\'s root does not depend on the exact version');
   for (const [k, v] of Object.entries(pk)) {
     if (!k) continue;
     if (!/^sha512-/.test(v.integrity ?? '') || !String(v.resolved ?? '').startsWith('https://registry.npmjs.org/')) out.push(`${k} is not pinned to registry.npmjs.org with a sha512 integrity`);
@@ -121,7 +153,18 @@ export function validateFixtures(doc) {
     for (const k of Object.keys(f.env ?? {})) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.env: bad name ${k}`);
     for (const k of f.random_env ?? []) if (!ENV_NAME.test(k)) throw new Error(`fixtures.${name}.random_env: bad name ${k}`);
     if (!/^loop\/fixtures\/[a-z0-9-]{1,40}$/.test(f.lock ?? '')) throw new Error(`fixtures.${name}.lock must name a folder in loop/fixtures/ with package.json and package-lock.json`);
-    if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(f.integrity ?? '')) throw new Error(`fixtures.${name}.integrity must be the package's sha512 integrity`);
+    if (f.source === undefined) {
+      if (!/^sha512-[A-Za-z0-9+/]{86}==$/.test(f.integrity ?? '')) throw new Error(`fixtures.${name}.integrity must be the package's sha512 integrity`);
+    } else {
+      if (f.integrity !== undefined) throw new Error(`fixtures.${name}: a fixture with a source has no integrity (its folder is pinned by source.sha256)`);
+      if (!/^loop\/fixtures\/[a-z0-9-]{1,40}$/.test(f.source.dir ?? '') || f.source.dir !== f.lock) throw new Error(`fixtures.${name}.source.dir must be the lock folder`);
+      if (!/^[0-9a-f]{64}$/.test(f.source.sha256 ?? '')) throw new Error(`fixtures.${name}.source.sha256 must be 64 hex characters`);
+      if (!/^src\/[a-z0-9-]{1,40}\.mjs$/.test(f.source.bin ?? '')) throw new Error(`fixtures.${name}.source.bin must be a src/<name>.mjs file`);
+    }
+    // WC12: every fixture says what its backend is, and that it is hermetic: it starts with the container and ends with it.
+    if (!f.backend || !/^[a-z][a-z0-9_]{0,23}$/.test(f.backend.kind ?? '') || f.backend.environment !== BACKEND_HERMETIC || !/^[0-9A-Za-z._ ()-]{1,80}$/.test(f.backend.version ?? '')) throw new Error(`fixtures.${name}.backend must be { kind, environment: "${BACKEND_HERMETIC}", version }`);
+    for (const ka of f.known_answers ?? []) if (!ENV_NAME.test(ka?.env ?? '') || !/^[a-z][a-z0-9-]{1,48}$/.test(ka?.defect ?? '') || !/^MWS-[A-Z]{2,6}-[0-9]{1,2}$/.test(ka?.requirement ?? '') || !['catalog', 'full'].includes(ka?.mode)) throw new Error(`fixtures.${name}.known_answers: each is { env, defect, requirement, mode: catalog|full }`);
+    if (f.background?.only !== undefined && !(Array.isArray(f.background.only) && f.background.only.every((c) => ['plan', 'catalog', 'run'].includes(c)))) throw new Error(`fixtures.${name}.background.only must list plan, catalog or run`);
     // R-WC-09: no fixture widens the install's allowlist; a native module builds from source (registry.npmjs.org only).
     for (const k of Object.keys(f)) if (!FIXTURE_KEYS.includes(k)) throw new Error(`fixtures.${name}: unknown field ${k}`);
     if (f.full !== undefined) {
@@ -154,7 +197,7 @@ export function seedPackages(entry) {
 export function resolveSubject(subject, { seed, fixtures }) {
   for (const [name, f] of Object.entries(fixtures?.fixtures ?? {})) {
     if (f.subject.toLowerCase() === subject.toLowerCase()) {
-      return { fixture: name, launch: { ...f.launch }, source: 'fixture', package: `npm:${f.launch.package}@${f.launch.version}` };
+      return { fixture: name, launch: { ...f.launch }, source: 'fixture', package: f.source ? `local:${f.launch.package}@${f.launch.version}` : `npm:${f.launch.package}@${f.launch.version}` };
     }
   }
   const entry = seed?.map.get(subject.toLowerCase());

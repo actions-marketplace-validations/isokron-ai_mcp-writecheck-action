@@ -1,0 +1,109 @@
+# mcp-writecheck manifest for pg-tracker (loop/fixtures/pg-tracker), IsoKron's PostgreSQL-backed fixture server.
+#
+# The backend is a real PostgreSQL server that the loop starts for the job inside the sandbox container,
+# next to the CLI and the server ("hermetic": it lives and dies with the container, listens on 127.0.0.1 only, and
+# nothing else can reach it). The server reaches it through PGFX_DATABASE_URL and the job's random PGFX_PASSWORD.
+# `control` is the tester's out-of-band channel to the same database (reads and writes straight to the tables, never
+# through the MCP server), served by the backend process.
+#
+# What it offers: items with a title, status, assignee and priority, and a version that a database trigger moves on
+# every row change. Tools: create_item (idempotency_key), get_item, list_items, update_item and delete_item (both
+# need the version you read), delete_items (by title prefix; an empty filter is refused).
+# A defect build: export PGFX_DEFECTS=<name>|all (lost-update, empty-filter-deletes-all, missing-annotations,
+# idempotency-key-dropped).
+
+mws: "0.9"
+
+server:
+  stdio: [node, src/cli.mjs, server]
+  cwd: ../../pg                          # the installed fixture package, relative to this file
+  env_passthrough: [PGFX_PASSWORD]
+  env_public: [PGFX_DATABASE_URL, PGFX_DEFECTS]
+  processes: separate
+  # MWS-RETRY-2 step (e): the tester stops its own server process (SIGTERM) and starts it again.
+  restart: { stop: graceful }
+
+target:
+  environment: test
+  confirm: pg-tracker
+  guard: { tool: get_item, args: { id: guard }, path: item.title, pattern: "^pgfx guard$" }
+
+limits: { write_budget: 6000, writes_per_second: 200, pairs: 34, stale_reps: 3, gate_reps: 2, timeout_ms: 15000, max_fuzz_cases: 120 }
+
+secrets:
+  token_params: [token, sig, signature, access_token]
+  issuing_tools: []
+
+canaries:
+  - { name: guard, tool: get_item, args: { id: guard }, path: item }
+
+review:
+  by: IsoKron loop (rules written before the run, from pg-tracker's own error texts)
+  conflict_says_not_applied: "nothing was (written|deleted|changed)"
+  rejection_gives_reason: "must|one of|at (most|least)|required|between|unknown|not allowed"
+  conflict_says_reread: "re-read"
+  stale_writes_disclosed: "not detected|best-effort"
+
+patterns:
+  conflict: '\bchanged since the version you read\b'
+  version_required: '\bexpected_version\b|changed since'
+  refused_value: '\bmust be\b|\bmust not be\b|\bis required\b|\bone of\b|\bbetween\b|\bunknown argument\b'
+
+resources:
+  # Projects: the containers items live in. The caller chooses the key (MWS-TGT-3).
+  - name: project
+    create: { tool: create_project, args: { key: "{{key}}", name: "{{marker}}" }, id: project.key, name_path: project.key }
+    read: { tool: list_projects, args: {}, items: projects, match: key }
+    key: { arg: key, vary: { arg: name, path: name } }
+    list: { tool: list_projects, args: {}, items: projects, id: key, name: name }
+    delete: { tool: delete_project, args: { key: "{{id}}" } }
+    no_version_check: [delete_project]   # projects carry no version
+    cleanup: delete
+
+  - name: item
+    scope:
+      resource: project
+      arg: project
+      default: inbox
+      list: { tool: list_items, args: { project: "{{scope}}" }, items: items, id: id, name: title }
+    create: { tool: create_item, args: { project: "{{?scope}}", title: "{{marker}}", status: in_progress, priority: 2, assignee: ann }, id: item.id, name_path: item.title }
+    read: { tool: get_item, args: { id: "{{id}}" }, object: item }
+    update:
+      tool: update_item
+      mode: field_patch
+      args: { id: "{{id}}", "{{field}}": "{{value}}", expected_version: "{{?version}}" }
+    fields:
+      - { path: assignee, values: [bob, cy], empty: null }
+      - { path: status, values: [open, closed] }
+    version: { read: version, arg: expected_version }
+    restorable: [assignee, status, priority]
+    delete: { tool: delete_item, args: { id: "{{id}}", expected_version: "{{?version}}" } }
+    list: { tool: list_items, args: { title_prefix: "{{prefix}}" }, items: items, id: id, name: title }
+    missing_id: I-999999
+    cleanup: delete
+    selector:
+      tool: delete_items
+      args: { project: "{{scope}}" }
+      narrow: { title_prefix: "{{marker}}" }
+      send_empty_forms: true
+      forms:
+        - { name: omitted, args: {} }
+        - { name: empty, args: { title_prefix: "" } }
+    # MWS-RETRY-2: the key is kept in the database (table idempotency), in the transaction that makes the item.
+    idempotency: { args: { project: "{{?scope}}", title: "{{marker}}" }, key: { arg: idempotency_key }, replay_marker: replayed, backend_key: true }
+    # MWS-IN-5: a value valid by update_item's schema to try (a title of 150 characters; the schema allows 200).
+    try_values:
+      - { arg: title, length: 150 }
+    fixed_constraints:
+      - { arg: title, pattern: 'at most \d+ characters', reason: 'a length limit on the title, the same for every item and caller' }
+    failures:
+      - { name: update_missing_item, tool: update_item, args: { id: I-999999, title: "{{prefix}}x", expected_version: 1 } }
+    # The control arm: the database's own side, out of band (the loop's backend process, on 127.0.0.1).
+    control:
+      base_env: PGFX_CONTROL_URL
+      auth: { bearer_env: PGFX_PASSWORD }
+      read: { http: [GET, "/items/{{id}}"], object: item }
+      patch: { http: [PATCH, "/items/{{id}}"], body: { "{{field}}": "{{value}}" } }
+      write: { http: [PUT, "/items/{{id}}"], body: { title: "{{object.title}}", status: "{{object.status}}", assignee: "{{object.assignee}}", priority: "{{object.priority}}" }, headers: { if-match: "{{version}}" } }
+      delete: { http: [DELETE, "/items/{{id}}"], headers: { if-match: "{{version}}" } }
+      create: { http: [POST, "/items"], body: { project: "{{scope}}", title: "{{marker}}", status: open }, id: item.id }
