@@ -12,11 +12,14 @@
  *   { path, kind: "file", bytes, sha256, omitted: true }    past the total cap: listed and hashed, not copied
  *   { path, kind: "link" | "other" }                        never followed, never read
  * then { done: true, entries, files, bytes, capped }. Paths are relative to <root>, with "/" between parts.
- * Folders are walked without following links, at most 12 deep.
+ * Folders are walked without following links, at most 12 deep. <root> itself is read only when it resolves to itself (R-WC-12;
+ * mcp-surface-corpus R-SBX-24 reads a file by the same rule): a target owns the volume, and a link planted at <root>, or at a
+ * folder above it, would otherwise be followed to somewhere else in this helper's filesystem. Otherwise one line
+ * { error: "root_is_a_link" } and exit 3, never a listing.
  */
 import { createHash } from 'node:crypto';
-import { closeSync, lstatSync, openSync, readSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { closeSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 const [root, fileCapArg, totalCapArg, maxArg] = process.argv.slice(2);
 const fileCap = Number(fileCapArg);
@@ -28,6 +31,16 @@ if (!root || !(fileCap > 0) || !(totalCap > 0) || !(maxEntries > 0)) {
 }
 
 const out = (o) => process.stdout.write(`${JSON.stringify(o)}\n`);
+/** A real folder whose physical path is the one asked for: no link in the last part or in any folder above it. */
+function rootProblem(path) {
+  let real;
+  try { real = realpathSync(path); } catch { return null; } // nothing there: an empty listing, as before
+  if (real !== resolve(path)) return 'root_is_a_link';
+  try { if (!lstatSync(path).isDirectory()) return 'root_is_not_a_folder'; } catch { return null; }
+  return null;
+}
+const rootError = rootProblem(root);
+if (rootError) { out({ error: rootError }); process.exit(3); }
 let entries = 0;
 let files = 0;
 let copied = 0;

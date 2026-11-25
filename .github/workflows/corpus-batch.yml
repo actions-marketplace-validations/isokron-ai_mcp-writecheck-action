@@ -69,6 +69,11 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  # The isokron-ai/mcp-surface-corpus commit whose sandbox-guard action runs below (the same one corpus.yml pins). It makes
+  # Docker's data and volumes folders filesystems of their own with a size cap, so a target that writes without end meets
+  # ENOSPC instead of filling the runner's disk (R-SBX-23, R-SBX-25, R-SBX-26 there; R-WC-10 here), and puts up its firewall.
+  # The `uses:` below must name this same commit (test/corpus-workflow.test.mjs checks).
+  SANDBOX_REF: '4c16b586e8e5886acb098285b6ec405fd4db4ac7'
   # age v1.3.2, linux-amd64 release tarball (sha256 recorded 16 Nov 2026).
   AGE_URL: https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
   AGE_SHA256: cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10
@@ -170,6 +175,20 @@ jobs:
         run: dogfood/build-cli.sh
       - name: Install age
         run: corpus/install-age.sh
+      # The pinned sandbox's guard on this runner, before the target list is decrypted: installs its disk caps (work
+      # volumes, Docker's data and logs), its firewall and gVisor, and passes only on a recomputed self test. This
+      # driver still runs its targets under runc in its own containers; it uses the guard for the caps and the firewall.
+      # run-shard.mjs refuses to start on the CI lane unless the volumes folder is on that capped filesystem (R-WC-10).
+      - id: sandbox
+        name: Sandbox guard (disk caps, firewall, self test)
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@4c16b586e8e5886acb098285b6ec405fd4db4ac7 # SANDBOX_REF
+      - name: The guard ran the pinned sandbox and passed
+        env:
+          VERDICT: ${{ steps.sandbox.outputs.verdict }}
+          GUARD_SHA: ${{ steps.sandbox.outputs.sandbox-sha }}
+        run: |
+          [ "$VERDICT" = pass ] || { echo "::error::the sandbox self test did not pass"; exit 1; }
+          [ "$GUARD_SHA" = "$SANDBOX_REF" ] || { echo "::error::the sandbox guard ran another commit than SANDBOX_REF"; exit 1; }
       - name: Guard the container networks
         run: sudo corpus/net-guard.sh
       - name: Decrypt the target list

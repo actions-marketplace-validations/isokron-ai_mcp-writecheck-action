@@ -246,3 +246,18 @@ test('D8: the job may run 360 minutes, the hosted maximum, which the driver\'s s
   // The spec document comes from the same CLI commit, beside the package.
   assert.match(wf, /sparse-checkout: \|\n\s+\/packages\/writecheck\/\n\s+\/spec\/mws\.md\n\s+sparse-checkout-cone-mode: false/);
 });
+
+test('R-WC-10: the batch workflow runs the pinned sandbox guard (disk caps, firewall) before the target list is decrypted', () => {
+  const ref = /\n  SANDBOX_REF: '([0-9a-f]{40})'\n/.exec(wf)?.[1];
+  assert.ok(ref, 'SANDBOX_REF is a full commit');
+  const guard = step('Sandbox guard (disk caps, firewall, self test)');
+  assert.match(guard, new RegExp(`uses: isokron-ai/mcp-surface-corpus/sandbox-guard@${ref} # SANDBOX_REF`));
+  const check = step('The guard ran the pinned sandbox and passed');
+  assert.match(check, /\[ "\$VERDICT" = pass \]/);
+  assert.match(check, /\[ "\$GUARD_SHA" = "\$SANDBOX_REF" \]/);
+  assert.ok(body.indexOf('Sandbox guard (disk caps') < body.indexOf('corpus/decrypt-targets.sh'));
+  assert.ok(body.indexOf('The guard ran the pinned sandbox') < body.indexOf('corpus/decrypt-targets.sh'));
+  // The same sandbox commit as the loop lane's: one pin to move.
+  const loop = readFileSync(join(root, '.github', 'workflows', 'corpus.yml'), 'utf8');
+  assert.equal(/\n  SANDBOX_REF: '([0-9a-f]{40})'/.exec(loop)?.[1], ref);
+});

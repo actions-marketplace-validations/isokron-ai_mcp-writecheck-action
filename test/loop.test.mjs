@@ -7,7 +7,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
@@ -192,7 +192,7 @@ test('raw caps: a file and the bundle are cut, and the index keeps the original 
 });
 
 test('the in-sandbox collector lists files, never follows links, and caps', () => {
-  const d = mkdtempSync(join(tmpdir(), 'wc-collect-'));
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'wc-collect-')));
   mkdirSync(join(d, 'a'));
   writeFileSync(join(d, 'a', 'x.txt'), 'hello');
   writeFileSync(join(d, 'big'), Buffer.alloc(100, 7));
@@ -336,7 +336,7 @@ test('R-WC-02: every name the driver takes from mcp-surface-corpus is in the lis
 });
 
 test('R-WC-04: the collector brings the files the summary reads first, ahead of thousands of capture files', () => {
-  const d = mkdtempSync(join(tmpdir(), 'wc-collect-order-'));
+  const d = realpathSync(mkdtempSync(join(tmpdir(), 'wc-collect-order-')));
   mkdirSync(join(d, 'full', 'r1', 'capture'), { recursive: true });
   mkdirSync(join(d, 'results', 'catalog-0123456789'), { recursive: true });
   for (let i = 0; i < 40; i++) writeFileSync(join(d, 'full', 'r1', 'capture', `f${i}`), 'x');
@@ -455,4 +455,35 @@ test('R-WC-09: a native fixture builds from source in the build image; no fixtur
     assert.deepEqual(plan.registries, ['registry.npmjs.org']);
     assert.deepEqual({ ...T.NATIVE_BUILD_ENV }, { npm_config_nodedir: '/usr/local', npm_config_build_from_source: 'true' });
   }
+});
+
+test('R-WC-12: the collector reads its root only when it resolves to itself; a link at the root or above it is refused, not followed', () => {
+  const run = (root) => spawnSync(process.execPath, [join(root_, 'loop', 'sandbox', 'collect.mjs'), root, '100', '1000', '100'], { encoding: 'utf8' });
+  const root_ = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'wc-collect-root-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'wc-collect-outside-')));
+  writeFileSync(join(outside, 'leak.txt'), 'from the helper\'s own filesystem');
+  mkdirSync(join(outside, 'out'));
+  writeFileSync(join(outside, 'out', 'leak2.txt'), 'x');
+  // A real folder is listed as before; a missing one is an empty listing.
+  mkdirSync(join(work, 'out'));
+  writeFileSync(join(work, 'out', 'results.json'), '{}');
+  const ok = run(join(work, 'out'));
+  assert.equal(ok.status, 0);
+  assert.deepEqual(parseCollected(ok.stdout).entries.map((e) => e.path), ['results.json']);
+  assert.equal(run(join(work, 'missing')).status, 0);
+  // The root itself is a link (a target replaced /work/out): refused with one error line and no listing.
+  symlinkSync(outside, join(work, 'out-link'));
+  const l1 = run(join(work, 'out-link'));
+  assert.equal(l1.status, 3);
+  assert.deepEqual(JSON.parse(l1.stdout.trim()), { error: 'root_is_a_link' });
+  assert.ok(!l1.stdout.includes('leak.txt'));
+  // A folder above the root is a link: refused too.
+  symlinkSync(outside, join(work, 'dir-link'));
+  const l2 = run(join(work, 'dir-link', 'out'));
+  assert.equal(l2.status, 3);
+  assert.ok(!l2.stdout.includes('leak2.txt'));
+  // The driver treats a refused read as no output: no done line, nothing collected.
+  assert.ok(!parseCollected(l1.stdout).done);
+  assert.equal(parseCollected(l1.stdout).files.size, 0);
 });
