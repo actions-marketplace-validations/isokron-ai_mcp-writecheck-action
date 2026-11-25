@@ -601,3 +601,26 @@ test('R-WC-27: loop/README.md names the sandbox commit the workflows pin', () =>
   // No other seven-hex sandbox pin is named beside SANDBOX_REF.
   assert.equal([...readme.matchAll(/`SANDBOX_REF`, ([0-9a-f]{7})/g)].length, 1);
 });
+
+test('R-WC-29: the manifest names each tool by its tool-qa pin key, mcp-writecheck-action at the commit that ran', async () => {
+  const { actionSha, gitHead, toolsFor } = await import('../loop/run-items.mjs');
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  // The workflow's checked ACTION_SHA, which must be the checkout's HEAD; never GITHUB_SHA (the YAML's branch head).
+  assert.equal(actionSha({ ACTION_SHA: A, GITHUB_SHA: B }, A), A);
+  assert.equal(actionSha({ GITHUB_SHA: B }, A), A, 'without ACTION_SHA, the HEAD, not GITHUB_SHA');
+  assert.throws(() => actionSha({ ACTION_SHA: A }, B), /not the commit checked out/);
+  assert.throws(() => actionSha({ ACTION_SHA: 'abc123' }, 'abc123'), /full commit SHA/);
+  assert.equal(actionSha({}, null), 'local');
+  assert.match(gitHead(root) ?? '', /^[0-9a-f]{40}$/);
+  // The names are the keys of tool-qa pump/workflows.json writecheck versions (tool: mcp-writecheck-action, mcp-writecheck;
+  // probe: mcp-surface-corpus), so ingest can prove every pin.
+  const tools = toolsFor({ cliRef: 'c'.repeat(40), actionRef: A, sandboxRef: 'd'.repeat(40), gvisor: 'release-20261101.0' });
+  assert.deepEqual(tools.map((t) => t.name), ['mcp-writecheck', 'mcp-writecheck-action', 'mcp-surface-corpus', 'gvisor']);
+  assert.deepEqual(Object.fromEntries(tools.map((t) => [t.name, t.version])), { 'mcp-writecheck': 'c'.repeat(40), 'mcp-writecheck-action': A, 'mcp-surface-corpus': 'd'.repeat(40), gvisor: 'release-20261101.0' });
+  // The driver reports through these two only.
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  assert.doesNotMatch(src.slice(src.indexOf('export async function main')), /GITHUB_SHA|mcp-surface-corpus-sandbox/);
+  assert.match(src, /const actionRef = actionSha\(env, gitHead\(\)\);/);
+  assert.match(src, /ctx\.tools = toolsFor\(\{ cliRef: env\.CLI_REF, actionRef, sandboxRef: env\.SANDBOX_REF, gvisor: shard\.cfg\.release \}\);/);
+});

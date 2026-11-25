@@ -44,6 +44,11 @@ on:
         description: 'JSON list of 1 to 10 {"subject": "owner/name", "run_key": "<64 hex>", "fence": <n>}.'
         required: true
         type: string
+      tool_sha:
+        description: Commit of this repository to run (tool-qa R-PIN-01); empty runs the dispatched ref.
+        required: false
+        type: string
+        default: ''
 
 run-name: shard ${{ inputs.shard_id }}
 
@@ -128,6 +133,7 @@ jobs:
           SHARD_ID: ${{ inputs.shard_id }}
           ATTEMPT_ID: ${{ inputs.attempt_id }}
           ITEMS: ${{ inputs.items }}
+          TOOL_SHA: ${{ inputs.tool_sha }}
         run: |
           # Whole-string checks: a newline or control character anywhere fails the match. loop/items.mjs checks the
           # items in full (JSON, 1 to 10 entries, subject, run_key, fence) right after the checkout.
@@ -136,9 +142,21 @@ jobs:
           if [[ ! "$SHARD_ID" =~ $id_re ]]; then echo "::error title=writecheck::shard_id is malformed"; exit 1; fi
           if [[ ! "$ATTEMPT_ID" =~ $id_re ]]; then echo "::error title=writecheck::attempt_id is malformed"; exit 1; fi
           if [[ ! "$ITEMS" =~ $items_re ]] || [ "${#ITEMS}" -gt 60000 ]; then echo "::error title=writecheck::items must be one line of JSON, a list of at most 60000 characters"; exit 1; fi
+          if [ -n "$TOOL_SHA" ] && [[ ! "$TOOL_SHA" =~ ^[0-9a-f]{40}$ ]]; then echo "::error title=writecheck::tool_sha must be empty or a full commit SHA"; exit 1; fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ inputs.tool_sha || github.sha }}
+      # tool-qa R-PIN-01 (R-WC-28): the lane code is the commit the pump pinned (tool_sha), else this run's own commit; the
+      # job stops unless the checkout is exactly that commit, and the driver reports it as the mcp-writecheck-action that ran.
+      - name: The checkout is the commit to run
+        env:
+          TOOL_SHA: ${{ inputs.tool_sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          want="${TOOL_SHA:-$GITHUB_SHA}"
+          if [ "$head" != "$want" ]; then echo "::error title=writecheck::the checkout is not the commit to run"; exit 1; fi
+          echo "ACTION_SHA=$head" >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22

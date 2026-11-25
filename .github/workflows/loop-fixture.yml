@@ -65,10 +65,22 @@ jobs:
             echo "shard_id=$shard"
             echo "attempt_id=$shard"
             echo "items=$items"
+            echo "tool_sha="
           } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ steps.inputs.outputs.tool_sha || github.sha }}
+      # tool-qa R-PIN-01 (R-WC-28): the lane code is the commit the pump pinned (tool_sha), else this run's own commit; the
+      # job stops unless the checkout is exactly that commit, and the driver reports it as the mcp-writecheck-action that ran.
+      - name: The checkout is the commit to run
+        env:
+          TOOL_SHA: ${{ steps.inputs.outputs.tool_sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          want="${TOOL_SHA:-$GITHUB_SHA}"
+          if [ "$head" != "$want" ]; then echo "::error title=writecheck::the checkout is not the commit to run"; exit 1; fi
+          echo "ACTION_SHA=$head" >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22

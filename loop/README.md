@@ -11,8 +11,13 @@ The hand-dispatched batch workflow that used to be `corpus.yml` is now `corpus-b
 | `shard_id` | The shard's id. The run is named `shard <shard_id>`. |
 | `attempt_id` | The dispatch's id; every result quotes it. |
 | `items` | JSON list of 1 to 10 `{"subject": "owner/name", "run_key": "<64 hex>", "fence": <n>}` |
+| `tool_sha` | Optional, empty by default: the commit of this repository to run (tool-qa R-PIN-01). The pump sends it for a lane whose `pin_check` is `enforce`. |
 
-Every input is checked as a whole string before use (a newline anywhere is refused), then `loop/items.mjs` checks the items in full.
+Every input is checked as a whole string before use (a newline anywhere is refused; `tool_sha` is empty or a full commit SHA), then `loop/items.mjs` checks the items in full.
+
+### Version pins
+
+tool-qa files every result under the versions it pins for this lane (`pump/workflows.json`, writecheck `versions`), and its ingest refuses a result whose manifest reports another version (`pin_mismatch`) or, on an `enforce` lane, cannot prove one (`pin_unverified`). The job that runs the items checks out `tool_sha` (else the run's own commit) and stops unless `git rev-parse HEAD` is exactly that commit (R-WC-28); the YAML itself still runs from `main`. The driver reports in the manifest's `tools`, by the pin keys: `mcp-writecheck` at `CLI_REF`, `mcp-writecheck-action` at the commit checked out (`ACTION_SHA`, never `GITHUB_SHA`), `mcp-surface-corpus` at `SANDBOX_REF`, and gVisor's release (R-WC-29). A merge to `main` changes the commit a run without `tool_sha` reports, so tool-qa's pin is bumped with each merge.
 
 ## How a subject is run
 
