@@ -30,6 +30,13 @@ Every target is treated as hostile. Nothing a target ships runs on the runner it
   Docker socket. Files go in through stdin; results come out through a helper that copies regular
   files and folders only, under a size cap. Our helper containers carry the target's label and a
   time limit, so one stuck on something the target planted is removed with it.
+- Disk: before the target list is decrypted, `corpus-batch.yml` runs the pinned `sandbox-guard` action of
+  `isokron-ai/mcp-surface-corpus` (the same commit as `corpus.yml`), which puts Docker's data folder, its volumes folder
+  and container logs on filesystems of their own with a size cap, and the sandbox firewall on the runner. A target that writes
+  without end meets ENOSPC on its own volume instead of filling the runner. `run-ci-shard.sh` passes `--require-volume-cap`,
+  and the driver then stops before any target unless the volumes folder is such a filesystem (R-WC-10). Targets still run
+  under runc in this driver's own containers. The folder copy-out helper reads `/work/out` only when its path resolves to
+  itself, never through a link a target planted (R-WC-11).
 - Secrets are scrubbed from everything the driver writes down, never from what runs (`corpus/scrub.mjs`,
   one scrubber per target). Known values: what the list gives under a secret-like name, matched as a
   whole token (`*PASSWORD`, `*_PASS`, `*_PW`, `*_PWD`, `*_SECRET`, `*_TOKEN`, `*_API_KEY`,
