@@ -6,7 +6,7 @@
  *
  *   node corpus/run-shard.mjs --targets T.json --cli DIR --out DIR [--work DIR] [--lane ci|mac]
  *                             [--shard N --shards M] [--only ID,ID] [--cli-commit SHA]
- *                             [--consume-targets] [--images corpus/images.json] [--spec FILE]
+ *                             [--consume-targets] [--require-volume-cap] [--images corpus/images.json] [--spec FILE]
  *
  * Isolation (every target is untrusted). No target code runs on the host. Each target's install,
  * set-up, CLI and server run in containers of a digest-pinned image (corpus/images.json), started
@@ -971,7 +971,7 @@ function artifactFor(t, plat) {
 }
 
 function args(argv) {
-  const o = { lane: 'ci', shard: 1, shards: 1, only: null, work: null, cliCommit: null, consumeTargets: false, images: join(here, 'images.json') };
+  const o = { lane: 'ci', shard: 1, shards: 1, only: null, work: null, cliCommit: null, consumeTargets: false, requireVolumeCap: false, images: join(here, 'images.json') };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     const v = () => {
@@ -988,6 +988,7 @@ function args(argv) {
     else if (a === '--only') o.only = v().split(',').filter(Boolean);
     else if (a === '--cli-commit') o.cliCommit = v();
     else if (a === '--consume-targets') o.consumeTargets = true;
+    else if (a === '--require-volume-cap') o.requireVolumeCap = true;
     else if (a === '--images') o.images = v();
     else if (a === '--spec') o.spec = v();
     else throw new HarnessError(`unknown option ${a}`);
@@ -1271,6 +1272,15 @@ export function keepRegular(dir) {
 }
 
 /**
+ * What the copy-out helper runs (R-WC-11; mcp-surface-corpus R-SBX-24, which reads a file by the same rule: only a path that
+ * resolves to itself). $2 is the volume's mount point (/work). The folder is read only when it is a real folder, with no link in its path, the last part or a folder
+ * above it: `cd -P` and `pwd -P` give the physical path, which must be the one asked for (exit 3 otherwise). A target owns the
+ * volume, so it could have planted a link there; the helper's own filesystem would be read through it. No such folder is fine
+ * (exit 0, nothing to copy). `find` does not follow links below it, and lists regular files and folders only.
+ */
+export const COPY_OUT_SCRIPT = 'd=$(cd -P -- "$1" 2>/dev/null && pwd -P) || exit 0; [ "$d" = "$1" ] || exit 3; case "$d" in "$2"|"$2"/*) ;; *) exit 3 ;; esac; cd -- "$d" || exit 0; find . -mindepth 1 \\( -type f -o -type d \\) -print0 | tar --null --no-recursion -cf - -T -';
+
+/**
  * Bring /work/out back to the host: a helper (no network, read-only volume) tars regular files and
  * folders only; the host extracts with no owner and no modes, under COPY_OUT_CAP bytes.
  */
@@ -1281,7 +1291,7 @@ function copyOut(dk, vol, dest, log, target, srcDir = P.out) {
     name, target,
     user: SANDBOX_USER,
     mounts: [{ src: vol, dst: P.work, ro: true }],
-    cmd: ['sh', '-c', 'cd "$1" 2>/dev/null || exit 0; find . -mindepth 1 \\( -type f -o -type d \\) -print0 | tar --null --no-recursion -cf - -T -', 'sh', srcDir],
+    cmd: ['sh', '-c', COPY_OUT_SCRIPT, 'sh', srcDir, P.work],
   });
   return new Promise((done) => {
     const lg = createWriteStream(log, { flags: 'a' });
@@ -2222,6 +2232,26 @@ async function context(o) {
   };
 }
 
+/**
+ * Why Docker's volumes are not on a filesystem of their own with a size cap, or null when they are (R-WC-10; mcp-surface-corpus
+ * R-SBX-23). A work volume is plain disk on the runner unless the sandbox guard has mounted <data-root>/volumes as a loop-mounted
+ * ext4 of a fixed size, so an install or a server that writes without end (an archive bomb, a fill) meets ENOSPC there instead of
+ * filling the runner's disk and with it the shard's results. `mountinfo` is /proc/self/mountinfo.
+ */
+export function volumeCapProblem(dockerRoot, mountinfo) {
+  const want = `Docker's volumes folder is not a filesystem of its own with a size cap (the sandbox guard of isokron-ai/mcp-surface-corpus sets it up)`;
+  if (typeof dockerRoot !== 'string' || !dockerRoot.startsWith('/')) return `${want}: Docker's data root is unknown`;
+  const dir = `${dockerRoot.replace(/\/+$/, '')}/volumes`;
+  // mountinfo: id parent major:minor root mountpoint options [tags] - fstype source superoptions. The last mount on the path wins.
+  const line = String(mountinfo).split('\n').map((l) => l.split(' ')).filter((f) => f[4] === dir).pop();
+  if (!line) return want;
+  const dash = line.indexOf('-');
+  if (dash < 0) return want;
+  const [fstype, source] = [line[dash + 1], line[dash + 2]];
+  if (fstype !== 'ext4' || !/^\/dev\/loop\d{1,4}$/.test(String(source))) return `${want}: it is ${fstype} on ${source}`;
+  return null;
+}
+
 /** Shard set-up on the Docker side: platform, pinned images pulled, the CLI volume. */
 async function prepareDocker(ctx, dk) {
   const log = join(ctx.out, '_shard', 'docker.log');
@@ -2230,6 +2260,15 @@ async function prepareDocker(ctx, dk) {
   ctx.plat = platformKey(v.stdout);
   ctx.runner.container_platform = ctx.plat;
   checkDockerVersion(ctx.runner.docker);
+  // --require-volume-cap (corpus/run-ci-shard.sh passes it): the shard runs only on a runner whose sandbox guard capped the work
+  // volumes (R-WC-10). IsoKron's own machine (lane mac) and the tests with a stand-in docker run without it.
+  if (ctx.requireVolumeCap) {
+    const root = (await dk.d(['info', '--format', '{{.DockerRootDir}}'], { log, keepStdout: true })).stdout.trim();
+    let mountinfo = '';
+    try { mountinfo = readFileSync('/proc/self/mountinfo', 'utf8'); } catch { /* no such file: the check fails below */ }
+    const why = volumeCapProblem(root, mountinfo);
+    if (why) throw new HarnessError(why);
+  }
   const ncpu = Number((await dk.d(['info', '--format', '{{.NCPU}}'], { log, keepStdout: true })).stdout.trim());
   ctx.cpus = Number.isInteger(ncpu) && ncpu >= 1 ? Math.min(CPUS, ncpu) : 1;
   ctx.isolation.cpus = ctx.cpus;
@@ -2295,6 +2334,7 @@ async function main() {
     if (o.lane === 'ci') checkShardBudget(inShard, list.defaults ?? {}, invalid);
     const mine = shuffled(inShard, seed);
     const ctx = await context(o);
+    ctx.requireVolumeCap = o.requireVolumeCap;
     ctx.defaults = list.defaults ?? {};
     ctx.invalid = invalid;
     ctx.dropped = dropped;

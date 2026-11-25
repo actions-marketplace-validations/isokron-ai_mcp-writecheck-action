@@ -10,14 +10,14 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import {
-  BACKEND_CAPS, BACKEND_DEFAULT_CAPS, backendCaps, backendRunArgs, catalogManifest, checkFetch, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
+  BACKEND_CAPS, BACKEND_DEFAULT_CAPS, COPY_OUT_SCRIPT, volumeCapProblem, backendCaps, backendRunArgs, catalogManifest, checkFetch, checkDockerVersion, checkLane, checkNpmLock, checkPinned, checkPypiLock, classifyCli,
   CLI_TEMPLATE_NAMES, dockerEnvFrom, fill, fillManifest, installPlan, keepRegular, withRetry, LABEL, platformKey, publicExit, sandboxEnv, sandboxRunArgs, serverWrap, shuffled, STDERR_DIR, validateTarget, volumeMount,
 } from '../corpus/run-shard.mjs';
 import { checkListedUrl, FETCH_HOSTS, fetchVerified } from '../corpus/sandbox/fetch.mjs';
@@ -512,7 +512,7 @@ test('R2-10: helper containers are named and carry their target label, so the pe
   // Every helper is named, so the per-target sweep finds it.
   assert.ok(calls.filter((c) => c.argv[0] === 'run' && c.argv.includes('--user') && c.argv.includes('0:0')).every((c) => c.argv.includes('--name')));
   const mine = helpers.filter((a) => a.includes('isokron.corpus.target=t01'));
-  assert.ok(mine.some((a) => a.join(' ').includes('find . -mindepth 1') && a.at(-1) === '/work/out'), 'copy-out');
+  assert.ok(mine.some((a) => a.join(' ').includes('find . -mindepth 1') && a.at(-2) === '/work/out' && a.at(-1) === '/work'), 'copy-out');
   assert.ok(mine.some((a) => a.join(' ').includes('cat > "$1"')), 'file write');
   assert.ok(mine.some((a) => a.join(' ').includes('chown -R')), 'volume set-up');
   // Target containers are limited to 2 CPUs (or what the Docker server has).
@@ -856,4 +856,70 @@ test('TB-4: withRetry tries a failed install once more, and never after a time l
   assert.equal((await withRetry(seq({ exit: 1 }, { exit: 0 }), { name: 'install' }, meta, Infinity)).exit, 1, 'no retry unless asked');
   assert.equal((await withRetry(seq({ exit: 0 }), s, meta, Infinity)).exit, 0);
   assert.equal(meta.install_retries, undefined);
+});
+
+test('R-WC-10: the CI lane refuses to run unless Docker\'s volumes folder is a capped filesystem of its own', () => {
+  const dr = '/var/lib/isokron-docker';
+  const line = (mp, fstype, src) => `501 29 7:0 / ${mp} rw,nosuid,nodev,relatime shared:1 - ${fstype} ${src} rw`;
+  // What the pinned sandbox guard leaves: the data root and its volumes folder, each its own ext4 on a loop device.
+  const capped = [line(dr, 'ext4', '/dev/loop3'), line(`${dr}/volumes`, 'ext4', '/dev/loop4')].join('\n');
+  assert.equal(volumeCapProblem(dr, capped), null);
+  assert.equal(volumeCapProblem(`${dr}/`, capped), null, 'a trailing slash is the same folder');
+  // Plain runner disk: the data root is a mount, the volumes folder is not.
+  assert.match(volumeCapProblem(dr, line(dr, 'ext4', '/dev/loop3')), /not a filesystem of its own with a size cap/);
+  // Mounted, but not a loop-backed ext4 (the runner's own disk, a tmpfs, an overlay).
+  assert.match(volumeCapProblem(dr, line(`${dr}/volumes`, 'ext4', '/dev/sda1')), /ext4 on \/dev\/sda1/);
+  assert.match(volumeCapProblem(dr, line(`${dr}/volumes`, 'tmpfs', 'tmpfs')), /tmpfs on tmpfs/);
+  assert.match(volumeCapProblem(dr, ''), /not a filesystem/);
+  assert.match(volumeCapProblem('', capped), /data root is unknown/);
+  assert.match(volumeCapProblem(undefined, capped), /data root is unknown/);
+  // The last mount on the path wins: a loop mount covered by a later plain one is not a cap.
+  assert.match(volumeCapProblem(dr, [capped, line(`${dr}/volumes`, 'ext4', '/dev/sda1')].join('\n')), /sda1/);
+  // The CI entry point passes the flag; the driver then stops with a harness error before any target runs (the stand-in docker
+  // reports no data root, as a runner without the guard would show no capped volumes folder).
+  assert.match(readFileSync(join(root, 'corpus', 'run-ci-shard.sh'), 'utf8'), /\n  --require-volume-cap /);
+  const d = stand();
+  const { r, calls } = drive(d, { only: 't01', extraArgs: ['--require-volume-cap'] });
+  assert.notEqual(r.status, 0);
+  assert.equal(r.stdout.split('\n').filter(Boolean).at(-1), 'run finished, exit 125', 'the public output says only that the harness failed');
+  const files = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]));
+  assert.ok(files(join(d, 'out')).some((f) => /not a filesystem of its own with a size cap/.test(readFileSync(f, 'utf8'))), 'the reason is in the shard\'s own record');
+  assert.ok(!calls.some((c) => (c.argv || c.args || []).includes('run')), 'no container was started');
+});
+
+/** Runs the copy-out helper's command for real (sh, find and tar) on a folder, as /work. */
+function copyOutRun(mount, dir) {
+  const r = spawnSync('sh', ['-c', COPY_OUT_SCRIPT, 'sh', dir, mount], { encoding: 'buffer' });
+  const names = spawnSync('tar', ['-t'], { input: r.stdout, encoding: 'utf8' });
+  return { status: r.status, files: names.stdout.split('\n').filter(Boolean).sort() };
+}
+
+test('R-WC-11: the copy-out helper reads a folder only when its path resolves to itself; a planted link is refused, not followed', () => {
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'wc-copyout-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'wc-outside-')));
+  writeFileSync(join(outside, 'secret.txt'), 'not for the bundle');
+  // A real folder: its regular files and folders come out.
+  mkdirSync(join(work, 'out', 'sub'), { recursive: true });
+  writeFileSync(join(work, 'out', 'a.txt'), 'a');
+  writeFileSync(join(work, 'out', 'sub', 'b.txt'), 'b');
+  assert.deepEqual(copyOutRun(work, join(work, 'out')), { status: 0, files: ['./a.txt', './sub/', './sub/b.txt'] });
+  // No such folder: nothing to copy, not an error.
+  assert.deepEqual(copyOutRun(work, join(work, 'missing')), { status: 0, files: [] });
+  // The last part is a link to somewhere else: refused (exit 3), nothing listed.
+  symlinkSync(outside, join(work, 'out-link'));
+  assert.deepEqual(copyOutRun(work, join(work, 'out-link')), { status: 3, files: [] });
+  // A folder above it is a link: refused too (the old `cd` followed it).
+  symlinkSync(outside, join(work, 'dir-link'));
+  assert.deepEqual(copyOutRun(work, join(work, 'dir-link', 'x')), { status: 0, files: [] }, 'nothing there');
+  mkdirSync(join(outside, 'out'));
+  writeFileSync(join(outside, 'out', 'leak.txt'), 'x');
+  assert.deepEqual(copyOutRun(work, join(work, 'dir-link', 'out')), { status: 3, files: [] });
+  // A link inside the folder is never followed by find (only regular files and folders are listed).
+  symlinkSync(outside, join(work, 'out', 'inner-link'));
+  assert.deepEqual(copyOutRun(work, join(work, 'out')).files, ['./a.txt', './sub/', './sub/b.txt']);
+  // A link to another place inside the mount is refused too: the path must be the one asked for, not only inside /work.
+  symlinkSync(join(work, 'out'), join(work, 'in-link'));
+  assert.deepEqual(copyOutRun(work, join(work, 'in-link')), { status: 3, files: [] });
+  // A path outside the mount is refused even when it is real.
+  assert.deepEqual(copyOutRun(work, outside), { status: 3, files: [] });
 });
