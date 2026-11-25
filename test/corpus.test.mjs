@@ -512,7 +512,7 @@ test('R2-10: helper containers are named and carry their target label, so the pe
   // Every helper is named, so the per-target sweep finds it.
   assert.ok(calls.filter((c) => c.argv[0] === 'run' && c.argv.includes('--user') && c.argv.includes('0:0')).every((c) => c.argv.includes('--name')));
   const mine = helpers.filter((a) => a.includes('isokron.corpus.target=t01'));
-  assert.ok(mine.some((a) => a.join(' ').includes('find . -mindepth 1') && a.at(-1) === '/work/out'), 'copy-out');
+  assert.ok(mine.some((a) => a.join(' ').includes('find . -mindepth 1') && a.at(-2) === '/work/out' && a.at(-1) === '/work'), 'copy-out');
   assert.ok(mine.some((a) => a.join(' ').includes('cat > "$1"')), 'file write');
   assert.ok(mine.some((a) => a.join(' ').includes('chown -R')), 'volume set-up');
   // Target containers are limited to 2 CPUs (or what the Docker server has).
@@ -881,7 +881,9 @@ test('R-WC-10: the CI lane refuses to run unless Docker\'s volumes folder is a c
   const d = stand();
   const { r, calls } = drive(d, { only: 't01', extraArgs: ['--require-volume-cap'] });
   assert.notEqual(r.status, 0);
-  assert.match(r.stderr + r.stdout, /not a filesystem of its own with a size cap/);
+  assert.equal(r.stdout.split('\n').filter(Boolean).at(-1), 'run finished, exit 125', 'the public output says only that the harness failed');
+  const files = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? files(join(dir, e.name)) : [join(dir, e.name)]));
+  assert.ok(files(join(d, 'out')).some((f) => /not a filesystem of its own with a size cap/.test(readFileSync(f, 'utf8'))), 'the reason is in the shard\'s own record');
   assert.ok(!calls.some((c) => (c.argv || c.args || []).includes('run')), 'no container was started');
 });
 
@@ -915,6 +917,9 @@ test('R-WC-11: the copy-out helper reads a folder only when its path resolves to
   // A link inside the folder is never followed by find (only regular files and folders are listed).
   symlinkSync(outside, join(work, 'out', 'inner-link'));
   assert.deepEqual(copyOutRun(work, join(work, 'out')).files, ['./a.txt', './sub/', './sub/b.txt']);
+  // A link to another place inside the mount is refused too: the path must be the one asked for, not only inside /work.
+  symlinkSync(join(work, 'out'), join(work, 'in-link'));
+  assert.deepEqual(copyOutRun(work, join(work, 'in-link')), { status: 3, files: [] });
   // A path outside the mount is refused even when it is real.
   assert.deepEqual(copyOutRun(work, outside), { status: 3, files: [] });
 });
