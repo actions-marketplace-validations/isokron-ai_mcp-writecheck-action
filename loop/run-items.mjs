@@ -55,8 +55,13 @@ const PROXY_PORT = 8080;
 /** The bridge's port in the server's container (split runs). */
 const BRIDGE_PORT = 7300;
 const MS = { build: 900_000, install: 300_000, setup: 120_000, step: 150_000, full: 900_000, helper: 120_000 };
-/** No item starts after this long (the pump's lease for 10 items is 52 minutes; the job stops at 45). */
-const SHARD_BUDGET_MS = Number(process.env.LOOP_SHARD_BUDGET_S || 26 * 60) * 1000;
+/**
+ * No item starts after this long from t0 (set before the controls run). With up to ~15 min before t0 (checkout,
+ * guard, CLI build, image pulls), ITEM_GRACE_MS plus a few minutes of host-side overhang after the deadline, and
+ * ~5 min of teardown and sealing, a shard ends inside the job's 50-minute timeout-minutes and the pump's lease of
+ * 1.5 x (12 + 10 x 2) + 10 = 58 minutes (tool-qa pump/workflows.json writecheck setup_minutes 12). R-WC-13.
+ */
+export const SHARD_BUDGET_MS = Number(process.env.LOOP_SHARD_BUDGET_S || 20 * 60) * 1000;
 // How far past the shard deadline the item already running may go (was 15 min, which could outlast the job).
 export const ITEM_GRACE_MS = 5 * 60_000;
 const COLLECT = { file: 4 * 1024 * 1024, total: 24 * 1024 * 1024, entries: 2000 };

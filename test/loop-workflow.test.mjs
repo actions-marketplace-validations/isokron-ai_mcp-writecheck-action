@@ -58,7 +58,10 @@ for (const [name, text] of [['corpus.yml', worker], ['loop-fixture.yml', fixture
     assert.match(b, new RegExp(`uses: isokron-ai/mcp-surface-corpus/sandbox-guard@${sbx} `));
     assert.match(b, /needs\.conformance\.outputs\.verdict == 'pass'/);
     assert.doesNotMatch(b, /prepare\.sh (sandbox|selftest)/);
-    const job = b.slice(b.lastIndexOf('\n  ', b.indexOf('timeout-minutes: 45')));
+    const at = b.indexOf('loop/run-items.mjs');
+    const heads = [...b.slice(0, at).matchAll(/^ {2}[a-z][a-z0-9-]*:$/gm)]; // job headers before the item runner
+    const job = b.slice(heads[heads.length - 1].index); // the job that runs the items
+    assert.ok(job.includes('sandbox-guard@'), 'the item job itself runs the guard');
     assert.ok(job.indexOf('sandbox-guard@') < job.indexOf('loop/run-items.mjs'), 'the guard runs on this runner before any target');
     assert.match(b, /SEED_REF: '[0-9a-f]{40}'/);
   });
@@ -110,14 +113,18 @@ test('corpus-batch.yml is the older hand-dispatched batch path, kept as it was',
 });
 
 test('R-WC-13: the last item cannot outlast the writecheck job or the pump lease', async () => {
-  const { ITEM_GRACE_MS } = await import('../loop/run-items.mjs');
+  const { ITEM_GRACE_MS, SHARD_BUDGET_MS } = await import('../loop/run-items.mjs');
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  // The running item's unit deadline is the shard deadline plus the grace constant, nothing longer.
+  assert.match(src, /runUnit\(u, Math\.min\(deadline \+ ITEM_GRACE_MS,/);
+  assert.doesNotMatch(src, /deadline \+ \d+ \* 60_000/);
   const wf = readFileSync(join(root, '.github', 'workflows', 'corpus.yml'), 'utf8');
   const job = wf.slice(wf.indexOf('\n  writecheck:'));
   const timeout = Number(/timeout-minutes:\s*(\d+)/.exec(job)[1]);
-  const budgetMin = 26; // SHARD_BUDGET_MS default (LOOP_SHARD_BUDGET_S 26 min)
-  const prepareAndTeardownMin = 10; // checkout, CLI build, guard, sealing and upload
-  assert.ok(ITEM_GRACE_MS <= 5 * 60_000, 'the item running at the deadline gets at most 5 more minutes');
-  assert.ok(budgetMin + ITEM_GRACE_MS / 60_000 + prepareAndTeardownMin <= timeout, `items ${budgetMin} + grace ${ITEM_GRACE_MS / 60_000} + ${prepareAndTeardownMin} must fit in timeout-minutes ${timeout}`);
-  const lease = 1.5 * (8 + 10 * 2) + 10; // tool-qa pump/slots.mjs for writecheck: setup_minutes 8, 10 items x 2 min
+  const beforeT0 = 15; // checkout, guard (gVisor install and self test), CLI build, image pulls: measured worst case
+  const afterDeadline = 3 + 5; // host-side overhang of the last item (sweep, collect, start), then teardown and sealing
+  const worst = beforeT0 + SHARD_BUDGET_MS / 60_000 + ITEM_GRACE_MS / 60_000 + afterDeadline;
+  assert.ok(worst <= timeout, `worst case ${worst} min must fit in timeout-minutes ${timeout}`);
+  const lease = 1.5 * (12 + 10 * 2) + 10; // tool-qa pump/slots.mjs with writecheck setup_minutes 12 (tool-qa#66)
   assert.ok(timeout < lease, `job timeout ${timeout} must be below the pump lease ${lease}`);
 });
