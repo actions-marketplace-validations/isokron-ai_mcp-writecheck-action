@@ -1,6 +1,6 @@
 {
   "format": "isokron-writecheck-fixtures/1",
-  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. A fixture with install_scripts installs in the sandbox's build image (node24-build) with the sandbox's native build env: its native modules (kronicle-lite's better-sqlite3) compile from source against the image's own Node headers, and the install reaches registry.npmjs.org only. A fixture with `source` (pg-tracker) is the committed folder itself, not an npm package: package.json, package-lock.json and src/ are pinned by `source.sha256` (sourceDigest in loop/items.mjs), its dependencies by the lockfile, and it has no integrity of its own. Every fixture names its `backend` ({ kind, environment: \"hermetic\", version }): the label every result of its full write test carries. `background.only` lists the CLI commands (plan, catalog, run) that start the backend. known_answers lists the defect builds of a source fixture and the requirement each is caught as (test/pg-fixture.test.mjs runs them). A fixture with `binary_image` (redis-tracker) runs the executable of an official image: the image is pinned by tag and index digest, the files to copy out of it by path and sha256 per platform (loop/binary-image.mjs: docker create, never start, docker cp, each file checked), and they are mounted read-only in the fixture's sandbox container at `mount`. `full.plan_hash` null means no person has accepted the fixture's plan, so the live lane never runs its full write test; `full.proposed_plan_hash` is the plan an item with `proof_plan` runs in the pull-request proof only.",
+  "about": "IsoKron's own fixture servers for the writecheck loop worker (loop/run-items.mjs). A subject listed here (only IsoKron's own npm packages, maintained by the isokron-ai npm account) installs with npm ci from its committed lockfile in `lock`, whose entry for the package must carry the sha512 `integrity` given here, and runs with its dogfood manifest (the same file, byte for byte, that the dogfood workflow runs) instead of the generic catalog manifest. The manifest is written at /work/m/x/writecheck.yaml and `link` points its relative cwd at the installed package, so the plan is the same as the dogfood one. Where full.plan_hash is set, the full write test runs against a disposable backend inside the sandbox; full.plan_hash is the hash a person read and accepted in dogfood-tiny-tracker.yml or dogfood-kronicle-lite.yml for the same server version, manifest and CLI. A plan that gives another hash is recorded as drift and the full run does not start. known_answer names the tiny-tracker defect the shard's known-answer control switches on. Change only by a reviewed commit. A fixture with install_scripts installs in the sandbox's build image (node24-build) with the sandbox's native build env: its native modules (kronicle-lite's better-sqlite3) compile from source against the image's own Node headers, and the install reaches registry.npmjs.org only. A fixture with `source` (pg-tracker) is the committed folder itself, not an npm package: package.json, package-lock.json and src/ are pinned by `source.sha256` (sourceDigest in loop/items.mjs), its dependencies by the lockfile, and it has no integrity of its own. Every fixture names its `backend` ({ kind, environment: \"hermetic\", version }): the label every result of its full write test carries. `background.only` lists the CLI commands (plan, catalog, run) that start the backend. known_answers lists the defect builds of a source fixture and the requirement each is caught as (test/pg-fixture.test.mjs runs them). A fixture with `binary_image` (redis-tracker) runs the executable of an official image: the image is pinned by tag and index digest, the files to copy out of it by path and sha256 per platform (loop/binary-image.mjs: docker create, never start, docker cp, each file checked), and they are mounted read-only in the fixture's sandbox container at `mount`. `full.plan_hash` null means no person has accepted the fixture's plan, so the live lane never runs its full write test; `full.proposed_plan_hash` is the plan an item with `proof_plan` runs in the pull-request proof only. Every source fixture has a subject of its own (`<repository>.<fixture id>`), because history in tool-qa is keyed by subject and two backends must never share a key; the subject is the key the bundle carries.",
   "fixtures": {
     "tiny-tracker": {
       "subject": "isokron-ai/mcp-write-safety",
@@ -85,7 +85,7 @@
       }
     },
     "pg-tracker": {
-      "subject": "isokron-ai/mcp-writecheck-action",
+      "subject": "isokron-ai/mcp-writecheck-action.pg-tracker",
       "launch": {
         "kind": "npm",
         "package": "@isokron-fixtures/pg-tracker",
@@ -160,7 +160,7 @@
       ]
     },
     "redis-tracker": {
-      "subject": "isokron-ai/mcp-writecheck-action",
+      "subject": "isokron-ai/mcp-writecheck-action.redis-tracker",
       "launch": {
         "kind": "npm",
         "package": "@isokron-fixtures/redis-tracker",
@@ -208,7 +208,13 @@
               "sha256": "322b1a55dbc35b68c19a72fea768c97a1b38e6afa72b84627327a443ee74912e"
             }
           }
-        }
+        },
+        "system_libs": [
+          "libc.so.6",
+          "libgcc_s.so.1",
+          "libm.so.6",
+          "libstdc++.so.6"
+        ]
       },
       "backend": {
         "kind": "redis",

@@ -17,7 +17,7 @@ import { after, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import { dockerPlatform, extractBinaryImage } from '../loop/binary-image.mjs';
-import { BACKEND_HERMETIC, INSTALL_SCRIPT_ALLOW, loadFixtures, lockProblems, parseItems, resolveSubject, sourceDigest, validateFixtures } from '../loop/items.mjs';
+import { BACKEND_HERMETIC, INSTALL_SCRIPT_ALLOW, RESERVED_MOUNTS, isProofLane, loadFixtures, lockProblems, parseItems, resolveSubject, sourceDigest, validateFixtures } from '../loop/items.mjs';
 import { findRunFolder, observations, summarize } from '../loop/summary.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -132,11 +132,19 @@ test('R-WC-20: the image reference and the file pins are validated; a wrong file
   assert.throws(bad((f) => { f.binary_image.ref = `docker.io/library/redis@sha256:${'a'.repeat(64)}`; }), /by tag and digest/);
   assert.throws(bad((f) => { f.binary_image.mount = '/opt/surface'; }), /mount/);
   assert.throws(bad((f) => { f.binary_image.mount = '/usr/local/bin'; }), /mount/);
+  for (const m of ['/opt/surface', '/opt/bin', '/opt/node', '/opt/work', '/opt/out', '/opt/tools', '/opt/yarn', '/opt/yarn-v1']) assert.throws(bad((f) => { f.binary_image.mount = m; }), /mount/, m);
+  assert.ok(RESERVED_MOUNTS.test('/opt/surface') && !RESERVED_MOUNTS.test('/opt/redis'));
+  assert.throws(bad((f) => { delete f.binary_image.system_libs; }), /system_libs/);
+  assert.throws(bad((f) => { f.binary_image.system_libs = ['../etc/passwd']; }), /system_libs/);
+  // A second fixture with the same mount is refused.
+  const twice = structuredClone(base);
+  twice.fixtures['pg-tracker'].binary_image = structuredClone(twice.fixtures['redis-tracker'].binary_image);
+  assert.throws(() => validateFixtures(twice), /another fixture's/);
   assert.throws(bad((f) => { delete f.binary_image.files['linux/arm64']; }), /exactly linux\/amd64 and linux\/arm64/);
   assert.throws(bad((f) => { delete f.binary_image.files['linux/arm64']['libssl.so.3']; }), /same files on both platforms/);
   assert.throws(bad((f) => { f.binary_image.files['linux/amd64']['redis-server'].sha256 = 'abc'; }), /must be \{ path, sha256 \}/);
   assert.throws(bad((f) => { f.binary_image.files['linux/amd64']['redis-server'].path = '../../etc/passwd'; }), /must be \{ path, sha256 \}/);
-  assert.throws(bad((f) => { f.binary_image.extra = 1; }), /is \{ ref, mount, files \}/);
+  assert.throws(bad((f) => { f.binary_image.extra = 1; }), /is \{ ref, mount, files, system_libs \}/);
   // extractBinaryImage with a stand-in for docker: the files it writes are checked against the pin.
   const f = fixtures().fixtures['redis-tracker'];
   const platform = 'linux/amd64';
@@ -218,21 +226,27 @@ test('R-WC-21: the backend runs inside the sandbox container, for the full write
   assert.match(read('loop/check-bundles.mjs'), /fixture:redis-tracker/);
 });
 
-test('R-WC-22: redis-tracker is selected by its id in the item only, and an item may share a subject with another fixture', () => {
+test('R-WC-22: redis-tracker has a subject of its own and is selected by its id in the item only', () => {
   const fx = fixtures();
-  const sub = 'isokron-ai/mcp-writecheck-action';
-  const seed = { map: new Map([[sub, { id: sub, packages: [{ registry: 'npm', identifier: 'some-package' }] }]]) };
-  assert.equal(resolveSubject(sub, { seed, fixtures: fx }).fixture, null, 'no id: the generic path');
-  assert.equal(resolveSubject(sub, { seed, fixtures: fx }, 'redis-tracker').fixture, 'redis-tracker');
-  assert.equal(resolveSubject('isokron-ai/kronicle-lite', { seed, fixtures: fx }, 'redis-tracker').skip.reason, 'policy_excluded');
+  const repo = 'isokron-ai/mcp-writecheck-action';
+  const own = fx.fixtures['redis-tracker'].subject;
+  // History in tool-qa is keyed by subject: two backends must not share a key, so each source fixture's subject is <repository>.<id>.
+  assert.equal(own, `${repo}.redis-tracker`);
+  const subjects = Object.values(fx.fixtures).map((f) => f.subject.toLowerCase());
+  assert.equal(new Set(subjects).size, subjects.length, 'no two fixtures share a subject');
+  assert.equal(fx.fixtures['pg-tracker'].subject, `${repo}.pg-tracker`);
+  const seed = { map: new Map([[repo, { id: repo, packages: [{ registry: 'npm', identifier: 'some-package' }] }]]) };
+  assert.equal(resolveSubject(repo, { seed, fixtures: fx }).fixture, null, 'the repository itself, no id: the generic path');
+  assert.equal(resolveSubject(own, { seed, fixtures: fx }).skip.reason, 'policy_excluded', 'the fixture subject with no id is never the fixture');
+  assert.equal(resolveSubject(own, { seed, fixtures: fx }, 'redis-tracker').fixture, 'redis-tracker');
+  assert.equal(resolveSubject(repo, { seed, fixtures: fx }, 'redis-tracker').skip.reason, 'policy_excluded', 'the id must go with its own subject');
+  assert.equal(resolveSubject(fx.fixtures['pg-tracker'].subject, { seed, fixtures: fx }, 'redis-tracker').skip.reason, 'policy_excluded');
   const key = 'a'.repeat(64);
-  const item = (fixture, extra = {}) => ({ subject: sub, ...(fixture ? { fixture } : {}), run_key: key, fence: 1, ...extra });
-  // Two fixtures of one repository are two items; the same fixture twice, or the bare subject twice, is still refused.
-  assert.equal(parseItems(JSON.stringify([item('pg-tracker'), item('redis-tracker', { fence: 2 })])).length, 2);
-  assert.throws(() => parseItems(JSON.stringify([item('redis-tracker'), item('redis-tracker', { fence: 2 })])), /appears twice/);
-  assert.throws(() => parseItems(JSON.stringify([item(null), item(null, { fence: 2 })])), /appears twice/);
-  assert.throws(() => parseItems(JSON.stringify([item('Bad Id')])), /fixture id/);
-  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action","fixture":"redis-tracker","proof_plan":true/);
+  const item = (subject, fixture, extra = {}) => ({ subject, ...(fixture ? { fixture } : {}), run_key: key, fence: 1, ...extra });
+  assert.equal(parseItems(JSON.stringify([item(fx.fixtures['pg-tracker'].subject, 'pg-tracker'), item(own, 'redis-tracker', { fence: 2 })])).length, 2);
+  assert.throws(() => parseItems(JSON.stringify([item(own, 'redis-tracker'), item(own, 'redis-tracker', { fence: 2 })])), /appears twice/);
+  assert.throws(() => parseItems(JSON.stringify([item(own, 'Bad Id')])), /fixture id/);
+  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action\.redis-tracker","fixture":"redis-tracker","proof_plan":true/);
 });
 
 test('R-WC-22: the plan is proposed, not accepted: the live lane never runs the full write test of redis-tracker until a person accepts it', () => {
@@ -252,11 +266,32 @@ test('R-WC-22: the plan is proposed, not accepted: the live lane never runs the 
   const run = read('loop/run-items.mjs');
   assert.match(run, /acceptedHash: f\?\.full \? \(f\.full\.plan_hash \?\? \(proofPlan \? f\.full\.proposed_plan_hash \?\? null : null\)\) : null/);
   assert.match(run, /driver\.plan_accepted = false/);
-  const u = (item) => { const d = parseItems(JSON.stringify([{ subject: 'isokron-ai/mcp-writecheck-action', fixture: 'redis-tracker', run_key: 'a'.repeat(64), fence: 1, ...item }]))[0]; return d; };
-  assert.equal(u({ proof_plan: true }).proof_plan, true);
-  assert.equal(u({}).proof_plan, undefined);
-  assert.throws(() => u({ proof_plan: 'yes' }), /proof_plan/);
-  assert.throws(() => parseItems(JSON.stringify([{ subject: 'isokron-ai/kronicle-lite', run_key: 'a'.repeat(64), fence: 1, proof_plan: true }])), /only on an item that names a fixture/);
+  const own = fixtures().fixtures['redis-tracker'].subject;
+  const u = (item, opts) => parseItems(JSON.stringify([{ subject: own, fixture: 'redis-tracker', run_key: 'a'.repeat(64), fence: 1, ...item }]), opts)[0];
+  assert.equal(u({ proof_plan: true }, { proofLane: true }).proof_plan, true);
+  assert.equal(u({}, { proofLane: true }).proof_plan, undefined);
+  assert.throws(() => u({ proof_plan: 'yes' }, { proofLane: true }), /proof_plan/);
+  assert.throws(() => parseItems(JSON.stringify([{ subject: 'isokron-ai/kronicle-lite', run_key: 'a'.repeat(64), fence: 1, proof_plan: true }]), { proofLane: true }), /only on an item that names a fixture/);
+  // (a) Outside the pull-request proof an item with proof_plan is refused whole, whatever else it says: the default lane is read from the
+  // event, which no dispatch can set; corpus.yml (workflow_dispatch) is never the proof lane.
+  assert.throws(() => u({ proof_plan: true }, { proofLane: false }), /accepted only in the pull-request proof/);
+  assert.throws(() => u({ proof_plan: true }), /accepted only in the pull-request proof/, 'no option: the environment of this test is not the proof');
+  const proofEnv = { GITHUB_EVENT_NAME: 'pull_request', GITHUB_REPOSITORY: 'isokron-ai/mcp-writecheck-action', GITHUB_WORKFLOW_REF: 'isokron-ai/mcp-writecheck-action/.github/workflows/loop-fixture.yml@refs/pull/69/merge' };
+  assert.equal(isProofLane(proofEnv), true);
+  for (const [k, v] of [['GITHUB_EVENT_NAME', 'workflow_dispatch'], ['GITHUB_EVENT_NAME', 'push'], ['GITHUB_REPOSITORY', 'someone/fork'], ['GITHUB_WORKFLOW_REF', 'isokron-ai/mcp-writecheck-action/.github/workflows/corpus.yml@refs/heads/main'], ['GITHUB_WORKFLOW_REF', undefined]]) assert.equal(isProofLane({ ...proofEnv, [k]: v }), false, `${k}=${v}`);
+  assert.equal(isProofLane({}), false);
+  // The driver and the judge ask the same question of their own environment.
+  assert.match(read('loop/run-items.mjs'), /parseItems\(env\.ITEMS, \{ proofLane: isProofLane\(env\) \}\)/);
+  // (b) A proof item hands the summary no accepted hash: the record says the plan was not accepted, and there is no drift.
+  assert.match(read('loop/run-items.mjs'), /acceptedPlanHash: u\.proofPlan \? null : u\.acceptedHash/);
+  const hash = fixtures().fixtures['redis-tracker'].full.proposed_plan_hash;
+  const files = new Map([['full/run1/results.json', Buffer.from(JSON.stringify({ run: { status: 'complete', writes: 1 }, results: [] }))]]);
+  const asProof = summarize({ files, steps: [], planStdout: `plan hash: ${hash}\n`, fullRan: true, acceptedPlanHash: null });
+  const record = observations(asProof, { versions: {}, stagesRan: { full: true }, backend: fixtures().fixtures['redis-tracker'].backend }).find((o) => o.field === 'plan_hash_and_drift').value;
+  assert.deepEqual(record, { plan_hash: hash, accepted: null, drift: false, full_run: true });
+  // The mutation: with the hash passed as accepted (what the code did before), the record would claim acceptance.
+  const asAccepted = summarize({ files, steps: [], planStdout: `plan hash: ${hash}\n`, fullRan: true, acceptedPlanHash: hash });
+  assert.equal(observations(asAccepted, { versions: {}, stagesRan: { full: true }, backend: null }).find((o) => o.field === 'plan_hash_and_drift').value.accepted, hash);
   // A proposed hash without a null accepted one is refused, as is a malformed one (mutations).
   const base = JSON.parse(read('loop/fixtures.json'));
   const bad = (edit) => { const d = structuredClone(base); edit(d.fixtures['redis-tracker']); return () => validateFixtures(d); };
@@ -279,6 +314,59 @@ test('R-WC-19: the defects of the server, the manifest\'s comment and fixtures.j
   assert.match(st, /'NX'/);
   assert.match(st, /this\.defects\.has\('lost-update'\)/);
   assert.match(st, /this\.defects\.has\('idempotency-key-dropped'\)/);
+});
+
+/** The DT_NEEDED entries of a 64-bit little-endian ELF executable or shared object, read in process (no readelf, no ldd). */
+export function neededLibs(buf) {
+  assert.equal(buf.readUInt32BE(0), 0x7f454c46, 'an ELF file');
+  assert.equal(buf[4], 2, '64-bit');
+  assert.equal(buf[5], 1, 'little-endian');
+  const phoff = Number(buf.readBigUInt64LE(32));
+  const phentsize = buf.readUInt16LE(54);
+  const phnum = buf.readUInt16LE(56);
+  const loads = [];
+  let dyn = null;
+  for (let i = 0; i < phnum; i++) {
+    const o = phoff + i * phentsize;
+    const type = buf.readUInt32LE(o);
+    const offset = Number(buf.readBigUInt64LE(o + 8));
+    const vaddr = Number(buf.readBigUInt64LE(o + 16));
+    const filesz = Number(buf.readBigUInt64LE(o + 32));
+    if (type === 1) loads.push({ offset, vaddr, filesz });
+    if (type === 2) dyn = { offset, filesz };
+  }
+  assert.ok(dyn, 'a dynamic section (a statically linked file needs nothing)');
+  const toOffset = (va) => { const l = loads.find((x) => va >= x.vaddr && va < x.vaddr + x.filesz); assert.ok(l, 'address in a loaded segment'); return va - l.vaddr + l.offset; };
+  const needed = [];
+  let strtab = null;
+  for (let o = dyn.offset; o < dyn.offset + dyn.filesz; o += 16) {
+    const tag = Number(buf.readBigInt64LE(o));
+    const val = Number(buf.readBigUInt64LE(o + 8));
+    if (tag === 0) break;
+    if (tag === 1) needed.push(val);
+    if (tag === 5) strtab = toOffset(val);
+  }
+  const name = (off) => { let e = strtab + off; while (buf[e] !== 0) e++; return buf.toString('latin1', strtab + off, e); };
+  return needed.map(name);
+}
+
+/** What of `needed` is neither a copied library nor one of the sandbox image's. */
+export const unresolved = (needed, copied, system) => needed.filter((n) => !copied.includes(n) && !system.includes(n));
+
+const ELF_DIR = process.env.REDISFX_BIN_DIR ?? null;
+test('R-WC-20: every shared library redis-server needs is a pinned copied file or one of the sandbox image\'s (ELF NEEDED, read in process)', { skip: ELF_DIR && process.platform === 'linux' && existsSync(join(ELF_DIR ?? '', 'redis-server')) ? false : 'needs REDISFX_ELF_DIR (node loop/extract-binary.mjs redis-tracker <dir>)' }, () => {
+  const b = fixtures().fixtures['redis-tracker'].binary_image;
+  const copied = Object.keys(b.files['linux/amd64']).filter((n) => n !== 'redis-server');
+  const server = readFileSync(join(ELF_DIR, 'redis-server'));
+  const needed = neededLibs(server);
+  assert.ok(needed.length >= 4 && needed.includes('libssl.so.3') && needed.includes('libc.so.6'), `read ${needed.join(', ')}`);
+  assert.deepEqual(unresolved(needed, copied, b.system_libs), [], 'nothing the executable needs is missing');
+  // The libraries we copy need only each other and the image's: the closure is complete.
+  for (const lib of copied) assert.deepEqual(unresolved(neededLibs(readFileSync(join(ELF_DIR, lib))), copied, [...b.system_libs, 'ld-linux-x86-64.so.2', 'ld-linux-aarch64.so.1']), [], `${lib} needs only what is there`);
+  // The loader is the image's own too (the interpreter), not something to copy.
+  // Mutations: drop a copied library, or a system one, from the sets and the check must find it.
+  assert.deepEqual(unresolved(needed, copied.filter((n) => n !== 'libssl.so.3'), b.system_libs), ['libssl.so.3']);
+  assert.deepEqual(unresolved(needed, copied, b.system_libs.filter((n) => n !== 'libstdc++.so.6')), ['libstdc++.so.6']);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------

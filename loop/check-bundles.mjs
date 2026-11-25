@@ -70,7 +70,7 @@ const EXPECT = {
     const spec = fx?.binary_image;
     return [
       ['catalog read', r.catalog?.found === true && r.catalog.tool_count >= 8],
-      ['plan hash is the proposed one, and the bundle says it was not accepted', r.plan?.hash === fx?.full?.proposed_plan_hash && d?.plan_accepted === false && d?.proof_plan_hash === r.plan?.hash],
+      ['plan hash is the proposed one, and the bundle says it was not accepted', r.plan?.hash === fx?.full?.proposed_plan_hash && d?.plan_accepted === false && d?.proof_plan_hash === r.plan?.hash && r.plan?.accepted === null && r.plan?.drift === false],
       ['full write test ran to completion', r.full?.ran === true && r.full?.status === 'complete'],
       ['no violated record in the clean build', r.full?.verdicts?.every((x) => x.verdict !== 'violated') === true],
       ['the Redis cells held (CONC-2, TGT-2, RETRY-2, UPD-1)', ['MWS-CONC-2', 'MWS-TGT-2', 'MWS-RETRY-2', 'MWS-UPD-1'].every(held)],

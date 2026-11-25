@@ -38,7 +38,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { lookup } from 'node:dns/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 
-import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
+import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, isProofLane, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
 import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
 import { dockerPlatform, extractBinaryImage } from './binary-image.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
@@ -687,7 +687,7 @@ async function runItem(ctx, item, deadline) {
         driver.full_detail = !u.full ? 'a third-party server is never given a manifest that writes' : 'the plan hash is not the accepted one (or the plan did not run), so the full write test did not start';
       }
     }
-    summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.acceptedHash });
+    summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.proofPlan ? null : u.acceptedHash }); // a proof item's plan is not accepted: the record says so, with no drift
     const evidenceComplete = ctx.lane !== 'ci' || driver.evidence_missing.length === 0;
     if (!evidenceComplete) skips.push({ stage: 'catalog', reason: 'trace_unavailable', evidence: 'logs/driver.json' });
     b.put('results/writecheck.json', json({ subject: item.subject, source: resolved.source, package: resolved.package, resolved_version: res.install?.resolved_version ?? null, ...publicSummary(summary) }));
@@ -720,7 +720,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   const o = parseArgs(argv);
   checkId('shard_id', env.SHARD_ID);
   checkId('attempt_id', env.ATTEMPT_ID);
-  const items = parseItems(env.ITEMS);
+  const items = parseItems(env.ITEMS, { proofLane: isProofLane(env) });
   for (const [k, v] of [['CLI_REF', env.CLI_REF], ['SANDBOX_REF', env.SANDBOX_REF]]) if (!/^[0-9a-f]{40}$/.test(String(v ?? ''))) throw new InputError(`${k} must be a full commit SHA`);
   const M = await loadMsc(resolve(o.msc));
   const seed = loadSeed(o.seed);

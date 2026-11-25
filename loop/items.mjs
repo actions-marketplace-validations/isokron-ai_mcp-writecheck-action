@@ -35,7 +35,16 @@ export function checkId(what, v) {
  * The dispatched items: a JSON list of 1 to MAX_ITEMS { subject, run_key, fence }, each subject once. Returns
  * [{ index, subject, run_key, fence }] in dispatch order (index names the result artifact).
  */
-export function parseItems(text) {
+/**
+ * The one lane that may run a fixture's proposed (not yet accepted) plan: the pull-request proof, loop-fixture.yml. It is told
+ * by what no dispatch can set: the event is a pull_request, of this repository, in that workflow file. corpus.yml (the pump's
+ * worker, workflow_dispatch) is never it, so an item with proof_plan sent there is refused whole.
+ */
+export function isProofLane(env = process.env) {
+  return env.GITHUB_EVENT_NAME === 'pull_request' && env.GITHUB_REPOSITORY === 'isokron-ai/mcp-writecheck-action' && /^isokron-ai\/mcp-writecheck-action\/\.github\/workflows\/loop-fixture\.yml@/.test(env.GITHUB_WORKFLOW_REF ?? '');
+}
+
+export function parseItems(text, { proofLane = isProofLane() } = {}) {
   if (typeof text !== 'string' || text.length === 0 || text.length > MAX_ITEMS_CHARS || /[\u0000-\u001f]/.test(text)) {
     throw new InputError(`items must be one line of JSON of at most ${MAX_ITEMS_CHARS} characters`);
   }
@@ -51,8 +60,8 @@ export function parseItems(text) {
     if (!Number.isSafeInteger(it.fence) || it.fence < 1) throw new InputError(`items[${index}].fence must be a whole number from 1`);
     if (it.fixture !== undefined && (typeof it.fixture !== 'string' || !/^[a-z][a-z0-9-]{0,31}$/.test(it.fixture))) throw new InputError(`items[${index}].fixture must be a fixture id`);
     if (it.proof_plan !== undefined && (it.proof_plan !== true || it.fixture === undefined)) throw new InputError(`items[${index}].proof_plan is true, and only on an item that names a fixture`);
-    // A subject appears once, except that a source fixture is its own item: two fixtures of one repository may share its name.
-    const key = `${it.subject.toLowerCase()}\u0000${it.fixture ?? ''}`;
+    if (it.proof_plan === true && !proofLane) throw new InputError(`items[${index}].proof_plan is accepted only in the pull-request proof`);
+    const key = it.subject.toLowerCase();
     if (seen.has(key)) throw new InputError(`items[${index}].subject appears twice`);
     seen.add(key);
     return { index, subject: it.subject, run_key: it.run_key, fence: it.fence, ...(it.fixture !== undefined ? { fixture: it.fixture } : {}), ...(it.proof_plan === true ? { proof_plan: true } : {}) };
@@ -164,12 +173,15 @@ export function lockProblems(f, lock, name = null) {
  * these files (loop/binary-image.mjs), and the sandbox never runs the image.
  */
 export const BINARY_PLATFORMS = ['linux/amd64', 'linux/arm64'];
+/** Folders of the container that a backend's files must never be mounted over: the tools, our own helpers' mounts, the work and output folders, the Node image's own /opt content. */
+export const RESERVED_MOUNTS = /^\/opt\/(?:surface|bin|node|work|out|tools|yarn[a-z0-9-]*)$/;
 const IMAGE_REF = /^docker\.io\/library\/[a-z0-9][a-z0-9._-]{0,40}:[A-Za-z0-9._-]{1,60}@sha256:[0-9a-f]{64}$/;
 function checkBinaryImage(name, b) {
   const bad = (m) => { throw new Error(`fixtures.${name}.binary_image ${m}`); };
-  if (!b || typeof b !== 'object' || Object.keys(b).some((k) => !['ref', 'mount', 'files'].includes(k))) bad('is { ref, mount, files }');
+  if (!b || typeof b !== 'object' || Object.keys(b).some((k) => !['ref', 'mount', 'files', 'system_libs'].includes(k))) bad('is { ref, mount, files, system_libs }');
   if (!IMAGE_REF.test(b.ref ?? '')) bad('.ref must be an official docker.io/library image by tag and digest');
-  if (!/^\/opt\/[a-z0-9-]{1,32}$/.test(b.mount ?? '') || b.mount === '/opt/surface') bad('.mount must be a folder of /opt other than the tools\'');
+  if (!/^\/opt\/[a-z0-9-]{1,32}$/.test(b.mount ?? '') || RESERVED_MOUNTS.test(b.mount)) bad('.mount must be a folder of /opt that is not one the container uses already (the tools, work, out, bin, node)');
+  if (!Array.isArray(b.system_libs) || b.system_libs.length < 1 || b.system_libs.some((l) => !/^lib[A-Za-z0-9_+.-]{1,60}\.so(?:\.[0-9]+)*$/.test(l ?? ''))) bad('.system_libs must list the shared libraries the executable needs from the sandbox image');
   const names = (p) => Object.keys(b.files?.[p] ?? {}).sort().join(',');
   if (Object.keys(b.files ?? {}).sort().join(',') !== BINARY_PLATFORMS.join(',')) bad(`.files must name exactly ${BINARY_PLATFORMS.join(' and ')}`);
   if (!names(BINARY_PLATFORMS[0]) || names(BINARY_PLATFORMS[0]) !== names(BINARY_PLATFORMS[1])) bad('.files must name the same files on both platforms');
@@ -206,7 +218,10 @@ export function validateFixtures(doc) {
     if (!f.backend || !/^[a-z][a-z0-9_]{0,23}$/.test(f.backend.kind ?? '') || f.backend.environment !== BACKEND_HERMETIC || !/^[0-9A-Za-z._ ()-]{1,80}$/.test(f.backend.version ?? '')) throw new Error(`fixtures.${name}.backend must be { kind, environment: "${BACKEND_HERMETIC}", version }`);
     for (const ka of f.known_answers ?? []) if (!ENV_NAME.test(ka?.env ?? '') || !/^[a-z][a-z0-9-]{1,48}$/.test(ka?.defect ?? '') || !/^MWS-[A-Z]{2,6}-[0-9]{1,2}$/.test(ka?.requirement ?? '') || !['catalog', 'full'].includes(ka?.mode)) throw new Error(`fixtures.${name}.known_answers: each is { env, defect, requirement, mode: catalog|full }`);
     if (f.background?.only !== undefined && !(Array.isArray(f.background.only) && f.background.only.every((c) => ['plan', 'catalog', 'run'].includes(c)))) throw new Error(`fixtures.${name}.background.only must list plan, catalog or run`);
-    if (f.binary_image !== undefined) checkBinaryImage(name, f.binary_image);
+    if (f.binary_image !== undefined) {
+      checkBinaryImage(name, f.binary_image);
+      if (Object.entries(fixtures).some(([, o]) => o.binary_image?.mount === f.binary_image.mount)) throw new Error(`fixtures.${name}.binary_image.mount is another fixture's`);
+    }
     // R-WC-09: no fixture widens the install's allowlist; a native module builds from source (registry.npmjs.org only).
     for (const k of Object.keys(f)) if (!FIXTURE_KEYS.includes(k)) throw new Error(`fixtures.${name}: unknown field ${k}`);
     if (f.full !== undefined) {
