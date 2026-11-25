@@ -40,6 +40,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 
 import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
 import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
+import { dockerPlatform, extractBinaryImage } from './binary-image.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -357,13 +358,39 @@ class Shard {
   }
 
   /**
+   * A fixture's backend files (WC13), copied out of its digest-pinned image (loop/binary-image.mjs: pull, create without
+   * starting, cp, sha256 against the pin) into a volume of their own, which the fixture's sandbox container mounts read-only.
+   */
+  async binaryVolume(u) {
+    const b = u.binaryImage;
+    const platform = dockerPlatform();
+    await this.dk.image(b.ref, 'binary image');
+    const stage = mkdtempSync(join(tmpdir(), 'wc-bin-'));
+    try {
+      const labels = this.dk.labels(u.tag);
+      const labelArgs = Object.entries(labels).flatMap(([k, v]) => ['--label', `${k}=${v}`]);
+      let info;
+      try {
+        info = await extractBinaryImage({ dock: (argv) => u.tdk.d(argv, { deadline: Date.now() + MS.helper }), spec: b, platform, outDir: stage, containerName: this.name(u.tag, 'bin'), labelArgs });
+      } catch (e) { throw new this.M.HarnessError(String(e.message).slice(0, 300)); }
+      const names = Object.keys(info.files);
+      const tar = spawnSync('tar', ['-C', stage, '-cf', '-', '--owner=0', '--group=0', '--mode=a+rX,go-w', ...names], { maxBuffer: 256 * 1024 * 1024 });
+      if (tar.status !== 0) throw new this.M.HarnessError('packing the backend files failed');
+      const vol = await this.dk.volume(`surface-${this.runId}-${u.tag}-bin`, u.tag);
+      await this.dk.must(this.helper(u.tag, { user: '0:0', stdin: true, mounts: [{ src: vol, dst: '/opt/bin' }], cmd: ['tar', '-x', '-f', '-', '--no-same-owner', '-C', '/opt/bin'] }, { input: tar.stdout }), 'backend files volume');
+      u.binaryInfo = info;
+      return vol;
+    } finally { rmSync(stage, { recursive: true, force: true }); }
+  }
+
+  /**
    * One step in a sandbox container at .3 of the run network: the CLI (and the server it starts) or a fixture's
    * set-up. Its output (the CLI's and the server's) goes to raw/steps/<step>.log only.
    */
   async sandboxStep(u, { network, work, image, step, cmd, env, timeoutMs, keepStdout = false, record }) {
     const name = this.name(u.tag, 's');
     const cidfile = join(this.cidDir, `${name}.cid`);
-    const argv = this.M.sandboxRunArgs({ name, image, network, ip: this.M.NETS.run.target, resolv: 'run', cidfile, labels: this.dk.labels(u.tag), cpus: this.cpus, workdir: OUTD, mounts: [{ src: work, dst: '/work' }, { src: this.toolsVol, dst: TOOLS, ro: true }], env, cmd });
+    const argv = this.M.sandboxRunArgs({ name, image, network, ip: this.M.NETS.run.target, resolv: 'run', cidfile, labels: this.dk.labels(u.tag), cpus: this.cpus, workdir: OUTD, mounts: [{ src: work, dst: '/work' }, { src: this.toolsVol, dst: TOOLS, ro: true }, ...(u.binVol ? [{ src: u.binVol, dst: u.binaryImage.mount, ro: true }] : [])], env, cmd });
     this.writeSettings(argv, { subject: u.tag, role: 'server' });
     const log = join(u.stepDir, `${step}.log`);
     const t0 = Date.now();
@@ -461,6 +488,7 @@ class Shard {
         serverCmd = plan.run(entry);
         if (u.launch.kind === 'npm') pkgdir = u.source ? '/work/pkg' : `/work/pkg/node_modules/${u.launch.package}`;
         u.entry = entry;
+        if (u.binaryImage) u.binVol = await this.binaryVolume(u);
       }
       if (!u.manifestFile) {
         // Every subject and the forgery control: the server in a sandbox container of its own, the CLI in another.
@@ -493,7 +521,7 @@ class Shard {
         const p = await step({ step: 'plan', cmd: cli(['plan', '-m', manifest]), timeoutMs: left(MS.step), keepStdout: true });
         res.planStdout = p.r.stdout.toString('utf8');
         await step({ step: 'catalog', cmd: cli(['catalog', '-m', manifest, '--out', `${OUTD}/results`]), timeoutMs: left(MS.step) });
-        const accepted = u.full?.plan_hash ?? null;
+        const accepted = u.acceptedHash;
         const seen = planHash(res.planStdout);
         if (accepted && seen === accepted && Date.now() + 60_000 < unitDeadline) {
           res.fullRan = true;
@@ -532,7 +560,7 @@ export function egressHosts(egress) {
 }
 
 /** The unit description for a subject (or a fixture), from its resolution. */
-function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
+function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}, { proofPlan = false } = {}) {
   const f = resolved.fixture ? fixtures.fixtures[resolved.fixture] : null;
   const env = { ...(f?.env ?? {}), ...extraEnv };
   for (const k of f?.random_env ?? []) env[k] = randomBytes(16).toString('hex');
@@ -545,6 +573,11 @@ function unitFor(tag, resolved, fixtures, stepDir, extraEnv = {}) {
     background: f?.background ?? null,
     setup: f?.setup ?? null,
     full: f?.full ?? null,
+    // The plan hash the full write test needs: the one a person accepted; or, for a proof item that asks for it (WC13), the
+    // fixture's proposed one, which nobody has accepted yet (the live lane never sends proof_plan; the bundle says so).
+    acceptedHash: f?.full ? (f.full.plan_hash ?? (proofPlan ? f.full.proposed_plan_hash ?? null : null)) : null,
+    proofPlan: proofPlan && !f?.full?.plan_hash,
+    binaryImage: f?.binary_image ?? null,
     manifestFile, link: f?.link ?? null,
     lock: f?.lock ? join(here, '..', f.lock) : null,
   };
@@ -591,6 +624,7 @@ async function runControls(ctx) {
   for (const [kind, label, defect] of [['known_bad', 'known-bad', ka.defect], ['known_good', 'known-good', null]]) {
     const u = unitFor(`ctl-${label}`, { fixture: ttName, launch: { ...ttF.launch } }, fixtures, ctlDir(label), defect ? { [ka.env]: defect } : {});
     u.full = null; // catalog and plan only
+    u.acceptedHash = null;
     u.init = false;
     const r = await shard.runUnit(u, Date.now() + 10 * 60_000);
     const s = summarize({ files: r.files, steps: r.steps, planStdout: r.planStdout });
@@ -620,7 +654,7 @@ async function runItem(ctx, item, deadline) {
     for (const st of ['install', 'init', 'plan', 'catalog']) skips.push({ stage: st, reason: 'timeout_start', retryable: true, evidence: 'logs/driver.json' });
     driver.skip_detail = 'not started: the shard used its time budget first';
   } else {
-    const u = unitFor(`i${item.index}`, resolved, fixtures, join(shard.shardDir, 'items', String(item.index)));
+    const u = unitFor(`i${item.index}`, resolved, fixtures, join(shard.shardDir, 'items', String(item.index)), {}, { proofPlan: item.proof_plan === true });
     // A unit's telemetry is its own file, kept in raw/ (it names what the target looked up and reached).
     const telFile = join(u.stepDir, 'telemetry.jsonl');
     mkdirSync(u.stepDir, { recursive: true });
@@ -631,6 +665,8 @@ async function runItem(ctx, item, deadline) {
     try { res = await shard.runUnit(u, Math.min(deadline + ITEM_GRACE_MS, Date.now() + 20 * 60_000)); } finally { shard.tel = shardTel; }
     driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress) } : null;
     driver.error = res.error;
+    if (u.binaryInfo) driver.binary_image = u.binaryInfo;
+    if (u.proofPlan) { driver.plan_accepted = false; driver.proof_plan_hash = u.acceptedHash; }
     driver.evidence_missing = [...new Set(res.missing)];
     driver.collected = res.collected;
     stages.install = !!res.install?.ok;
@@ -651,7 +687,7 @@ async function runItem(ctx, item, deadline) {
         driver.full_detail = !u.full ? 'a third-party server is never given a manifest that writes' : 'the plan hash is not the accepted one (or the plan did not run), so the full write test did not start';
       }
     }
-    summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.full?.plan_hash ?? null });
+    summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.acceptedHash });
     const evidenceComplete = ctx.lane !== 'ci' || driver.evidence_missing.length === 0;
     if (!evidenceComplete) skips.push({ stage: 'catalog', reason: 'trace_unavailable', evidence: 'logs/driver.json' });
     b.put('results/writecheck.json', json({ subject: item.subject, source: resolved.source, package: resolved.package, resolved_version: res.install?.resolved_version ?? null, ...publicSummary(summary) }));

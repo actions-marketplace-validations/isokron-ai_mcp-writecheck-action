@@ -57,7 +57,7 @@ test('R-WC-14: a changed byte of the fixture, a loosened lock or a lost label is
   const dir = tmp('wc12-mut-');
   mkdirSync(join(dir, 'loop', 'fixtures'), { recursive: true });
   copyFixture(join(dir, 'loop', 'fixtures', 'pg-tracker'));
-  for (const name of ['tiny-tracker', 'kronicle-lite']) cpSync(join(root, 'loop', 'fixtures', name), join(dir, 'loop', 'fixtures', name), { recursive: true, filter: (s) => !s.split('/').includes('node_modules') });
+  for (const name of ['tiny-tracker', 'kronicle-lite', 'redis-tracker']) cpSync(join(root, 'loop', 'fixtures', name), join(dir, 'loop', 'fixtures', name), { recursive: true, filter: (s) => !s.split('/').includes('node_modules') });
   writeFileSync(join(dir, 'loop', 'fixtures.json'), JSON.stringify(base));
   assert.doesNotThrow(() => loadFixtures(join(dir, 'loop', 'fixtures.json')));
   const mcp = join(dir, 'loop', 'fixtures', 'pg-tracker', 'src', 'mcp.mjs');

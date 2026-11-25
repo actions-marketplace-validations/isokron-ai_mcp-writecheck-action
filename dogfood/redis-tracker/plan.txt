@@ -1,0 +1,87 @@
+Plan 5ee5a5b97a2363b8 for target redis-tracker (environment: test)
+Hosts reached or given to the server: 127.0.0.1:4630, 127.0.0.1:4631
+mcp-writecheck 0.1.0, requirements 0.9, manifest sha256 2dc2a974d8b839f4…, catalog sha256:b3b050e8b22fe559…
+At most 651 writes and 104 created objects (write budget 6000, 200 writes per second).
+No tool call was made to build this plan.
+
+Resource project: no object under test (no update tool declared); checks create their own objects
+  stale-write v4 (not run)
+    MWS-CONC-2 delete_project: not tested — the declaration states that the backend has no version check for delete_project; the stale call through it, with a control arm (row 3, platform) or without (row 4), is not built in this preview
+    MWS-CONC-5 delete_project: self-attested — The backend cannot detect a change for delete_project (as declared). Does its description state that stale writes are not detected, or are detected only on a best-effort basis? Answer: no — the statement of IsoKron loop (rules written before the run, from redis-tracker's own error texts), by the declared rule /not detected|best-effort/i over 1 captured text(s); 1 did not match.
+  schema-probes v1
+    - list_projects: 1 probe call(s): undefined_argument
+  annotation-effects v2, up to 7 writes, 3 creates
+    - MWS-ANN-1 list_projects: read; call it twice (counted as writes); read again
+    - MWS-ANN-2 create_project: create twice with the same key; read back
+  idempotency-replay v2 (not run)
+    MWS-RETRY-2 create_project: not applicable — the declaration names no idempotency key for create_project (if it accepts one, declare an idempotency block: where the key goes and the replay indicator)
+  targeting v1, up to 3 writes, 2 creates
+    - MWS-TGT-3: create_project with a new key; create_project again with the same key and a different name; list_projects
+  multi-item v1 (not run)
+  list-element v1 (not run)
+  creates v1 (not run)
+  input-required v1 (not run)
+
+Resource item: one new object named {{prefix}}… (cleanup: delete)
+  setup: create_item (ledger intent first); get_item to verify the returned id carries the run prefix
+  setup: update_item assignee and status to the baseline ("bob", "open"); get_item
+  read-after-write v1, up to 34 writes, 2 creates
+    - set_field: reset; get_item; update_item assignee; get_item; then the same through the control from the same state
+    - set_field_b: reset; get_item; update_item assignee; get_item; then the same through the control from the same state
+    - same_value: reset; get_item; update_item assignee; get_item; then the same through the control from the same state
+    - empty_value: reset; get_item; update_item assignee; get_item; then the same through the control from the same state
+    - invalid_type: reset; get_item; update_item assignee; get_item
+    - explicit_null (assignee): a scratch object; get_item; update_item assignee=null; get_item
+    - empty_string (assignee): a scratch object; get_item; update_item assignee=""; get_item
+  stale-write v4, up to 48 writes, 6 creates
+    - validity x1: update_item status, then assignee; get_item; and back in the other order; get_item
+    - test x3, one connection and one credential: get_item (first writer); get_item and update_item status (second writer); update_item assignee from the first read, sending expected_version; get_item
+    - control x3: control read; control patch status; control write assignee with the stale version; control read
+    - delete x3: create a scratch object; get_item; second writer changes status; delete_item with the version from the first read; get_item
+    - delete control x3: create a scratch object; control read; control patch; control delete with the stale version; control read
+  barrier-pairs v1, up to 276 writes
+    - validity x1: update_item assignee, then status; get_item; and back in the other order; get_item
+    - test x34: get_item; update_item assignee || update_item status (released together, separate); get_item
+    - control x34: control read; control write assignee || control write status; control read
+  held-request v1 (not run)
+    MWS-CONC-3 update_item: not tested — the held-request procedure needs backend.gate (the hop between the server and its backend cannot be interposed on without it)
+  schema-probes v1, up to 172 writes
+    - get_item: 7 probe call(s): undefined_argument, number, boolean, null, object, list, missing_required
+    - update_item: 34 probe call(s): misspelled_argument, undefined_argument, number, boolean, null, object, list, too_long, far_too_long, too_short, not_in_enum, numeric_string, non_numeric_string, empty_string, fraction, below_minimum, far_below_minimum, above_maximum, far_above_maximum
+  annotation-effects v2, up to 15 writes, 4 creates
+    - MWS-ANN-1 get_item: read; call it twice (counted as writes); read again
+    - MWS-ANN-1 list_items: read; call it twice (counted as writes); read again
+    - MWS-ANN-3 update_item: the same call twice, read after each
+    - MWS-ANN-2 create_item: create, the object under test must not change; read back
+  idempotency-replay v2, up to 74 writes, 74 creates
+    - (a) create_item with key K, twice in sequence; (b) the same with a new key; (c) K again with an argument changed
+    - (d) up to 34 pairs, one fresh key each, sent at once on two connections (stops at 30 overlapped pairs)
+    - proxy-assisted step: not run (no backend.gate)
+    - (e) a dedicated server: the first call answered, a graceful stop and a start, the repeat with the same key
+    - (e) crash form: not run (needs server.restart and backend.gate)
+  targeting v1, up to 9 writes, 7 creates
+    - MWS-TGT-1: create two scopes; create_item naming the first; list the first, the second and the default (inbox) scope
+    - MWS-TGT-1 for delete_items: create two scopes; one object of one name in each scope and in the default scope; delete_items naming the first scope, narrowed to that name; list each scope
+    - MWS-TGT-2 (only where MWS-TGT-1 is held for delete_items): create a container; confirm it is empty; create 3 objects in it through the platform's API; delete_items with omitted, empty (no opt-in); count after each
+  multi-item v1 (not run)
+  list-element v1 (not run)
+  creates v1, up to 10 writes, 5 creates
+    - create_item: create with a fresh marker; find it; the same create again (MWS-RETRY-1); once more with an idempotency key if two objects were made
+    - MWS-RES-4: update_item assignee; its answer; get_item
+    - MWS-RES-2 declared failure update_missing_item: update_item; get_item
+    - MWS-RES-1 delete: create a scratch object; delete_item; get_item
+  input-required v1 (not run)
+
+Server-wide, after the resources:
+  launch-settings v1 (not run)
+    MWS-CFG-1 (read-only setting): not tested — no settings.read_only in the manifest: if the server has a read-only mode, declare its environment variable and the value that turns it on
+    MWS-CFG-3 (read-only setting): not tested — no settings.read_only in the manifest: if the server has a read-only mode, declare its environment variable and the value that turns it on
+    MWS-CFG-2 (tool filter): not tested — no deny-list in settings.tool_filters: if the server has a setting that denies tools by name, declare its environment variable (kind: deny)
+    MWS-CFG-4 (tool filter): not tested — no allow-list in settings.tool_filters: if the server has a setting that allows tools by name, declare its environment variable (kind: allow)
+  credential-scan v1
+    - scan every tool result of the run (success and error) for the server's credentials, canary values and token-bearing URLs
+    - get_item with the missing id "I-999999" (an error answer to scan)
+
+Catalog: MWS-ANN-4 from tools/list; Annex A measured, never judged.
+
+plan hash: 5ee5a5b97a2363b8

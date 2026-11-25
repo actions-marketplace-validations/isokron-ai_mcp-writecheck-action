@@ -1,6 +1,6 @@
 # Write-safety cells against more backends (WC12)
 
-Design note for upgrade 12 of the IsoKron loop: run the MWS write-safety cells against PostgreSQL (this change) and Redis (next), not only against tiny-tracker's in-memory store and kronicle-lite's SQLite folder. Every result of such a run is labelled `hermetic`.
+Design note for upgrade 12 of the IsoKron loop: run the MWS write-safety cells against PostgreSQL (WC12) and Redis (WC13, the section near the end), not only against tiny-tracker's in-memory store and kronicle-lite's SQLite folder. Every result of such a run is labelled `hermetic`.
 
 ## What runs where
 
@@ -9,7 +9,7 @@ Design note for upgrade 12 of the IsoKron loop: run the MWS write-safety cells a
 | in-memory HTTP store | tiny-tracker (`@mcp-write-safety/tiny-tracker`, npm) | live in the lane since the lane started |
 | SQLite data folder | kronicle-lite (npm) | live in the lane |
 | PostgreSQL 18.7 | `pg-tracker` (`loop/fixtures/pg-tracker/`, committed here) | this change |
-| Redis | `redis-tracker` | phase 2, see the end |
+| Redis 8.2.11 | `redis-tracker` (`loop/fixtures/redis-tracker/`, committed here) | WC13, plan proposed and not yet accepted; see "Redis (WC13)" |
 
 The unchanged rule holds: only these fixture servers, each with a plan hash a person accepted, get the full write test. A third-party server gets `init`, `plan` and `catalog` and never a manifest that writes.
 
@@ -69,9 +69,48 @@ The fixture is not in the pump's seed. Its subject is this repository (`isokron-
 
 What does change in the live lane's output once this is merged: every item's `observation_coverage` record (written for every item the lane runs) gains two keys, `backend_environment` and `backend_kind`, which are `none` for everything that is not a full write test (every third-party item, and the catalog-only runs); tiny-tracker's and kronicle-lite's full runs gain `hermetic` and `backend_version` and the label on their full-run verdict records. An item skipped before it ran writes the old `observation_coverage` unchanged. tool-qa's pinned ingest accepts the new keys: the field is registered as an object and ingest checks its type only, not its keys (`checkValueType` in `ingest/registry.mjs`), and the pull-request proof's judge (`loop/check-bundles.mjs`, tool-qa's own `analyzeBundle`) accepted bundles with the keys for all five items.
 
+## Redis (WC13)
+
+`redis-tracker` has the shape of pg-tracker: the same nine tools, the same manifest (`dogfood/redis-tracker/writecheck.yaml`), the same control arm, a real Redis server started by `bg.mjs` inside the fixture's own gVisor container for the CLI's `run` only. Label: `backend_kind: redis`, `backend_environment: hermetic`, `backend_version: Redis 8.2.11 (official redis image bookworm)`.
+
+### Where the redis-server binary comes from (decision, with the evidence)
+
+Order of preference was (a) a source build or pinned binary through the existing build image, with the sandbox repository unchanged; (b) a pinned OCI image as a second container, which needs an `images.json` entry in mcp-surface-corpus. Neither is needed as stated; the choice is a variant that keeps mcp-surface-corpus unchanged and still pins the binary by digest:
+
+- (a) as asked is not possible. The install network's only way out is the allowlist proxy to `registry.npmjs.org` for an npm install (`PROXY_ALLOWED` in mcp-surface-corpus `src/selftest.mjs`; `registries` per kind in `src/targets.mjs`: npm gets registry.npmjs.org, PyPI gets pypi.org and files.pythonhosted.org). A Redis release tarball lives on download.redis.io and GitHub, neither reachable, and widening the list is a sandbox change.
+- npm has no usable carrier (checked 25 Nov 2026): `redis-server` 1.2.2 (2022) and `redis-prebuilt` 1.0.54 (2022) are old wrappers; `redis-memory-server` 0.17.2 is maintained but its postinstall downloads and builds the Redis source from download.redis.io (`RedisBinaryDownloadUrl.js`), which the install network refuses; `@redis/*` and `ioredis` are clients; `js-valkey-server` is a JavaScript re-implementation, not Redis. Publishing our own npm package of the source would be a publish, which is the owner's call.
+- (b) as stated would add an image to `images.json`, change the sandbox and its conformance pin, and put Redis in a container the server shares only a network with, so it could not be on 127.0.0.1 of the server's container, and the `hermetic` definition (reachable by nothing but the server and the CLI in that one container) would be weaker.
+- Chosen: the official image is only a **file source**. `loop/fixtures.json` pins `docker.io/library/redis:8.2.11-bookworm@sha256:bb302517...` (the digest of the multi-platform index) in `binary_image`, with, per platform (linux/amd64 for the runner, linux/arm64 for local runs), the path and sha256 of the three files the server needs: `redis-server` and the two OpenSSL libraries it links (the slim Node image has none). The driver (`loop/binary-image.mjs`) pulls the image as it pulls the sandbox's own images, runs `docker create` (no network, never started) and `docker cp`, checks each file against its sha256, packs them into a volume of their own and mounts it read-only at `/opt/redis` in the fixture's sandbox container. The backend checks the same sha256 values again from the mounted volume before every start and refuses a server that does not measure as 8.2.11. No code of the image runs outside the sandbox, and only the copied `redis-server` runs at all, under the container's limits (user 65534, read-only root, every capability dropped). mcp-surface-corpus, its `images.json` and tool-qa's `sandbox_sha` are untouched. Checked on a hardened container with the same flags (linux/amd64 and linux/arm64): the binary starts in about 0.1 s.
+- Redis 8.2 is AGPLv3-or-RSAL-or-SSPL licensed; the fixture only runs it in a throwaway container and does not redistribute it.
+
+### How the fixture is built
+
+- No dependency. The Redis client is `src/resp.mjs` (RESP2 over TCP, a pool, one connection per transaction because WATCH belongs to a connection), so there is nothing to lock beyond the package itself and the folder is pinned by `source.sha256` as pg-tracker's is. Install scripts stay off, in the slim image.
+- Data: one hash per item (`rfx:item:<id>`), sets of ids, a hash per project, a counter, a string per idempotency key. The version is a field of the item; every write moves it.
+- Correct build: `update_item`/`delete_item` WATCH the item's key, read the version, compare it with `expected_version` and write in MULTI/EXEC, which Redis refuses if the key changed meanwhile (the control channel's out-of-band write included). An idempotency key is claimed with `SET key pending NX PX 30000`; the MULTI that writes the item replaces it with the result; a repeat reads it (`replayed: true`), another request with the same key waits for the result.
+- Defects (`REDISFX_DEFECTS`, one name each or `all`), each caught by the cells named (R-WC-23):
+
+| Defect | What it does | Caught as |
+|---|---|---|
+| `lost-update` | no WATCH, no version comparison: a plain write (the version still moves) | MWS-CONC-2 violated on `delete_item` |
+| `empty-filter-deletes-all` | `delete_items` with no prefix deletes every item of the project | MWS-TGT-2 violated on `delete_items` |
+| `idempotency-key-dropped` | the key is accepted and not kept (no `SET NX`) | MWS-RETRY-2 violated on `create_item` |
+| `missing-annotations` | no tool carries annotations | MWS-ANN-4 violated on every tool (catalog mode, no Redis) |
+
+- Sandbox: Redis listens on 127.0.0.1:4630 only (`bind`, `protected-mode yes`, no Unix socket), the control channel on 127.0.0.1:4631; `requirepass` is the random per-run `REDISFX_PASSWORD`, passed in a mode 0600 config file that is removed once the server is up; `save ""`, `appendonly no`, the data directory is under `/tmp` (the container's tmpfs, 512 MiB), `enable-debug-command`, `enable-module-command` and `enable-protected-configs` off, `maxmemory 256mb`. The server runs as 65534 in the read-only root.
+- Cells: the same as PostgreSQL at the pinned CLI (the list above, with Redis for PostgreSQL); the wire-gate cells stay out for the same reason.
+
+### Plan acceptance and the proof run
+
+The plan is `dogfood/redis-tracker/plan.txt`, hash **5ee5a5b97a2363b8**, **proposed and not accepted**: `full.plan_hash` in `loop/fixtures.json` is `null`, so the live lane would run catalog and plan for the fixture but never its full write test; `full.proposed_plan_hash` holds the proposed hash only so that the pull-request proof can run it. The proof item says `"proof_plan": true` (the pump never sends that key), the driver then runs the full write test under the proposed hash, and the bundle's `logs/driver.json` says `plan_accepted: false`. When a person accepts the plan, a change moves the hash into `full.plan_hash` and removes the proposal.
+
+### Cost per item (R-WC-13 timing)
+
+Over pg-tracker's item the Redis one adds the image pull (about 60 MB compressed) and the copy of three files (`docker create`, three `docker cp`, a volume); it removes the 60 MB npm binary package (the fixture has no dependency, so `npm ci` fetches nothing). Redis starts in about 0.15 s; the full write test of the correct build is about 450 writes in about 6 s natively. CI_TIMING_PLACEHOLDER
+
 ## Phase 2
 
-1. Redis: a `redis-tracker` fixture with the same shape (a real `redis-server`, started in the container by the same `bg.mjs` path, on 127.0.0.1, `requirepass` random per run, no persistence; correct and defect builds: SET without a version check, key-per-object with `WATCH`/`MULTI` for versions, an idempotency key kept with `SET NX`). The binary has to come from somewhere the sandbox can install with a pinned integrity: npm has no maintained package with a Redis server binary, so this needs a decision (a pinned OCI image run as a second sandbox container on the run network, which means an image digest in mcp-surface-corpus's `images.json`, or a source build in the build image).
-2. Move `CLI_DEFAULT_REF` to a commit with the database wire gate, accept the new plans, add `backend.gate: { rewrite_env: PGFX_DATABASE_URL }` to the manifest so the held-request, lost-answer and restart-with-crash cells run against PostgreSQL.
+1. (done, WC13: the Redis fixture above.)
+2. Move `CLI_DEFAULT_REF` to a commit with the database wire gate, accept the new plans, add `backend.gate: { rewrite_env: PGFX_DATABASE_URL }` to the manifest so the held-request, lost-answer and restart-with-crash cells run against PostgreSQL (and, with the same change for `REDISFX_URL`, against Redis).
 3. Register `write_test_environment` in mcp-results and move tool-qa's registry pin.
 4. Add the subject to tool-qa's seed so the pump dispatches it (the owner's call).
