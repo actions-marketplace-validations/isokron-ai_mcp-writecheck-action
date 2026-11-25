@@ -12,14 +12,15 @@
  * Expectations by subject: every bundle accepted; tiny-tracker (isokron-ai/mcp-write-safety) with its catalog
  * read, its plan hash the accepted one, and the full write test run to completion; kronicle-lite the same, built
  * from source in the build image with install egress to registry.npmjs.org only; pg-tracker (this repository's
- * PostgreSQL fixture) the same with every full-run result labelled hermetic; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
+ * PostgreSQL fixture) the same with every full-run result labelled hermetic; redis-tracker (the Redis fixture, WC13) the same over
+ * Redis, under its accepted plan; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
  * first item that does not meet them (all items are still printed).
  */
 import { readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { parseItems } from './items.mjs';
+import { parseItems, loadFixtures } from './items.mjs';
 
 const args = process.argv.slice(2);
 const opt = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : undefined; };
@@ -31,6 +32,7 @@ const { readTar } = await imp('worker-kit/tar.mjs');
 
 const env = process.env;
 const items = parseItems(env.ITEMS);
+const fixtures = loadFixtures(join(import.meta.dirname, 'fixtures.json'));
 const registry = await loadRegistry();
 const ref = env.GITHUB_WORKFLOW_REF ?? '';
 const full = ref.slice(0, ref.lastIndexOf('@'));
@@ -43,7 +45,7 @@ const EXPECT = {
     ['full write test ran to completion', r.full?.ran === true && r.full?.status === 'complete'],
   ],
   // WC12: the PostgreSQL fixture. The clean build, so no violated record at all; every result labelled hermetic.
-  'isokron-ai/mcp-writecheck-action': (r, d, files) => {
+  'fixture:pg-tracker': (r, d, files) => {
     const obs = String(files.get('observations/writecheck.ndjson') ?? '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     const cov = obs.find((o) => o.field === 'observation_coverage')?.value;
     const verdicts = obs.filter((o) => o.field === 'requirement_verdicts' && o.stage === 'full').flatMap((o) => o.value ?? []);
@@ -56,6 +58,24 @@ const EXPECT = {
       ['the PostgreSQL cells held (CONC-2, TGT-2, RETRY-2, UPD-1)', ['MWS-CONC-2', 'MWS-TGT-2', 'MWS-RETRY-2', 'MWS-UPD-1'].every(held)],
       ['installed in the build image, egress to registry.npmjs.org only', d?.install?.image === 'node24-build' && JSON.stringify(d?.install?.egress_hosts) === '["registry.npmjs.org"]' && d?.install?.egress_refused === 0],
       ['every full-run result is labelled hermetic (PostgreSQL)', cov?.backend_environment === 'hermetic' && cov?.backend_kind === 'postgresql' && verdicts.length > 0 && verdicts.every((x) => x.backend_environment === 'hermetic')],
+    ];
+  },
+  // WC13: the Redis fixture. The same shape, over a real Redis whose redis-server was copied from a digest-pinned image.
+  'fixture:redis-tracker': (r, d, files, fx) => {
+    const obs = String(files.get('observations/writecheck.ndjson') ?? '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+    const cov = obs.find((o) => o.field === 'observation_coverage')?.value;
+    const verdicts = obs.filter((o) => o.field === 'requirement_verdicts' && o.stage === 'full').flatMap((o) => o.value ?? []);
+    const held = (req) => r.full?.verdicts?.some((x) => x.requirement === req && x.verdict === 'held');
+    const spec = fx?.binary_image;
+    return [
+      ['catalog read', r.catalog?.found === true && r.catalog.tool_count >= 8],
+      ['plan hash is the accepted one', r.plan?.hash === fx?.full?.plan_hash && r.plan?.drift === false && d?.plan_accepted === undefined],
+      ['full write test ran to completion', r.full?.ran === true && r.full?.status === 'complete'],
+      ['no violated record in the clean build', r.full?.verdicts?.every((x) => x.verdict !== 'violated') === true],
+      ['the Redis cells held (CONC-2, TGT-2, RETRY-2, UPD-1)', ['MWS-CONC-2', 'MWS-TGT-2', 'MWS-RETRY-2', 'MWS-UPD-1'].every(held)],
+      ['installed in the slim image with scripts off, egress to registry.npmjs.org at most', d?.install?.image === 'node24' && (d?.install?.egress_hosts ?? []).every((h) => h === 'registry.npmjs.org') && d?.install?.egress_refused === 0],
+      ['the backend files came from the pinned image and matched their sha256', !!spec && d?.binary_image?.ref === spec.ref && JSON.stringify(Object.entries(d.binary_image.files ?? {}).sort()) === JSON.stringify(Object.entries(spec.files[d.binary_image.platform] ?? {}).map(([n, v]) => [n, v.sha256]).sort())],
+      ['every full-run result is labelled hermetic (redis)', cov?.backend_environment === 'hermetic' && cov?.backend_kind === 'redis' && verdicts.length > 0 && verdicts.every((x) => x.backend_environment === 'hermetic')],
     ];
   },
   'isokron-ai/kronicle-lite': (r, d) => [
@@ -90,7 +110,8 @@ for (const it of items) {
     console.log(`item ${it.index}: package ${r.package} ${r.resolved_version ?? ''}; steps ${r.steps.map((s) => `${s.step}=${s.exit}`).join(' ')}; catalog ${r.catalog.found ? `${r.catalog.tool_count} tools` : r.catalog.why}; plan ${r.plan.hash ?? '-'}${r.plan.drift ? ' (drift)' : ''}; full ${r.full.ran ? r.full.status : 'not run'}`);
     const d = files.get('logs/driver.json') ? JSON.parse(files.get('logs/driver.json').toString('utf8')) : null;
     if (d?.install) console.log(`item ${it.index}: install in ${d.install.image}, ${d.install.steps.map((s) => `${s.name}=${s.exit} ${s.ms} ms`).join(', ')}; egress ${JSON.stringify(d.install.egress_hosts)}`);
-    for (const [what, ok] of (EXPECT[it.subject.toLowerCase()] ?? (() => []))(r, d, files)) say(ok, what);
+    const fx = it.fixture ? fixtures.fixtures[it.fixture] : null;
+    for (const [what, ok] of (EXPECT[it.fixture ? `fixture:${it.fixture}` : it.subject.toLowerCase()] ?? (() => []))(r, d, files, fx)) say(ok, what);
   } else {
     say(manifest.skips.length > 0, `no results; skips ${manifest.skips.map((s) => `${s.stage}:${s.reason}`).join(', ')}`);
   }

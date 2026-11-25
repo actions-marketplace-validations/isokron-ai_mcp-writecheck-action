@@ -57,7 +57,7 @@ test('R-WC-14: a changed byte of the fixture, a loosened lock or a lost label is
   const dir = tmp('wc12-mut-');
   mkdirSync(join(dir, 'loop', 'fixtures'), { recursive: true });
   copyFixture(join(dir, 'loop', 'fixtures', 'pg-tracker'));
-  for (const name of ['tiny-tracker', 'kronicle-lite']) cpSync(join(root, 'loop', 'fixtures', name), join(dir, 'loop', 'fixtures', name), { recursive: true, filter: (s) => !s.split('/').includes('node_modules') });
+  for (const name of ['tiny-tracker', 'kronicle-lite', 'redis-tracker']) cpSync(join(root, 'loop', 'fixtures', name), join(dir, 'loop', 'fixtures', name), { recursive: true, filter: (s) => !s.split('/').includes('node_modules') });
   writeFileSync(join(dir, 'loop', 'fixtures.json'), JSON.stringify(base));
   assert.doesNotThrow(() => loadFixtures(join(dir, 'loop', 'fixtures.json')));
   const mcp = join(dir, 'loop', 'fixtures', 'pg-tracker', 'src', 'mcp.mjs');
@@ -153,7 +153,7 @@ test('R-WC-16: the backend runs inside the sandbox container, for the full write
   assert.match(be, /!sameToken\(req\.headers\.authorization, `Bearer \$\{token\}`\)/);
   assert.match(be, /timingSafeEqual/);
   // The PR proof runs the fixture in the sandbox with the other fixture servers, and judges the label.
-  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action"/);
+  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action\.pg-tracker"/);
   assert.match(read('loop/check-bundles.mjs'), /labelled hermetic/);
 });
 
@@ -309,15 +309,18 @@ test('R-WC-18: a source fixture is selected by its id in the item, never by its 
   assert.equal(plain.fixture, null);
   assert.equal(plain.source, 'seed');
   assert.equal(resolveSubject(sub, { seed: { map: new Map() }, fixtures: fx }).skip.reason, 'policy_excluded');
-  // With the id: the fixture. With the wrong subject, or an id that does not exist: a skip.
-  assert.equal(resolveSubject(sub, { seed, fixtures: fx }, 'pg-tracker').fixture, 'pg-tracker');
+  // With the id and the fixture's own subject (`<repository>.<id>`, so that history keyed by subject never mixes two backends): the fixture. With the repository's name, another subject, or an id that does not exist: a skip.
+  const own = fx.fixtures['pg-tracker'].subject;
+  assert.equal(own, `${sub}.pg-tracker`);
+  assert.equal(resolveSubject(own, { seed, fixtures: fx }, 'pg-tracker').fixture, 'pg-tracker');
+  assert.equal(resolveSubject(sub, { seed, fixtures: fx }, 'pg-tracker').skip.reason, 'policy_excluded');
   assert.equal(resolveSubject('isokron-ai/kronicle-lite', { seed, fixtures: fx }, 'pg-tracker').skip.reason, 'policy_excluded');
-  assert.equal(resolveSubject(sub, { seed, fixtures: fx }, 'no-such').skip.reason, 'policy_excluded');
+  assert.equal(resolveSubject(own, { seed, fixtures: fx }, 'no-such').skip.reason, 'policy_excluded');
   // The items carry it, checked; the proof shard names it.
   const key = 'a'.repeat(64);
-  assert.equal(parseItems(JSON.stringify([{ subject: sub, fixture: 'pg-tracker', run_key: key, fence: 1 }]))[0].fixture, 'pg-tracker');
+  assert.equal(parseItems(JSON.stringify([{ subject: own, fixture: 'pg-tracker', run_key: key, fence: 1 }]))[0].fixture, 'pg-tracker');
   assert.throws(() => parseItems(JSON.stringify([{ subject: sub, fixture: 'Bad Id', run_key: key, fence: 1 }])), /fixture id/);
-  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action","fixture":"pg-tracker"/);
+  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action\.pg-tracker","fixture":"pg-tracker"/);
   // The older fixtures keep their subject mapping (unchanged since the lane started).
   assert.equal(resolveSubject('isokron-ai/kronicle-lite', { seed, fixtures: fx }).fixture, 'kronicle-lite');
 });

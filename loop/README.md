@@ -58,7 +58,7 @@ With incomplete sandbox evidence (a container that left no syscall trace, an unr
 
 ## Backends
 
-The fixtures' backends are disposable and live inside the sandbox container: tiny-tracker's in-memory store, kronicle-lite's data folder and, since WC12, a real PostgreSQL server for `pg-tracker` (`loop/fixtures/pg-tracker/`, a fixture whose package is the committed folder, pinned by a digest in `fixtures.json`). Every result of a full write test is labelled `hermetic` (`backend_environment` in `observation_coverage` and in each full-run verdict record). The design, the cells that run against PostgreSQL, the known-bad builds, the cost per item and what is left for Redis are in [`BACKENDS.md`](BACKENDS.md). pg-tracker is not in tool-qa's seed, so the live lane does not dispatch it; the pull-request proof (`loop-fixture.yml`) runs it in the sandbox with the other fixtures, and `test.yml` runs the pinned CLI over it against a real PostgreSQL on the runner, known good and known bad.
+The fixtures' backends are disposable and live inside the sandbox container: tiny-tracker's in-memory store, kronicle-lite's data folder and, since WC12, a real PostgreSQL server for `pg-tracker` and, since WC13, a real Redis server for `redis-tracker` (`loop/fixtures/redis-tracker/`, no dependency; its `redis-server` is copied out of a digest-pinned official image, see `BACKENDS.md`; its plan is accepted) (`loop/fixtures/pg-tracker/`, a fixture whose package is the committed folder, pinned by a digest in `fixtures.json`). Every result of a full write test is labelled `hermetic` (`backend_environment` in `observation_coverage` and in each full-run verdict record). The design, the cells that run against PostgreSQL, the known-bad builds, the cost per item and the Redis fixture are in [`BACKENDS.md`](BACKENDS.md). pg-tracker is not in tool-qa's seed, so the live lane does not dispatch it; the pull-request proof (`loop-fixture.yml`) runs it in the sandbox with the other fixtures, and `test.yml` runs the pinned CLI over it against a real PostgreSQL on the runner, known good and known bad.
 
 ## Controls
 
@@ -95,7 +95,7 @@ The guard job runs first, before any checkout but its own file: `LOOP_ENABLED` m
 | `loop/teardown.sh` | Removes every container and stops Docker before anything is sealed |
 | `loop/check-bundles.mjs` | The pull-request proof's judge |
 | `loop/fixtures.json`, `loop/fixtures/<name>/` | Our fixture servers: package, version and sha512 integrity (or, for a source fixture, the digest of its committed folder), the committed lockfile they install from with `npm ci`, which dogfood manifest they run, the plan hash accepted for it, and what their backend is (`hermetic`) |
-| `loop/BACKENDS.md` | Write-safety cells against more backends: the PostgreSQL fixture, the `hermetic` label, cost per item, Redis next |
+| `loop/BACKENDS.md` | Write-safety cells against more backends: the PostgreSQL and Redis fixtures, the `hermetic` label, where the Redis binary comes from, cost per item |
 | `loop/sandbox/` | Our code inside the sandbox: the bridge and the relay of a split run, the forgery server, the output collector, the backend starter |
 
 What went wrong while building this lane, and the test that pins each fix, is in `REGRESSIONS.md` (`R-WC-*`; R-WC-05 to R-WC-08 came from the security review of pull request 61, R-WC-09 from its follow-up, R-WC-14 to R-WC-17 from the PostgreSQL fixture).
