@@ -13,7 +13,7 @@
  * read, its plan hash the accepted one, and the full write test run to completion; kronicle-lite the same, built
  * from source in the build image with install egress to registry.npmjs.org only; pg-tracker (this repository's
  * PostgreSQL fixture) the same with every full-run result labelled hermetic; redis-tracker (the Redis fixture, WC13) the same over
- * Redis, run on its proposed (not yet accepted) plan, which its bundle must say; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
+ * Redis, under its accepted plan; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
  * first item that does not meet them (all items are still printed).
  */
 import { readFileSync } from 'node:fs';
@@ -60,8 +60,7 @@ const EXPECT = {
       ['every full-run result is labelled hermetic (PostgreSQL)', cov?.backend_environment === 'hermetic' && cov?.backend_kind === 'postgresql' && verdicts.length > 0 && verdicts.every((x) => x.backend_environment === 'hermetic')],
     ];
   },
-  // WC13: the Redis fixture. The same shape, over a real Redis whose redis-server was copied from a digest-pinned image; its plan is
-  // proposed, not accepted, so the item says proof_plan and the bundle must say the plan was not accepted.
+  // WC13: the Redis fixture. The same shape, over a real Redis whose redis-server was copied from a digest-pinned image.
   'fixture:redis-tracker': (r, d, files, fx) => {
     const obs = String(files.get('observations/writecheck.ndjson') ?? '').split('\n').filter(Boolean).map((l) => JSON.parse(l));
     const cov = obs.find((o) => o.field === 'observation_coverage')?.value;
@@ -70,7 +69,7 @@ const EXPECT = {
     const spec = fx?.binary_image;
     return [
       ['catalog read', r.catalog?.found === true && r.catalog.tool_count >= 8],
-      ['plan hash is the proposed one, and the bundle says it was not accepted', r.plan?.hash === fx?.full?.proposed_plan_hash && d?.plan_accepted === false && d?.proof_plan_hash === r.plan?.hash && r.plan?.accepted === null && r.plan?.drift === false],
+      ['plan hash is the accepted one', r.plan?.hash === fx?.full?.plan_hash && r.plan?.drift === false && d?.plan_accepted === undefined],
       ['full write test ran to completion', r.full?.ran === true && r.full?.status === 'complete'],
       ['no violated record in the clean build', r.full?.verdicts?.every((x) => x.verdict !== 'violated') === true],
       ['the Redis cells held (CONC-2, TGT-2, RETRY-2, UPD-1)', ['MWS-CONC-2', 'MWS-TGT-2', 'MWS-RETRY-2', 'MWS-UPD-1'].every(held)],

@@ -243,8 +243,7 @@
         ]
       },
       "full": {
-        "plan_hash": null,
-        "proposed_plan_hash": "5ee5a5b97a2363b8",
+        "plan_hash": "5ee5a5b97a2363b8",
         "confirm": "redis-tracker"
       },
       "known_answers": [

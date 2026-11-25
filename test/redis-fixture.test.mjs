@@ -182,7 +182,7 @@ test('R-WC-21: every result of a full write test of redis-tracker is labelled he
   const files = new Map([
     ['full/run1/results.json', results([{ requirement: 'MWS-CONC-2', verdict: 'held', write_path: { tool: 'delete_item', resource: 'item' } }])],
   ]);
-  const ran = summarize({ files, steps: [], planStdout: `plan hash: ${f.full.proposed_plan_hash}\n`, fullRan: true, acceptedPlanHash: f.full.proposed_plan_hash });
+  const ran = summarize({ files, steps: [], planStdout: `plan hash: ${f.full.plan_hash}\n`, fullRan: true, acceptedPlanHash: f.full.plan_hash });
   const obs = observations(ran, { versions: {}, stagesRan: { install: true, full: true }, backend: f.backend });
   const cov = obs.find((o) => o.field === 'observation_coverage').value;
   assert.equal(cov.backend_environment, 'hermetic');
@@ -246,15 +246,16 @@ test('R-WC-22: redis-tracker has a subject of its own and is selected by its id 
   assert.equal(parseItems(JSON.stringify([item(fx.fixtures['pg-tracker'].subject, 'pg-tracker'), item(own, 'redis-tracker', { fence: 2 })])).length, 2);
   assert.throws(() => parseItems(JSON.stringify([item(own, 'redis-tracker'), item(own, 'redis-tracker', { fence: 2 })])), /appears twice/);
   assert.throws(() => parseItems(JSON.stringify([item(own, 'Bad Id')])), /fixture id/);
-  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action\.redis-tracker","fixture":"redis-tracker","proof_plan":true/);
+  assert.match(read('.github/workflows/loop-fixture.yml'), /"subject":"isokron-ai\/mcp-writecheck-action\.redis-tracker","fixture":"redis-tracker","run_key"/);
 });
 
-test('R-WC-22: the plan is proposed, not accepted: the live lane never runs the full write test of redis-tracker until a person accepts it', () => {
+test('R-WC-22: the plan a person accepted is in the repository and is the one fixtures.json names; a proof item never counts as an acceptance', () => {
   const f = fixtures().fixtures['redis-tracker'];
-  assert.equal(f.full.plan_hash, null, 'nobody has accepted this plan');
-  assert.match(f.full.proposed_plan_hash, /^[0-9a-f]{16}$/);
+  // Accepted by the owner on 25 Nov 2026 (recorded in loop/BACKENDS.md): this hash and no other.
+  assert.equal(f.full.plan_hash, '5ee5a5b97a2363b8');
+  assert.equal(f.full.proposed_plan_hash, undefined, 'no proposal is left next to the accepted hash');
   const plan = read('dogfood/redis-tracker/plan.txt');
-  assert.match(plan, new RegExp(`^plan hash: ${f.full.proposed_plan_hash}$`, 'm'));
+  assert.match(plan, new RegExp(`^plan hash: ${f.full.plan_hash}$`, 'm'));
   assert.match(plan, new RegExp(`for target ${f.full.confirm} \\(environment: test\\)`));
   assert.match(plan, /Hosts reached or given to the server: 127\.0\.0\.1:4630, 127\.0\.0\.1:4631\n/);
   assert.match(plan, /At most \d+ writes and \d+ created objects/);
@@ -284,7 +285,7 @@ test('R-WC-22: the plan is proposed, not accepted: the live lane never runs the 
   assert.match(read('loop/run-items.mjs'), /parseItems\(env\.ITEMS, \{ proofLane: isProofLane\(env\) \}\)/);
   // (b) A proof item hands the summary no accepted hash: the record says the plan was not accepted, and there is no drift.
   assert.match(read('loop/run-items.mjs'), /acceptedPlanHash: u\.proofPlan \? null : u\.acceptedHash/);
-  const hash = fixtures().fixtures['redis-tracker'].full.proposed_plan_hash;
+  const hash = fixtures().fixtures['redis-tracker'].full.plan_hash;
   const files = new Map([['full/run1/results.json', Buffer.from(JSON.stringify({ run: { status: 'complete', writes: 1 }, results: [] }))]]);
   const asProof = summarize({ files, steps: [], planStdout: `plan hash: ${hash}\n`, fullRan: true, acceptedPlanHash: null });
   const record = observations(asProof, { versions: {}, stagesRan: { full: true }, backend: fixtures().fixtures['redis-tracker'].backend }).find((o) => o.field === 'plan_hash_and_drift').value;
@@ -292,10 +293,10 @@ test('R-WC-22: the plan is proposed, not accepted: the live lane never runs the 
   // The mutation: with the hash passed as accepted (what the code did before), the record would claim acceptance.
   const asAccepted = summarize({ files, steps: [], planStdout: `plan hash: ${hash}\n`, fullRan: true, acceptedPlanHash: hash });
   assert.equal(observations(asAccepted, { versions: {}, stagesRan: { full: true }, backend: null }).find((o) => o.field === 'plan_hash_and_drift').value.accepted, hash);
-  // A proposed hash without a null accepted one is refused, as is a malformed one (mutations).
+  // A proposed hash next to an accepted one is refused, as is a malformed one (mutations); the mechanism stays for the next fixture.
   const base = JSON.parse(read('loop/fixtures.json'));
   const bad = (edit) => { const d = structuredClone(base); edit(d.fixtures['redis-tracker']); return () => validateFixtures(d); };
-  assert.throws(bad((x) => { x.full.plan_hash = '0123456789abcdef'; }), /proposed_plan_hash/);
+  assert.throws(bad((x) => { x.full.proposed_plan_hash = '0123456789abcdef'; }), /proposed_plan_hash/);
   assert.throws(bad((x) => { x.full.proposed_plan_hash = 'xyz'; }), /proposed_plan_hash/);
   assert.doesNotThrow(bad((x) => { x.full.plan_hash = '0123456789abcdef'; delete x.full.proposed_plan_hash; }));
 });
@@ -437,10 +438,10 @@ const verdicts = (results, req, tool) => results.results.filter((r) => r.require
 function expectViolated(run, req, tool) { assert.ok(verdicts(run.results, req, tool).includes('violated'), `${req} on ${tool} must be violated; got ${JSON.stringify(verdicts(run.results, req, tool))}\n${run.log}`); }
 function expectHeld(run, req) { const v = verdicts(run.results, req); assert.ok(v.includes('held') && !v.includes('violated'), `${req} must hold; got ${JSON.stringify(v)}\n${run.log}`); }
 
-test('R-WC-23: known good: the correct build against a real Redis holds every cell it tests, within the timing budget, and the plan is the proposed one', { skip: live, timeout: 300_000 }, async () => {
+test('R-WC-23: known good: the correct build against a real Redis holds every cell it tests, within the timing budget, and the plan is the accepted one', { skip: live, timeout: 300_000 }, async () => {
   const run = await cliRun({});
   const f = fixtures().fixtures['redis-tracker'];
-  assert.equal(run.hash, f.full.proposed_plan_hash, 'the plan of this CLI, this manifest and this server is the proposed one (dogfood/redis-tracker/plan.txt)');
+  assert.equal(run.hash, f.full.plan_hash, 'the plan of this CLI, this manifest and this server is the accepted one (dogfood/redis-tracker/plan.txt)');
   assert.equal(run.plan.trim(), read('dogfood/redis-tracker/plan.txt').trim());
   assert.equal(run.status, 0, run.log);
   assert.equal(run.results.run.status, 'complete');

@@ -6,8 +6,7 @@
 # with no npm or PyPI package (its skips) and pg-tracker (the fixture of this repository, whose backend is a real
 # PostgreSQL server that the sandbox container starts for the full write test: catalog, plan and the full write
 # test, every result labelled hermetic; its subject is its own, <repository>.pg-tracker, which the pump's seed does not list) and
-# redis-tracker (the same, over a real Redis whose redis-server comes from a digest-pinned official image; its plan is
-# proposed and not yet accepted, so its item says proof_plan and its bundle says so). The worker-kit then builds each bundle in a dry run (no encryption, no
+# redis-tracker (the same, over a real Redis whose redis-server comes from a digest-pinned official image). The worker-kit then builds each bundle in a dry run (no encryption, no
 # upload), and loop/check-bundles.mjs judges each one with tool-qa's own ingest code at the pinned commit: every
 # bundle must be accepted, with its controls passed, and each fixture must show what it is known to show.
 #
@@ -61,7 +60,7 @@ jobs:
         run: |
           shard="fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           key() { printf '%s' "$1-$shard" | sha256sum | cut -d' ' -f1; }
-          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4},{"subject":"isokron-ai/mcp-writecheck-action.pg-tracker","fixture":"pg-tracker","run_key":"%s","fence":5},{"subject":"isokron-ai/mcp-writecheck-action.redis-tracker","fixture":"redis-tracker","proof_plan":true,"run_key":"%s","fence":6}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)" "$(key pg)" "$(key rd)")
+          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4},{"subject":"isokron-ai/mcp-writecheck-action.pg-tracker","fixture":"pg-tracker","run_key":"%s","fence":5},{"subject":"isokron-ai/mcp-writecheck-action.redis-tracker","fixture":"redis-tracker","run_key":"%s","fence":6}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)" "$(key pg)" "$(key rd)")
           {
             echo "shard_id=$shard"
             echo "attempt_id=$shard"

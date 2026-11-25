@@ -9,7 +9,7 @@ Design note for upgrade 12 of the IsoKron loop: run the MWS write-safety cells a
 | in-memory HTTP store | tiny-tracker (`@mcp-write-safety/tiny-tracker`, npm) | live in the lane since the lane started |
 | SQLite data folder | kronicle-lite (npm) | live in the lane |
 | PostgreSQL 18.7 | `pg-tracker` (`loop/fixtures/pg-tracker/`, committed here) | this change |
-| Redis 8.2.11 | `redis-tracker` (`loop/fixtures/redis-tracker/`, committed here) | WC13, plan proposed and not yet accepted; see "Redis (WC13)" |
+| Redis 8.2.11 | `redis-tracker` (`loop/fixtures/redis-tracker/`, committed here) | WC13, plan 5ee5a5b97a2363b8 accepted 25 Nov 2026; see "Redis (WC13)" |
 
 The unchanged rule holds: only these fixture servers, each with a plan hash a person accepted, get the full write test. A third-party server gets `init`, `plan` and `catalog` and never a manifest that writes.
 
@@ -106,9 +106,11 @@ tool-qa keys history by subject, and a record carries the subject of its item. T
 - Sandbox: Redis listens on 127.0.0.1:4630 only (`bind`, `protected-mode yes`, no Unix socket), the control channel on 127.0.0.1:4631; `requirepass` is the random per-run `REDISFX_PASSWORD`, passed in a mode 0600 config file that is removed once the server is up; `save ""`, `appendonly no`, the data directory is under `/tmp` (the container's tmpfs, 512 MiB), `enable-debug-command`, `enable-module-command` and `enable-protected-configs` off, `maxmemory 256mb`. The server runs as 65534 in the read-only root.
 - Cells: the same as PostgreSQL at the pinned CLI (the list above, with Redis for PostgreSQL); the wire-gate cells stay out for the same reason.
 
-### Plan acceptance and the proof run
+### Plan acceptance
 
-The plan is `dogfood/redis-tracker/plan.txt`, hash **5ee5a5b97a2363b8**, **proposed and not accepted**: `full.plan_hash` in `loop/fixtures.json` is `null`, so the live lane would run catalog and plan for the fixture but never its full write test; `full.proposed_plan_hash` holds the proposed hash only so that the pull-request proof can run it. The proof item says `"proof_plan": true`; `parseItems` refuses that key unless the environment is the pull-request proof (`isProofLane`: event `pull_request`, this repository, workflow `loop-fixture.yml`, none of which a dispatch can set), so the pump's worker `corpus.yml` rejects such an item whole. The driver then runs the full write test under the proposed hash, hands the summary **no** accepted hash (so the `plan_hash_and_drift` record says `accepted: null`, `drift: false`, not an acceptance), and the bundle's `logs/driver.json` says `plan_accepted: false`. When a person accepts the plan, a change moves the hash into `full.plan_hash` and removes the proposal.
+The owner accepted plan hash **5ee5a5b97a2363b8** on 25 Nov 2026 ("Accept the plan"), after reading a summary of `dogfood/redis-tracker/plan.txt`; the hash in `fixtures.json` (`full.plan_hash`) is that one, and a review change that moved it would need a new acceptance. The plan text did not change between proposal and acceptance (the review changes of #69 touch the fixture's subject, the proof lane and the binary checks, none of which is in the plan). As for pg-tracker, the repository has no other record format for acceptances: the value in `fixtures.json` is the record.
+
+Until the acceptance, `full.plan_hash` was `null` and a proposal `full.proposed_plan_hash` let an item with `"proof_plan": true` run the full write test in the pull-request proof only. That mechanism stays for the next fixture: `parseItems` refuses `proof_plan` unless the environment is the pull-request proof (`isProofLane`: event `pull_request`, this repository, workflow `loop-fixture.yml`, none of which a dispatch can set); a proof item hands the summary no accepted hash, so its `plan_hash_and_drift` record says `accepted: null`; and the bundle's `logs/driver.json` says `plan_accepted: false`. The fixture is not in the pump's seed and no pump item carries `fixture`, so the live lane does not dispatch it either way; adding it is the owner's call (Phase 2, item 4).
 
 ### Cost per item (R-WC-13 timing)
 
