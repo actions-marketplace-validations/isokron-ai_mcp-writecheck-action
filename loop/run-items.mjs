@@ -55,8 +55,10 @@ const PROXY_PORT = 8080;
 /** The bridge's port in the server's container (split runs). */
 const BRIDGE_PORT = 7300;
 const MS = { build: 900_000, install: 300_000, setup: 120_000, step: 150_000, full: 900_000, helper: 120_000 };
-/** No item starts after this long (the pump's lease for 10 items is 46 minutes; the job stops at 45). */
+/** No item starts after this long (the pump's lease for 10 items is 52 minutes; the job stops at 45). */
 const SHARD_BUDGET_MS = Number(process.env.LOOP_SHARD_BUDGET_S || 26 * 60) * 1000;
+// How far past the shard deadline the item already running may go (was 15 min, which could outlast the job).
+export const ITEM_GRACE_MS = 5 * 60_000;
 const COLLECT = { file: 4 * 1024 * 1024, total: 24 * 1024 * 1024, entries: 2000 };
 /** Each control's captured bytes, copied into every bundle of the shard, stay small. */
 const CONTROL_RAW = { fileCap: 1024 * 1024, totalCap: 3 * 1024 * 1024 };
@@ -613,7 +615,9 @@ async function runItem(ctx, item, deadline) {
     mkdirSync(u.stepDir, { recursive: true });
     const shardTel = shard.tel;
     shard.tel = new shard.M.Telemetry(telFile, { run: shard.runId });
-    try { res = await shard.runUnit(u, Math.min(deadline + 15 * 60_000, Date.now() + 20 * 60_000)); } finally { shard.tel = shardTel; }
+    // The last item may finish at most ITEM_GRACE_MS past the shard deadline, so the job ends inside its
+    // timeout-minutes and the pump's lease (corpus.yml): items 26 + 5 min, plus prepare and teardown.
+    try { res = await shard.runUnit(u, Math.min(deadline + ITEM_GRACE_MS, Date.now() + 20 * 60_000)); } finally { shard.tel = shardTel; }
     driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress) } : null;
     driver.error = res.error;
     driver.evidence_missing = [...new Set(res.missing)];

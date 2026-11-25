@@ -115,8 +115,10 @@ jobs:
     if: needs.guard.outputs.proceed == 'true' && needs.conformance.outputs.verdict == 'pass'
     name: writecheck
     runs-on: ubuntu-24.04
-    # Below the pump's lease for a shard of 10: 1.5 x (4 + 10 x 2) + 10 = 46 minutes. The driver starts no item
-    # after 26 minutes of items; those not started report a retryable skip.
+    # Below the pump's lease for a shard of 10: 1.5 x (8 + 10 x 2) + 10 = 52 minutes from dispatch (tool-qa
+    # pump/workflows.json setup_minutes 8; the guard and conformance jobs run inside it). The driver starts no item
+    # after 26 minutes of items, and the item running then may go at most 5 more minutes (ITEM_GRACE_MS in
+    # loop/run-items.mjs); those not started report a retryable skip.
     timeout-minutes: 45
     permissions:
       contents: read

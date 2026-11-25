@@ -108,3 +108,16 @@ test('corpus-batch.yml is the older hand-dispatched batch path, kept as it was',
   assert.match(b, /^on:\n(?:\s*\n)*  workflow_dispatch:\n    inputs:\n      only:/m);
   assert.match(b, /corpus\/run-ci-shard\.sh/);
 });
+
+test('R-WC-13: the last item cannot outlast the writecheck job or the pump lease', async () => {
+  const { ITEM_GRACE_MS } = await import('../loop/run-items.mjs');
+  const wf = readFileSync(join(root, '.github', 'workflows', 'corpus.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('\n  writecheck:'));
+  const timeout = Number(/timeout-minutes:\s*(\d+)/.exec(job)[1]);
+  const budgetMin = 26; // SHARD_BUDGET_MS default (LOOP_SHARD_BUDGET_S 26 min)
+  const prepareAndTeardownMin = 10; // checkout, CLI build, guard, sealing and upload
+  assert.ok(ITEM_GRACE_MS <= 5 * 60_000, 'the item running at the deadline gets at most 5 more minutes');
+  assert.ok(budgetMin + ITEM_GRACE_MS / 60_000 + prepareAndTeardownMin <= timeout, `items ${budgetMin} + grace ${ITEM_GRACE_MS / 60_000} + ${prepareAndTeardownMin} must fit in timeout-minutes ${timeout}`);
+  const lease = 1.5 * (8 + 10 * 2) + 10; // tool-qa pump/slots.mjs for writecheck: setup_minutes 8, 10 items x 2 min
+  assert.ok(timeout < lease, `job timeout ${timeout} must be below the pump lease ${lease}`);
+});
