@@ -17,7 +17,8 @@ import { FIXTURE_MANIFEST, InputError, catalogManifest, loadFixtures, lockProble
 import { findRunFolder, observations, planHash, publicSummary, readCatalog, readResults, summarize, ndjson } from '../loop/summary.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, hasIdentityKeys, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from '../loop/bundle.mjs';
 import { evaluateGuard, laneVariable, main as guardMain, refProblem } from '../loop/guard.mjs';
-import { buildManifest, validateManifest } from './fixtures/loop/tool-qa/worker-kit/contract.mjs';
+import { SKIP_FAULTS, buildManifest, resultFault, validateManifest } from './fixtures/loop/tool-qa/worker-kit/contract.mjs';
+import { REASON_FAULT, installFault, itemSkips } from '../loop/skips.mjs';
 import { checkBundle } from './fixtures/loop/tool-qa/ingest/forgery.mjs';
 import { parseRegistry, validateObservations } from './fixtures/loop/tool-qa/ingest/registry.mjs';
 
@@ -74,7 +75,7 @@ test('subjects: fixtures first, then the seed (npm before PyPI), else a skip wit
   assert.deepEqual(seedPackages({ packages: [{ registry: 'npm', identifier: 'ok' }, { registry: 'npm', identifier: 'NO' }] }), [{ kind: 'npm', package: 'ok' }]);
   // Every skip code is one of tool-qa's.
   const { SKIP_REASONS } = JSON.parse(JSON.stringify({ SKIP_REASONS: readFileSync(join(fx, 'tool-qa', 'worker-kit', 'contract.mjs'), 'utf8').match(/'[a-z_]+'/g).map((s) => s.slice(1, -1)) }));
-  for (const c of ['no_runnable_artifact', 'unsupported_transport', 'policy_excluded', 'install_failed_registry', 'timeout_start', 'trace_unavailable', 'upstream_unavailable']) assert.ok(SKIP_REASONS.includes(c), c);
+  for (const c of ['no_runnable_artifact', 'unsupported_transport', 'policy_excluded', 'install_failed_registry', 'timeout_start', 'trace_unavailable', 'tool_error']) assert.ok(SKIP_REASONS.includes(c), c);
 });
 
 test('R-WC-03: fixtures: valid; each runs its dogfood manifest byte for byte, under the plan hash accepted there', () => {
@@ -487,4 +488,116 @@ test('R-WC-12: the collector reads its root only when it resolves to itself; a l
   // The driver treats a refused read as no output: no done line, nothing collected.
   assert.ok(!parseCollected(l1.stdout).done);
   assert.equal(parseCollected(l1.stdout).files.size, 0);
+});
+
+// Every path of itemSkips, with the inputs the driver gives it (loop/run-items.mjs runItem).
+function everySkipPath(fixtures) {
+  const inst = (o = {}) => ({ ok: false, timed_out: false, steps: [{ name: 'install', exit: 1, timed_out: false }], egress: [], ...o });
+  const ran = { init: true, plan: true, catalog: true };
+  return {
+    not_in_seed: itemSkips({ resolved: resolveSubject('acme/unknown', { seed: SEED, fixtures }) }),
+    no_package: itemSkips({ resolved: resolveSubject('acme/oci-only', { seed: SEED, fixtures }) }),
+    http_only: itemSkips({ resolved: resolveSubject('acme/http-only', { seed: SEED, fixtures }) }),
+    wrong_fixture: itemSkips({ resolved: resolveSubject('acme/npm-server', { seed: SEED, fixtures }, 'tiny-tracker') }),
+    not_started: itemSkips({ resolved: resolveSubject('acme/npm-server', { seed: SEED, fixtures }), notStarted: true }),
+    harness: itemSkips({ resolved: {}, res: { error: 'harness', install: null, fullRan: false }, stages: {} }),
+    install_failed: itemSkips({ resolved: {}, res: { error: null, install: inst(), fullRan: false } }),
+    install_404: itemSkips({ resolved: {}, res: { error: null, install: inst(), fullRan: false }, installLog: 'npm error code E404\nnpm error 404 Not Found' }),
+    install_timeout: itemSkips({ resolved: {}, res: { error: null, install: inst({ timed_out: true }), fullRan: false } }),
+    third_party_ran: itemSkips({ resolved: {}, res: { error: null, install: { ok: true }, fullRan: false }, unit: { init: true, full: null }, stages: ran }),
+    fixture_http_init: itemSkips({ resolved: {}, res: { error: null, install: { ok: true }, fullRan: true }, unit: { init: false, full: {} }, stages: { plan: true, catalog: true } }),
+    evidence_missing: itemSkips({ resolved: {}, res: { error: null, install: { ok: true }, fullRan: false }, unit: { init: true }, stages: ran, evidenceComplete: false }),
+  };
+}
+
+test('R-WC-24: every skip says its fault side, one the reason allows; our own limits are the tool\'s, never the subject\'s', () => {
+  const fixtures = loadFixtures(join(root, 'loop', 'fixtures.json'));
+  const paths = everySkipPath(fixtures);
+  for (const [name, { skips }] of Object.entries(paths)) {
+    assert.ok(skips.length > 0, name);
+    for (const sk of skips) {
+      assert.ok(Object.hasOwn(SKIP_FAULTS, sk.reason), `${name}: ${sk.reason} is a contract reason`);
+      assert.equal(typeof sk.fault, 'string', `${name}: ${sk.stage}:${sk.reason} declares a fault`);
+      assert.ok(SKIP_FAULTS[sk.reason].allowed.includes(sk.fault), `${name}: ${sk.reason} may be ${sk.fault}`);
+    }
+  }
+  // A subject with no npm or PyPI package (OCI images, crates) is a gap of ours: tool, and the result is unassessed by our limit.
+  assert.deepEqual([...new Set(paths.no_package.skips.map((s) => `${s.reason}:${s.fault}`))], ['no_runnable_artifact:tool']);
+  assert.equal(resultFault(paths.no_package.skips).coverage, 'unassessed_tool');
+  assert.deepEqual([...new Set(paths.http_only.skips.map((s) => s.fault))], ['tool']);
+  assert.deepEqual([...new Set(paths.not_in_seed.skips.map((s) => s.fault))], ['policy']);
+  assert.deepEqual([...new Set(paths.not_started.skips.map((s) => `${s.reason}:${s.fault}:${s.retryable}`))], ['timeout_start:tool:true']);
+  assert.equal(paths.third_party_ran.skips.find((s) => s.stage === 'full').fault, 'policy');
+  assert.equal(paths.fixture_http_init.skips.find((s) => s.stage === 'init').fault, 'tool');
+  assert.equal(paths.evidence_missing.skips.find((s) => s.reason === 'trace_unavailable').fault, 'tool');
+  assert.equal(REASON_FAULT.no_runnable_artifact, 'tool');
+  // The kit at the pinned commit accepts the manifests, and refuses a fault the reason does not allow.
+  const workflow = { repo: 'isokron-ai/mcp-writecheck-action', file: '.github/workflows/corpus.yml', sha: 'e'.repeat(40), run_id: 5, run_attempt: 1 };
+  const files = [{ path: 'logs/driver.json', data: Buffer.from('{}') }];
+  const manifestOf = (skips) => buildManifest({ identity: { attempt_id: 'att-1', fence: 3, run_key: KEY }, workflow, files, meta: buildMeta({ subject: 'acme/x', tools: [{ name: 'mcp-writecheck', version: 'c'.repeat(40) }], settingsDigest: 'd'.repeat(64), startedAt: '2026-11-25T00:00:00Z', finishedAt: '2026-11-25T00:01:00Z', skips, controls: [] }) });
+  for (const [name, { skips }] of Object.entries(paths)) assert.deepEqual(validateManifest(manifestOf(skips)).errors, [], name);
+  assert.throws(() => manifestOf([{ stage: 'install', reason: 'no_runnable_artifact', fault: 'infra', evidence: 'logs/driver.json' }]), /not a fault no_runnable_artifact may have/);
+  // The driver builds its skips only through itemSkips: no skip object is written in run-items.mjs itself.
+  const driver = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  assert.doesNotMatch(driver, /skips\.push\(\{/);
+  assert.match(driver, /itemSkips\(\{ resolved, res, unit: u, stages, evidenceComplete, installLog \}\)/);
+});
+
+test('R-WC-25: a harness error is our own tool_error (retryable), not somebody else\'s outage', () => {
+  const { skips } = everySkipPath(loadFixtures(join(root, 'loop', 'fixtures.json'))).harness;
+  assert.deepEqual(skips.map((s) => s.stage), ['install', 'init', 'plan', 'catalog']);
+  for (const s of skips) assert.deepEqual([s.reason, s.fault, s.retryable], ['tool_error', 'tool', true]);
+  // Stages that ran before the harness failed are not skips.
+  assert.deepEqual(itemSkips({ resolved: {}, res: { error: 'harness', install: { ok: true } }, stages: { install: true, init: true } }).skips.map((s) => s.stage), ['plan', 'catalog']);
+});
+
+test('R-WC-26: an install failure is the subject\'s only with a package-level error in its own output; our limits are the tool\'s', () => {
+  const inst = (o = {}) => ({ ok: false, timed_out: false, steps: [{ name: 'install', exit: 1, timed_out: false }], egress: [], ...o });
+  assert.equal(installFault(inst(), 'npm error code E404\n'), 'subject');
+  assert.equal(installFault(inst(), 'npm ERR! code ETARGET\n'), 'subject');
+  assert.equal(installFault(inst(), 'ERROR: No matching distribution found for acme-mcp\n'), 'subject');
+  assert.equal(installFault(inst(), 'ERROR: Could not find a version that satisfies the requirement acme-mcp\n'), 'subject');
+  // The package installed but declares nothing to run.
+  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 1 }] })), 'subject');
+  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 0 }] })), 'subject');
+  // Ours: no evidence, a native build, our proxy refusing a host, our time limit, our memory limit (137) or timeout (124).
+  assert.equal(installFault(inst(), 'gyp ERR! build error\n'), 'tool');
+  assert.equal(installFault(inst(), ''), 'tool');
+  assert.equal(installFault(inst({ egress: [{ host: 'github.com', allowed: false }] }), 'npm error code E404\n'), 'tool');
+  assert.equal(installFault(inst({ timed_out: true }), 'npm error code E404\n'), 'tool');
+  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 137 }] })), 'tool');
+  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 124 }] })), 'tool');
+  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 1, timed_out: true }] }), 'npm error code E404\n'), 'tool');
+  assert.equal(installFault(null), 'tool');
+  // Through itemSkips: the same evidence decides the skips' fault.
+  const paths = everySkipPath(loadFixtures(join(root, 'loop', 'fixtures.json')));
+  assert.deepEqual([...new Set(paths.install_404.skips.map((s) => `${s.reason}:${s.fault}`))], ['install_failed_registry:subject']);
+  assert.deepEqual([...new Set(paths.install_failed.skips.map((s) => `${s.reason}:${s.fault}`))], ['install_failed_registry:tool']);
+  assert.deepEqual([...new Set(paths.install_timeout.skips.map((s) => `${s.reason}:${s.fault}`))], ['timeout_start:tool']);
+});
+
+test('R-WC-12: a root that is not a folder (a file, a FIFO where the output folder was) is refused with its own documented error', () => {
+  const root_ = join(dirname(fileURLToPath(import.meta.url)), '..');
+  const collect = join(root_, 'loop', 'sandbox', 'collect.mjs');
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'wc-collect-file-')));
+  writeFileSync(join(work, 'out'), 'a file where /work/out was');
+  const r = spawnSync(process.execPath, [collect, join(work, 'out'), '100', '1000', '100'], { encoding: 'utf8' });
+  assert.equal(r.status, 3);
+  assert.deepEqual(JSON.parse(r.stdout.trim()), { error: 'root_is_not_a_folder' });
+  assert.equal(parseCollected(r.stdout).files.size, 0);
+  assert.ok(!parseCollected(r.stdout).done);
+  // Every error the collector can print is documented in its header.
+  const text = readFileSync(collect, 'utf8');
+  const header = text.slice(0, text.indexOf('*/'));
+  for (const code of new Set([...text.matchAll(/'(root_[a-z_]+)'/g)].map((m) => m[1]))) assert.ok(header.includes(`"${code}"`), `${code} is documented`);
+});
+
+test('R-WC-27: loop/README.md names the sandbox commit the workflows pin', () => {
+  const readme = readFileSync(join(root, 'loop', 'README.md'), 'utf8');
+  for (const wf of ['corpus.yml', 'loop-fixture.yml']) {
+    const ref = /SANDBOX_REF: '([0-9a-f]{40})'/.exec(readFileSync(join(root, '.github', 'workflows', wf), 'utf8'))[1];
+    assert.match(readme, new RegExp(`\\(\`SANDBOX_REF\`, ${ref.slice(0, 7)}\\)`), wf);
+  }
+  // No other seven-hex sandbox pin is named beside SANDBOX_REF.
+  assert.equal([...readme.matchAll(/`SANDBOX_REF`, ([0-9a-f]{7})/g)].length, 1);
 });

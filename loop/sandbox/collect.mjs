@@ -15,7 +15,9 @@
  * Folders are walked without following links, at most 12 deep. <root> itself is read only when it resolves to itself (R-WC-12;
  * mcp-surface-corpus R-SBX-24 reads a file by the same rule): a target owns the volume, and a link planted at <root>, or at a
  * folder above it, would otherwise be followed to somewhere else in this helper's filesystem. Otherwise one line
- * { error: "root_is_a_link" } and exit 3, never a listing.
+ * { error: "root_is_a_link" } and exit 3, never a listing. A root that resolves to itself but is not a folder (a target
+ * put a file, a FIFO or a device node where its output folder was) is refused the same way: { error: "root_is_not_a_folder" }
+ * and exit 3. A root that does not exist is an empty listing (the step left nothing).
  */
 import { createHash } from 'node:crypto';
 import { closeSync, lstatSync, openSync, readSync, readdirSync, realpathSync } from 'node:fs';

@@ -56,8 +56,8 @@ concurrency:
 env:
   # isokron-ai/tool-qa: the worker-kit that seals and uploads (every worker-kit step below names this commit;
   # test/loop-workflow.test.mjs checks), and the seed the subjects are mapped with.
-  WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
+  WORKER_KIT_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
+  SEED_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
   # isokron-ai/mcp-surface-corpus main at 4c16b58 (pull requests 11 and 12: capped work volumes, data-root and container logs,
   # the link-safe readout, and the guard's link, socket, flood and archive-bomb cases; 9 and 10: the install-network cases
   # and the proxy positive control, which this lane's npm installs with scripts need; 8: native npm modules built from
@@ -180,7 +180,7 @@ jobs:
       # the controls passed and the sandbox is gone. One item's failed upload does not stop the others.
       - name: Seal and upload item 0
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_0 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/0/bundle
           meta-file: ${{ runner.temp }}/wc/0/meta.json
@@ -190,7 +190,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_0 }}
       - name: Seal and upload item 1
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_1 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/1/bundle
           meta-file: ${{ runner.temp }}/wc/1/meta.json
@@ -200,7 +200,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_1 }}
       - name: Seal and upload item 2
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_2 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/2/bundle
           meta-file: ${{ runner.temp }}/wc/2/meta.json
@@ -210,7 +210,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_2 }}
       - name: Seal and upload item 3
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_3 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/3/bundle
           meta-file: ${{ runner.temp }}/wc/3/meta.json
@@ -220,7 +220,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_3 }}
       - name: Seal and upload item 4
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_4 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/4/bundle
           meta-file: ${{ runner.temp }}/wc/4/meta.json
@@ -230,7 +230,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_4 }}
       - name: Seal and upload item 5
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_5 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/5/bundle
           meta-file: ${{ runner.temp }}/wc/5/meta.json
@@ -240,7 +240,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_5 }}
       - name: Seal and upload item 6
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_6 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/6/bundle
           meta-file: ${{ runner.temp }}/wc/6/meta.json
@@ -250,7 +250,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_6 }}
       - name: Seal and upload item 7
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_7 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/7/bundle
           meta-file: ${{ runner.temp }}/wc/7/meta.json
@@ -260,7 +260,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_7 }}
       - name: Seal and upload item 8
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_8 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/8/bundle
           meta-file: ${{ runner.temp }}/wc/8/meta.json
@@ -270,7 +270,7 @@ jobs:
           run-key: ${{ steps.run.outputs.run_key_8 }}
       - name: Seal and upload item 9
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_9 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/9/bundle
           meta-file: ${{ runner.temp }}/wc/9/meta.json

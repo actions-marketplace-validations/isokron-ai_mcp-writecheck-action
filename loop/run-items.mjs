@@ -41,6 +41,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, isProofLane, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
 import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
 import { dockerPlatform, extractBinaryImage } from './binary-image.mjs';
+import { itemSkips } from './skips.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -647,12 +648,11 @@ async function runItem(ctx, item, deadline) {
   let summary = null;
   let res = null;
   const stages = { install: false, init: false, plan: false, catalog: false, full: false };
-  if (resolved.skip) {
-    for (const st of ['install', 'init', 'plan', 'catalog']) skips.push({ stage: st, reason: resolved.skip.reason, evidence: 'logs/driver.json' });
-    driver.skip_detail = resolved.skip.detail;
-  } else if (Date.now() >= deadline) {
-    for (const st of ['install', 'init', 'plan', 'catalog']) skips.push({ stage: st, reason: 'timeout_start', retryable: true, evidence: 'logs/driver.json' });
-    driver.skip_detail = 'not started: the shard used its time budget first';
+  if (resolved.skip || Date.now() >= deadline) {
+    // Not run: no package this lane can start (or excluded), or the shard's time budget is spent. R-WC-24: each skip says its fault.
+    const s = itemSkips({ resolved, notStarted: !resolved.skip });
+    skips.push(...s.skips);
+    Object.assign(driver, s.notes);
   } else {
     const u = unitFor(`i${item.index}`, resolved, fixtures, join(shard.shardDir, 'items', String(item.index)), {}, { proofPlan: item.proof_plan === true });
     // A unit's telemetry is its own file, kept in raw/ (it names what the target looked up and reached).
@@ -671,25 +671,14 @@ async function runItem(ctx, item, deadline) {
     driver.collected = res.collected;
     stages.install = !!res.install?.ok;
     for (const s of res.steps) if (s.step in stages) stages[s.step] = true;
-    if (res.error === 'harness') {
-      for (const st of ['install', 'init', 'plan', 'catalog'].filter((x) => !stages[x])) skips.push({ stage: st, reason: 'upstream_unavailable', retryable: true, evidence: 'logs/driver.json' });
-    } else if (res.install && !res.install.ok) {
-      const reason = res.install.timed_out ? 'timeout_start' : 'install_failed_registry';
-      for (const st of ['init', 'plan', 'catalog']) skips.push({ stage: st, reason, evidence: 'logs/driver.json' });
-    }
-    // The stages that did not run are recorded too: init where the fixture's server is not started over stdio,
-    // and the full write test wherever it did not start (never for a third-party server; for a fixture, only
-    // under the plan hash a person accepted).
-    if (res.error !== 'harness' && res.install?.ok) {
-      if (!stages.init && u.init === false) { skips.push({ stage: 'init', reason: 'unsupported_transport', evidence: 'logs/driver.json' }); driver.init_detail = 'the fixture server is started over streamable HTTP by its manifest; init drafts from a stdio command'; }
-      if (!res.fullRan) {
-        skips.push({ stage: 'full', reason: 'policy_excluded', evidence: 'logs/driver.json' });
-        driver.full_detail = !u.full ? 'a third-party server is never given a manifest that writes' : 'the plan hash is not the accepted one (or the plan did not run), so the full write test did not start';
-      }
-    }
     summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.proofPlan ? null : u.acceptedHash }); // a proof item's plan is not accepted: the record says so, with no drift
     const evidenceComplete = ctx.lane !== 'ci' || driver.evidence_missing.length === 0;
-    if (!evidenceComplete) skips.push({ stage: 'catalog', reason: 'trace_unavailable', evidence: 'logs/driver.json' });
+    // Every stage that did not run, with its fault side (R-WC-24): the install's own output is read only to tell a
+    // package-level error (the subject's) from our limits; it stays in raw/.
+    const installLog = res.install && !res.install.ok && existsSync(join(u.stepDir, 'docker.log')) ? readFileSync(join(u.stepDir, 'docker.log'), 'latin1') : '';
+    const s = itemSkips({ resolved, res, unit: u, stages, evidenceComplete, installLog });
+    skips.push(...s.skips);
+    Object.assign(driver, s.notes);
     b.put('results/writecheck.json', json({ subject: item.subject, source: resolved.source, package: resolved.package, resolved_version: res.install?.resolved_version ?? null, ...publicSummary(summary) }));
     b.put('observations/writecheck.ndjson', ndjson(observations(summary, { versions: ctx.versions, stagesRan: stages, evidenceComplete, backend: u.backend })));
     addRaw(b, 'raw', res, u.stepDir);
