@@ -160,7 +160,7 @@ test('R-WC-32: an OCI subject starts as docker run would start it, with the brid
   // The driver starts an OCI subject only with the runtime in place, in its own image, without a volume of ours but the tools.
   const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
   assert.match(src, /if \(!this\.loader\) throw new M\.HarnessError\('the portable runtime for the bridge is not in the tools volume'\);/);
-  assert.match(src, /image = u\.launch\.image;\n\s*serverCmd = server\.cmd;\n\s*u\.oci = \{ workdir: server\.workdir \};/);
+  assert.match(src, /image = u\.launch\.image;\n\s*serverCmd = server\.cmd;\n(?:\s*\/\/[^\n]*\n)*\s*u\.oci = \{ workdir: server\.workdir, serverEnv: /);
 });
 
 test('R-WC-35: an OCI subject\'s image is removed when its unit ends, after its containers', () => {
@@ -372,7 +372,7 @@ test('R-WC-35: with a stand-in Docker, the subject\'s image is gone from the ima
     }
   }
   const M = {
-    HarnessError, Docker, LIMITS: { cpus: 2 },
+    HarnessError, Docker, LIMITS: { cpus: 2 }, dir: tmpdir(),
     Telemetry: class { write() {} tryWrite() { return true; } end() {} },
     loadRunscConfig: () => ({ release: 'test' }), checkPinned: (r) => r, helperRunArgs: (o) => ['run', ...(o.cmd ?? [])],
     watchTraces: () => ({ stop() {}, overflow() { return false; } }), sweepTraces() {}, readHostLog: () => ({ ok: false }),

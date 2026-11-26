@@ -403,7 +403,7 @@ test('R-WC-05: every subject and the forgery control run split; only our locked 
   const split = src.slice(src.indexOf('async splitRun('), src.indexOf('One unit (an item or a control) end to end'));
   // The server's container: the install volume read-only and the tools, never the output volume (serverContainer); an
   // OCI subject's (WC14) gets the tools only, read-only, and its bridge through the portable runtime.
-  assert.match(split, /\.\.\.serverContainer\(u, \{ work, toolsVol: this\.toolsVol, serverCmd, loader: this\.loader \}\), env: runEnv/);
+  assert.match(split, /\.\.\.serverContainer\(u, \{ work, toolsVol: this\.toolsVol, serverCmd, loader: this\.loader \}\), env: u\.oci \? \{ \.\.\.runEnv\(\), \.\.\.BRIDGE_ENV_EMPTY \} : runEnv\(/);
   assert.doesNotMatch(split.slice(split.indexOf('sandboxRunArgs('), split.indexOf('this.writeSettings(argv')), /\bout\b/);
   const ours = serverContainer({}, { work: 'w', toolsVol: 't', serverCmd: ['srv'], loader: null });
   assert.deepEqual(ours.mounts, [{ src: 'w', dst: '/work', ro: true }, { src: 't', dst: '/opt/surface', ro: true }]);
