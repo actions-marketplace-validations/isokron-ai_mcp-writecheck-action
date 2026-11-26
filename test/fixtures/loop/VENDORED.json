@@ -12,8 +12,9 @@
   },
   "registry": {
     "repo": "isokron-ai/mcp-results",
-    "commit": "f2b16de2606d3b762def367be914ad7cae0ea24e",
+    "commit": "8c31509daa771820084a1f7c522a5069ff81b0c0",
     "path": "fields/registry.yaml",
-    "sha256": "c79f5124d90bf5a8d2cb6e2e2a351228ceddc827ed52339990e9550a6b07d31f"
+    "sha256": "e6cde3e16f0de30691c76b55b729734b04d0b7763084cff33f9e50a063eb5562",
+    "note": "The field registry tool-qa main's ingest pins (ingest/registry.mjs REGISTRY_COMMIT), the one live results are judged against. The copy at WORKER_KIT_REF pins f2b16de, which differs from it only in status labels (planned -> active) and fields this lane does not write; no field this lane writes changed type or was deprecated."
   }
 }

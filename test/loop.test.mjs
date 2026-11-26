@@ -18,7 +18,7 @@ import { findRunFolder, observations, planHash, publicSummary, readCatalog, read
 import { BundleFiles, buildMeta, forgeryVerdict, hasIdentityKeys, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from '../loop/bundle.mjs';
 import { evaluateGuard, laneVariable, main as guardMain, refProblem } from '../loop/guard.mjs';
 import { SKIP_FAULTS, buildManifest, resultFault, validateManifest } from './fixtures/loop/tool-qa/worker-kit/contract.mjs';
-import { REASON_FAULT, installFault, itemSkips } from '../loop/skips.mjs';
+import { REASON_FAULT, entryErrorCode, installFault, itemSkips } from '../loop/skips.mjs';
 import { checkBundle } from './fixtures/loop/tool-qa/ingest/forgery.mjs';
 import { parseRegistry, validateObservations } from './fixtures/loop/tool-qa/ingest/registry.mjs';
 
@@ -502,7 +502,7 @@ function everySkipPath(fixtures) {
     not_started: itemSkips({ resolved: resolveSubject('acme/npm-server', { seed: SEED, fixtures }), notStarted: true }),
     harness: itemSkips({ resolved: {}, res: { error: 'harness', install: null, fullRan: false }, stages: {} }),
     install_failed: itemSkips({ resolved: {}, res: { error: null, install: inst(), fullRan: false } }),
-    install_404: itemSkips({ resolved: {}, res: { error: null, install: inst(), fullRan: false }, installLog: 'npm error code E404\nnpm error 404 Not Found' }),
+    install_404: itemSkips({ resolved: {}, res: { error: null, install: inst({ kind: 'npm', scripts: false }), fullRan: false }, installLog: 'npm error code E404\nnpm error 404 Not Found' }),
     install_timeout: itemSkips({ resolved: {}, res: { error: null, install: inst({ timed_out: true }), fullRan: false } }),
     third_party_ran: itemSkips({ resolved: {}, res: { error: null, install: { ok: true }, fullRan: false }, unit: { init: true, full: null }, stages: ran }),
     fixture_http_init: itemSkips({ resolved: {}, res: { error: null, install: { ok: true }, fullRan: true }, unit: { init: false, full: {} }, stages: { plan: true, catalog: true } }),
@@ -552,28 +552,91 @@ test('R-WC-25: a harness error is our own tool_error (retryable), not somebody e
 });
 
 test('R-WC-26: an install failure is the subject\'s only with a package-level error in its own output; our limits are the tool\'s', () => {
-  const inst = (o = {}) => ({ ok: false, timed_out: false, steps: [{ name: 'install', exit: 1, timed_out: false }], egress: [], ...o });
-  assert.equal(installFault(inst(), 'npm error code E404\n'), 'subject');
-  assert.equal(installFault(inst(), 'npm ERR! code ETARGET\n'), 'subject');
-  assert.equal(installFault(inst(), 'ERROR: No matching distribution found for acme-mcp\n'), 'subject');
-  assert.equal(installFault(inst(), 'ERROR: Could not find a version that satisfies the requirement acme-mcp\n'), 'subject');
-  // The package installed but declares nothing to run.
-  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 1 }] })), 'subject');
-  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 0 }] })), 'subject');
+  const npm = (o = {}) => ({ kind: 'npm', scripts: false, ok: false, timed_out: false, steps: [{ name: 'install', exit: 1, timed_out: false }], egress: [], ...o });
+  const pypi = (o = {}) => ({ kind: 'pypi', package: 'acme-mcp', ok: false, timed_out: false, steps: [{ name: 'venv', exit: 0 }, { name: 'install', exit: 1, timed_out: false }], egress: [], ...o });
+  const NOT_FOUND = 'ERROR: Could not find a version that satisfies the requirement acme-mcp (from versions: none)\nERROR: No matching distribution found for acme-mcp\n';
+  assert.equal(installFault(npm(), 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/acme\n'), 'subject');
+  assert.equal(installFault(npm(), 'npm ERR! code ETARGET\nnpm ERR! notarget No matching version\n'), 'subject');
+  assert.equal(installFault(pypi(), NOT_FOUND), 'subject');
+  // The package declares nothing to run at all.
+  assert.equal(installFault(npm({ steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 1 }], entry_error: 'declares_no_bin' })), 'subject');
   // Ours: no evidence, a native build, our proxy refusing a host, our time limit, our memory limit (137) or timeout (124).
-  assert.equal(installFault(inst(), 'gyp ERR! build error\n'), 'tool');
-  assert.equal(installFault(inst(), ''), 'tool');
-  assert.equal(installFault(inst({ egress: [{ host: 'github.com', allowed: false }] }), 'npm error code E404\n'), 'tool');
-  assert.equal(installFault(inst({ timed_out: true }), 'npm error code E404\n'), 'tool');
-  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 137 }] })), 'tool');
-  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 124 }] })), 'tool');
-  assert.equal(installFault(inst({ steps: [{ name: 'install', exit: 1, timed_out: true }] }), 'npm error code E404\n'), 'tool');
+  assert.equal(installFault(npm(), 'gyp ERR! build error\n'), 'tool');
+  assert.equal(installFault(npm(), ''), 'tool');
+  assert.equal(installFault(npm({ egress: [{ host: 'github.com', allowed: false }] }), 'npm error code E404\n'), 'tool');
+  assert.equal(installFault(npm({ timed_out: true }), 'npm error code E404\n'), 'tool');
+  assert.equal(installFault(npm({ steps: [{ name: 'install', exit: 137 }] })), 'tool');
+  assert.equal(installFault(npm({ steps: [{ name: 'install', exit: 124 }] })), 'tool');
+  assert.equal(installFault(npm({ steps: [{ name: 'install', exit: 1, timed_out: true }] }), 'npm error code E404\n'), 'tool');
   assert.equal(installFault(null), 'tool');
   // Through itemSkips: the same evidence decides the skips' fault.
   const paths = everySkipPath(loadFixtures(join(root, 'loop', 'fixtures.json')));
   assert.deepEqual([...new Set(paths.install_404.skips.map((s) => `${s.reason}:${s.fault}`))], ['install_failed_registry:subject']);
   assert.deepEqual([...new Set(paths.install_failed.skips.map((s) => `${s.reason}:${s.fault}`))], ['install_failed_registry:tool']);
   assert.deepEqual([...new Set(paths.install_timeout.skips.map((s) => `${s.reason}:${s.fault}`))], ['timeout_start:tool']);
+});
+
+test('R-WC-30: an entry step failure is the subject\'s only when the package declares nothing to run; every other entry answer is ours', () => {
+  // The helper's answers (msc sandbox/npm-entry.mjs at 4c16b58), as codes.
+  assert.equal(entryErrorCode({ error: 'the package declares no bin' }, 1), 'declares_no_bin');
+  assert.equal(entryErrorCode({ error: 'the package has no bin of that name' }, 1), 'no_bin_of_that_name');
+  assert.equal(entryErrorCode({ error: 'the installed package has no readable package.json: ENOENT' }, 1), 'entry_failed');
+  assert.equal(entryErrorCode({ error: 'the bin script is not in the package' }, 1), 'entry_failed');
+  assert.equal(entryErrorCode({ error: 'the bin script points outside the package' }, 1), 'entry_failed');
+  assert.equal(entryErrorCode(null, 1), 'entry_failed');
+  // Docker, the image or a crash, not the helper's answer; and an exit 0 whose answer did not parse.
+  for (const code of [125, 126, 127, 139, 2, null]) assert.equal(entryErrorCode({ error: 'the package declares no bin' }, code), 'entry_crashed', String(code));
+  assert.equal(entryErrorCode({ script: 'elsewhere' }, 0), 'entry_unreadable');
+  const at = (entry_error, exit = 1) => installFault({ kind: 'npm', scripts: false, ok: false, steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit }], egress: [], entry_error });
+  assert.equal(at('declares_no_bin'), 'subject');
+  // The bin name comes from our mapping (the seed, the registry, a fixture), not from the package: ours.
+  for (const e of ['no_bin_of_that_name', 'entry_failed', 'entry_crashed', 'entry_unreadable']) assert.equal(at(e), 'tool', e);
+  assert.equal(at('entry_crashed', 139), 'tool');
+  // An entry step that failed without a code, or a failure with every step at 0, is no evidence.
+  assert.equal(installFault({ kind: 'npm', scripts: false, ok: false, steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 1 }], egress: [] }), 'tool');
+  assert.equal(installFault({ kind: 'npm', scripts: false, ok: false, steps: [{ name: 'install', exit: 0 }, { name: 'entry', exit: 0 }], egress: [] }), 'tool');
+  // The driver passes the helper's answer on as a code (its stdout is not in the install log).
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  assert.match(src, /if \(!entry\) inst\.entry_error = entryErrorCode\(j, r\.exit\);/);
+});
+
+test('R-WC-31: install output counts as evidence only where no code of the package could have written it, and only about the package', () => {
+  const npm = (o = {}) => ({ kind: 'npm', scripts: false, ok: false, steps: [{ name: 'install', exit: 1 }], egress: [], ...o });
+  const pypi = (o = {}) => ({ kind: 'pypi', package: 'acme-mcp', ok: false, steps: [{ name: 'venv', exit: 0 }, { name: 'install', exit: 1 }], egress: [], ...o });
+  const E404 = 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/acme\nnpm error A complete log of this run can be found in: /work/home/.npm/_logs/x.log\n';
+  // npm with lifecycle scripts on: a script could print anything, so nothing it printed counts.
+  assert.equal(installFault(npm({ scripts: true }), E404), 'tool');
+  assert.equal(installFault(npm({ scripts: undefined }), E404), 'tool', 'unknown whether scripts ran: no evidence');
+  // Scripts off: only npm's final error block counts; an E404 line earlier (a deprecation notice with a newline in it,
+  // a dependency's warning) followed by another failure does not.
+  assert.equal(installFault(npm(), E404), 'subject');
+  assert.equal(installFault(npm(), `npm warn deprecated acme@1.0.0: x\nnpm error code E404\nnpm warn something\nnpm error code EBADENGINE\nnpm error engine Unsupported engine\n`), 'tool');
+  assert.equal(installFault(npm(), 'npm warn deprecated acme@1: see\nnpm error code E404 (forged in a message)\nnpm error code 1\n'), 'tool');
+  assert.equal(installFault(npm(), `${E404}npm warn later output\n`), 'tool');
+  // Our own lines after npm's (a network name, a container id) do not matter.
+  assert.equal(installFault(npm(), `${E404}surface-abc-i0-in\n`), 'subject');
+  // pip: "(from versions: none)" and "no matching distribution" for the package itself, nothing else in the way.
+  const NOT_FOUND = 'ERROR: Could not find a version that satisfies the requirement acme-mcp (from versions: none)\nERROR: No matching distribution found for acme-mcp\n';
+  assert.equal(installFault(pypi(), NOT_FOUND), 'subject');
+  assert.equal(installFault(pypi({ package: 'Acme_MCP' }), NOT_FOUND), 'subject', 'names compared as pip normalises them');
+  // pip's own connection retries before the same lines (a proxy outage, DNS, a timeout: no refusal record).
+  assert.equal(installFault(pypi(), `WARNING: Retrying (Retry(total=4, connect=None, read=None, redirect=None, status=None)) after connection broken by 'ProxyError('Cannot connect to proxy.')': /simple/acme-mcp/\n${NOT_FOUND}`), 'tool');
+  assert.equal(installFault(pypi(), `WARNING: Max retries exceeded with url: /simple/acme-mcp/\n${NOT_FOUND}`), 'tool');
+  assert.equal(installFault(pypi(), `Temporary failure in name resolution\n${NOT_FOUND}`), 'tool');
+  // A Python-version mismatch: the package exists, our image's Python is not one it supports.
+  assert.equal(installFault(pypi(), 'ERROR: Ignored the following versions that require a different python version: 1.0 Requires-Python >=3.14\nERROR: Could not find a version that satisfies the requirement acme-mcp (from versions: none)\nERROR: No matching distribution found for acme-mcp\n'), 'tool');
+  // Versions exist but none fits: not proven to be the package's.
+  assert.equal(installFault(pypi(), 'ERROR: Could not find a version that satisfies the requirement acme-mcp (from versions: 0.1, 0.2)\nERROR: No matching distribution found for acme-mcp\n'), 'tool');
+  // About a dependency, or after a build of anything ran (a setup.py could print the same lines).
+  assert.equal(installFault(pypi(), 'ERROR: Could not find a version that satisfies the requirement other-dep (from versions: none)\nERROR: No matching distribution found for other-dep\n'), 'tool');
+  assert.equal(installFault(pypi(), `  Preparing metadata (pyproject.toml): started\n${NOT_FOUND}`), 'tool');
+  assert.equal(installFault(pypi(), `Building wheel for acme-mcp (pyproject.toml)\n${NOT_FOUND}`), 'tool');
+  // The old loose patterns alone are no longer evidence.
+  assert.equal(installFault(pypi(), 'ERROR: No matching distribution found for acme-mcp\n'), 'tool');
+  assert.equal(installFault({ kind: 'cargo', ok: false, steps: [{ name: 'install', exit: 101 }], egress: [] }, 'npm error code E404\n'), 'tool');
+  // The driver records whether npm ran scripts, and the package asked for.
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  assert.match(src, /const scripts = u\.launch\.kind === 'npm' \? !plan\.install\.some\(\(st\) => st\.name === 'install' && st\.cmd\.includes\('--ignore-scripts'\)\) : null;/);
 });
 
 test('R-WC-12: a root that is not a folder (a file, a FIFO where the output folder was) is refused with its own documented error', () => {

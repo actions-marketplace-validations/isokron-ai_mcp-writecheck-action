@@ -6,8 +6,9 @@
 // but never said to be ours.
 //
 // A subject is put down as at fault only with evidence our own environment cannot explain: a package-level error in
-// its own install output (no such package or version, no bin). Anything else that stops an install (our proxy refused
-// a host, our time or memory limit, a native build in our image) is ours.
+// its own install output that no code of the package could have printed (no such package or version), or a package
+// that declares nothing to run. Anything else that stops an install (our proxy refused a host, our time or memory
+// limit, a native build in our image, an entry answer of ours, no evidence) is ours.
 //
 // Only Node's standard library.
 
@@ -26,19 +27,70 @@ export const REASON_FAULT = Object.freeze({
 });
 
 /**
- * Package-level errors in an install's own output: the registry has no such package or version, or the package has
- * nothing to run. Only these put an install failure down to the subject.
+ * The entry step's own answer, as a code (R-WC-30). msc's sandbox/npm-entry.mjs prints { error: <sentence> } and exits 1;
+ * its stdout is kept out of the install log, so the driver passes this code on (run-items.mjs install). Only
+ * "declares_no_bin" (no bin field and no main at all, and no bin name asked for) is the package's own lack; a bin of
+ * another name (the name comes from our mapping, not from the package), a package.json we could not read, a bin
+ * outside the package, any other exit code (125, 126, 127, 139: Docker, the image, a crash) or an answer that does not
+ * parse is ours.
  */
-export const SUBJECT_INSTALL_ERRORS = Object.freeze([
-  /npm (?:ERR!|error) code (?:E404|ETARGET|ENOVERSIONS)\b/,
-  /\bNo matching distribution found for\b/,
-  /\bCould not find a version that satisfies the requirement\b/,
-]);
+export function entryErrorCode(j, exit) {
+  if (exit !== 1 && exit !== 0) return 'entry_crashed';
+  if (exit === 0) return 'entry_unreadable';
+  const e = typeof j?.error === 'string' ? j.error : null;
+  if (e === 'the package declares no bin') return 'declares_no_bin';
+  if (e === 'the package has no bin of that name') return 'no_bin_of_that_name';
+  return 'entry_failed';
+}
+
+/** Whose each entry code is: only the package's own lack of anything to run is the subject's. */
+export const ENTRY_FAULT = Object.freeze({
+  declares_no_bin: 'subject',
+});
+
+/** Signs in an install's output that the network, a proxy, or pip's Python-version filter got in the way. */
+const PIP_NOT_THE_PACKAGE = /Retrying|Connection|Max retries|Temporary failure|Ignored the following versions|ProxyError|SSLError|timed out|Read timed out|ConnectTimeout|Name or service not known|Could not fetch URL/i;
+/** Signs that code of the package (or of a dependency) ran during the pip install: a build backend, setup.py. */
+const PIP_CODE_RAN = /Building wheel|Preparing metadata|Getting requirements to build|Running setup\.py|Installing build dependencies|Building editable/i;
+const pipName = (n) => String(n).toLowerCase().replace(/[-_.]+/g, '-');
 
 /**
- * The fault of a failed install: `tool` when our proxy refused a host the install asked for, or our time limit or
- * memory limit stopped it; `subject` when its entry step found nothing to run or its output shows a package-level
- * error (SUBJECT_INSTALL_ERRORS); else `tool` (a native build, an engine mismatch, anything without evidence).
+ * Whether an install's own output proves a package-level error (R-WC-31), read only where no code of the package could
+ * have written it:
+ *   npm, with install scripts off only: the final error block npm printed (the last contiguous run of "npm error" lines)
+ *     carries code E404, ETARGET or ENOVERSIONS. With scripts on, a lifecycle script could print anything: no evidence.
+ *   PyPI: pip says "(from versions: none)" and "No matching distribution found for <the package itself>", no build of
+ *     anything ran, and nothing shows the network, the proxy or a Python-version filter in the way.
+ */
+export function packageErrorShown(inst, logText) {
+  const text = String(logText ?? '').slice(-256 * 1024);
+  if (inst?.kind === 'npm') {
+    if (inst.scripts !== false) return false;
+    const lines = text.split('\n').map((l) => l.replace(/\r$/, ''));
+    const isErr = (l) => /^npm (?:ERR!|error) /.test(l);
+    let last = -1;
+    for (let i = lines.length - 1; i >= 0; i--) if (isErr(lines[i])) { last = i; break; }
+    if (last < 0) return false;
+    let first = last;
+    while (first > 0 && isErr(lines[first - 1])) first--;
+    // Nothing npm printed after its error block.
+    if (lines.slice(last + 1).some((l) => /^npm /.test(l))) return false;
+    return lines.slice(first, last + 1).some((l) => /^npm (?:ERR!|error) code (?:E404|ETARGET|ENOVERSIONS)$/.test(l));
+  }
+  if (inst?.kind === 'pypi') {
+    if (PIP_NOT_THE_PACKAGE.test(text) || PIP_CODE_RAN.test(text)) return false;
+    const m = /^ERROR: No matching distribution found for ([A-Za-z0-9._-]+)\s*$/m.exec(text);
+    if (!m || !inst.package || pipName(m[1]) !== pipName(inst.package)) return false;
+    return new RegExp(`^ERROR: Could not find a version that satisfies the requirement ${m[1].replace(/[.]/g, '\\.')} \\(from versions: none\\)\\s*$`, 'm').test(text);
+  }
+  return false;
+}
+
+/**
+ * The fault of a failed install: `subject` only for the package's own lack (ENTRY_FAULT) or a package-level error its
+ * output proves (packageErrorShown); everything else is `tool`: our proxy refusing a host, our time or memory limit,
+ * a container that died, a native build, an entry answer of ours, and any failure without evidence (R-WC-26, R-WC-30,
+ * R-WC-31).
  */
 export function installFault(inst, logText = '') {
   if (!inst) return 'tool';
@@ -46,12 +98,9 @@ export function installFault(inst, logText = '') {
   if (inst.timed_out) return 'tool';
   const failed = (inst.steps ?? []).find((s) => s.exit !== 0) ?? null;
   if (failed && (failed.timed_out || failed.exit === 124 || failed.exit === 137)) return 'tool';
-  // The entry helper ran and the package declares no bin it could start (msc sandbox/npm-entry.mjs).
-  if (failed === null && (inst.steps ?? []).some((s) => s.name === 'entry')) return 'subject';
-  if (failed && failed.name === 'entry') return 'subject';
-  const text = String(logText).slice(-256 * 1024);
-  if (SUBJECT_INSTALL_ERRORS.some((re) => re.test(text))) return 'subject';
-  return 'tool';
+  if (inst.entry_error) return ENTRY_FAULT[inst.entry_error] ?? 'tool';
+  if (!failed || failed.name !== 'install') return 'tool';
+  return packageErrorShown(inst, logText) ? 'subject' : 'tool';
 }
 
 /**

@@ -41,7 +41,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, isProofLane, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
 import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
 import { dockerPlatform, extractBinaryImage } from './binary-image.mjs';
-import { itemSkips } from './skips.mjs';
+import { entryErrorCode, itemSkips } from './skips.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -267,7 +267,10 @@ class Shard {
     }
     const image = this.images[plan.image];
     await this.dk.image(image, plan.image);
-    const inst = { kind: u.launch.kind, steps: [], ok: false, image: plan.image, resolved_version: null, egress: [] };
+    // R-WC-31: whether code of the package could run during the install (npm lifecycle scripts), so its output may say
+    // anything; and the package asked for, so pip's "no matching distribution" can be checked to be about it.
+    const scripts = u.launch.kind === 'npm' ? !plan.install.some((st) => st.name === 'install' && st.cmd.includes('--ignore-scripts')) : null;
+    const inst = { kind: u.launch.kind, steps: [], ok: false, image: plan.image, resolved_version: null, egress: [], ...(scripts === null ? {} : { scripts }), ...(typeof u.launch.package === 'string' ? { package: u.launch.package } : {}) };
     const registries = [...plan.registries];
     const inNet = await this.dk.network(`surface-${this.runId}-${u.tag}-in`, true, u.tag, { sandbox: 'install' });
     const netlog = await M.startNetlogOn(u.tdk, { net: 'install', network: inNet, image: this.images.node24, toolsVol: this.toolsVol, labels: this.dk.labels(u.tag), target: u.tag });
@@ -311,6 +314,8 @@ class Shard {
           let j = null;
           try { j = JSON.parse(r.stdout.toString('utf8')); } catch { /* checked below */ }
           entry = j && typeof j.script === 'string' && j.script.startsWith('/work/pkg/') && !/[\u0000\n]/.test(j.script) ? j : null;
+          // R-WC-30: the entry helper's answer is kept out of the install log; its code decides whose a failure is.
+          if (!entry) inst.entry_error = entryErrorCode(j, r.exit);
         }
         if (r.exit !== 0 || (step.name === 'entry' && !entry)) { ok = false; if (r.timed_out) inst.timed_out = true; break; }
       }
@@ -663,7 +668,7 @@ async function runItem(ctx, item, deadline) {
     // The last item may finish at most ITEM_GRACE_MS past the shard deadline, so the job ends inside its
     // timeout-minutes and the pump's lease (corpus.yml): items 26 + 5 min, plus prepare and teardown.
     try { res = await shard.runUnit(u, Math.min(deadline + ITEM_GRACE_MS, Date.now() + 20 * 60_000)); } finally { shard.tel = shardTel; }
-    driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress) } : null;
+    driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress), ...(res.install.entry_error ? { entry_error: res.install.entry_error } : {}) } : null;
     driver.error = res.error;
     if (u.binaryInfo) driver.binary_image = u.binaryInfo;
     if (u.proofPlan) { driver.plan_accepted = false; driver.proof_plan_hash = u.acceptedHash; }
@@ -712,6 +717,7 @@ async function runItem(ctx, item, deadline) {
  */
 export function actionSha(env, head) {
   const h = /^[0-9a-f]{40}$/.test(String(head ?? '')) ? head : null;
+  // "local" proves no commit: under tool-qa's pin_check "enforce" such a result is refused (pin_unverified).
   if (env.ACTION_SHA === undefined || env.ACTION_SHA === '') return h ?? 'local';
   if (!/^[0-9a-f]{40}$/.test(env.ACTION_SHA)) throw new InputError('ACTION_SHA must be a full commit SHA');
   if (env.ACTION_SHA !== h) throw new InputError('ACTION_SHA is not the commit checked out');
