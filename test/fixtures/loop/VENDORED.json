@@ -1,19 +1,20 @@
 {
   "repo": "isokron-ai/tool-qa",
-  "commit": "b1f25a9b0b7655f45eb353f31562a93d9319d5a4",
+  "commit": "2ffcea16117ec679398f83eefe8c6fa66d38bac6",
   "note": "Copies of tool-qa's result contract and ingest checks at the commit the workflows pin, for test/loop.test.mjs only. Refresh together with WORKER_KIT_REF.",
   "files": {
     "ingest/forgery.mjs": "8202428bac527ba107df1e0d9dd11e76b4db24011c9e834961d41915f2464aa4",
     "ingest/redact.mjs": "a64664309095bd46718634dc33f0b1a1a86c3e2407ef8f0c9f7170562b303746",
-    "ingest/registry.mjs": "3ac157d5db73d8387f8d77b3408e1da278c9af2d4ccb72e232009cbf824e9a37",
+    "ingest/registry.mjs": "466f233852a3c635092efa94e281c80cfe070eca3f7a4df1fbe6a946b89640bb",
     "scripts/lib/yaml-lite.mjs": "d92162877ea957fef3c8b30170d9e2e23732fec3c43a51d3e55254f78fcf8289",
-    "worker-kit/contract.mjs": "74cf597cd6ca32feb897ad7d73742fbc9f1eba5da733e9f21c76a612880d4f47",
-    "worker-kit/manifest.schema.json": "772d3fbe83145c09e03d8eaaf7f5a6d5474b8bc0daa72dad91c16c3d3e7867ee"
+    "worker-kit/contract.mjs": "9cbaf584a26986d3e4727f0a629d8684110c6b8b8c073df09478eb2f7b1ea1c2",
+    "worker-kit/manifest.schema.json": "6a3be623f62b0a3601db9cce8b95ed63b72d2c909cf84f5b9116648bd97af1f4"
   },
   "registry": {
     "repo": "isokron-ai/mcp-results",
-    "commit": "d995bf6e235701503e58b7ee8b8b9736d3817bd5",
+    "commit": "8c31509daa771820084a1f7c522a5069ff81b0c0",
     "path": "fields/registry.yaml",
-    "sha256": "2efd164ccd6f98c908199e5961ed62039e66e14035c53712197cc3974d7aaeb5"
+    "sha256": "e6cde3e16f0de30691c76b55b729734b04d0b7763084cff33f9e50a063eb5562",
+    "note": "The field registry tool-qa main's ingest pins (ingest/registry.mjs REGISTRY_COMMIT), the one live results are judged against. The copy at WORKER_KIT_REF pins f2b16de, which differs from it only in status labels (planned -> active) and fields this lane does not write; no field this lane writes changed type or was deprecated."
   }
 }

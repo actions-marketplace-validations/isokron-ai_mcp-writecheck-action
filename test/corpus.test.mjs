@@ -858,6 +858,16 @@ test('TB-4: withRetry tries a failed install once more, and never after a time l
   assert.equal(meta.install_retries, undefined);
 });
 
+test('R-WC-10: a loop device with another filesystem than ext4 is not the cap the sandbox guard sets up', () => {
+  const dr = '/var/lib/isokron-docker';
+  const line = (mp, fstype, src) => `501 29 7:0 / ${mp} rw,nosuid,nodev,relatime shared:1 - ${fstype} ${src} rw`;
+  // Each is loop-backed, so only the filesystem type tells it from the guard's own ext4 (dropping that clause lets them pass).
+  for (const fstype of ['xfs', 'btrfs', 'squashfs', 'iso9660', 'vfat']) {
+    assert.match(volumeCapProblem(dr, line(`${dr}/volumes`, fstype, '/dev/loop4')), new RegExp(`it is ${fstype} on /dev/loop4`), fstype);
+  }
+  assert.equal(volumeCapProblem(dr, line(`${dr}/volumes`, 'ext4', '/dev/loop4')), null);
+});
+
 test('R-WC-10: the CI lane refuses to run unless Docker\'s volumes folder is a capped filesystem of its own', () => {
   const dr = '/var/lib/isokron-docker';
   const line = (mp, fstype, src) => `501 29 7:0 / ${mp} rw,nosuid,nodev,relatime shared:1 - ${fstype} ${src} rw`;

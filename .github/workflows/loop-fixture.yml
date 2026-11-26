@@ -2,8 +2,11 @@
 # steps as the worker, in the same order (test/loop-workflow.test.mjs checks they match), on a fixture shard of
 # IsoKron's own servers: tiny-tracker (isokron-ai/mcp-write-safety; catalog, plan and the full write test against
 # its in-sandbox backend), kronicle-lite (catalog, plan and the full write test on its own data folder),
-# mcp-check (the generic path from tool-qa's seed: the latest npm version, init, plan and catalog) and a subject
-# with no npm or PyPI package (its skips). The worker-kit then builds each bundle in a dry run (no encryption, no
+# mcp-check (the generic path from tool-qa's seed: the latest npm version, init, plan and catalog), a subject
+# with no npm or PyPI package (its skips) and pg-tracker (the fixture of this repository, whose backend is a real
+# PostgreSQL server that the sandbox container starts for the full write test: catalog, plan and the full write
+# test, every result labelled hermetic; its subject is its own, <repository>.pg-tracker, which the pump's seed does not list) and
+# redis-tracker (the same, over a real Redis whose redis-server comes from a digest-pinned official image). The worker-kit then builds each bundle in a dry run (no encryption, no
 # upload), and loop/check-bundles.mjs judges each one with tool-qa's own ingest code at the pinned commit: every
 # bundle must be accepted, with its controls passed, and each fixture must show what it is known to show.
 #
@@ -29,16 +32,19 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  SANDBOX_REF: '4c16b586e8e5886acb098285b6ec405fd4db4ac7'
+  WORKER_KIT_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
+  SEED_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
+  SANDBOX_REF: '11974fbb75a8c276214c887a079d6ad6df374124'
+  # isokron-ai/mcp-check at the commit tool-qa's live-probe lane runs (pump/workflows.json, live-probe versions.tool): its
+  # resolver chooses an OCI subject's image for this lane too (loop/launch.mjs, WC14), so both lanes run the same image.
+  MCP_CHECK_REF: '116b0ca841dec25116b3b3b7d6f3ce7286fd198f'
 
 jobs:
   conformance:
     if: github.event.pull_request.head.repo.full_name == github.repository
     permissions:
       contents: read
-    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@4c16b586e8e5886acb098285b6ec405fd4db4ac7 # SANDBOX_REF
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@11974fbb75a8c276214c887a079d6ad6df374124 # SANDBOX_REF
     with:
       mutations: false
       artifact-prefix: loop-fixture-conformance
@@ -57,15 +63,27 @@ jobs:
         run: |
           shard="fixture-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           key() { printf '%s' "$1-$shard" | sha256sum | cut -d' ' -f1; }
-          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)")
+          items=$(printf '[{"subject":"isokron-ai/mcp-write-safety","run_key":"%s","fence":1},{"subject":"isokron-ai/kronicle-lite","run_key":"%s","fence":2},{"subject":"isokron-ai/mcp-check","run_key":"%s","fence":3},{"subject":"isokron-ai/strapi-plugin-writesafe","run_key":"%s","fence":4},{"subject":"isokron-ai/mcp-writecheck-action.pg-tracker","fixture":"pg-tracker","run_key":"%s","fence":5},{"subject":"isokron-ai/mcp-writecheck-action.redis-tracker","fixture":"redis-tracker","run_key":"%s","fence":6}]' "$(key tt)" "$(key kl)" "$(key mc)" "$(key sw)" "$(key pg)" "$(key rd)")
           {
             echo "shard_id=$shard"
             echo "attempt_id=$shard"
             echo "items=$items"
+            echo "tool_sha="
           } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ steps.inputs.outputs.tool_sha || github.sha }}
+      # tool-qa R-PIN-01 (R-WC-28): the lane code is the commit the pump pinned (tool_sha), else this run's own commit; the
+      # job stops unless the checkout is exactly that commit, and the driver reports it as the mcp-writecheck-action that ran.
+      - name: The checkout is the commit to run
+        env:
+          TOOL_SHA: ${{ steps.inputs.outputs.tool_sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          want="${TOOL_SHA:-$GITHUB_SHA}"
+          if [ "$head" != "$want" ]; then echo "::error title=writecheck::the checkout is not the commit to run"; exit 1; fi
+          echo "ACTION_SHA=$head" >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -83,7 +101,7 @@ jobs:
       # unless the telemetry check recomputes a pass.
       - id: sandbox
         name: Sandbox guard (gVisor, firewall, self test)
-        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@4c16b586e8e5886acb098285b6ec405fd4db4ac7 # SANDBOX_REF
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@11974fbb75a8c276214c887a079d6ad6df374124 # SANDBOX_REF
       - name: The guard ran the pinned sandbox and passed
         env:
           VERDICT: ${{ steps.sandbox.outputs.verdict }}
@@ -98,20 +116,25 @@ jobs:
           SHARD_ID: ${{ steps.inputs.outputs.shard_id }}
           ATTEMPT_ID: ${{ steps.inputs.outputs.attempt_id }}
           ITEMS: ${{ steps.inputs.outputs.items }}
-        run: node loop/run-items.mjs --msc msc --cli "$MWSC_CLI_PATH" --seed toolqa/history/seed-v1.json --out "$RUNNER_TEMP/wc" --lane ci
+        run: |
+          # --mck only when the checkout's own loop/prepare.sh fetched the resolver: this YAML runs from main while the
+          # lane code may be an older pinned commit (tool_sha), whose driver does not take --mck (WC14).
+          mck=(); if [ -d mck/corpus ]; then mck=(--mck mck); fi
+          node loop/run-items.mjs --msc msc "${mck[@]}" --cli "$MWSC_CLI_PATH" --seed toolqa/history/seed-v1.json --out "$RUNNER_TEMP/wc" --lane ci
       - id: teardown
         name: End the sandbox before anything is sealed
         if: ${{ !cancelled() }}
         run: loop/teardown.sh
-      - name: Loop unit tests against the pinned sandbox's exports
+      - name: Loop unit tests against the pinned sandbox's and resolver's exports
         if: ${{ !cancelled() }}
         env:
           MSC_DIR: msc
-        run: node --test test/loop.test.mjs
+          MCK_DIR: mck
+        run: node --test test/loop.test.mjs test/launch.test.mjs
       - id: kit0
         name: Build bundle 0 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_0 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/0/bundle
           meta-file: ${{ runner.temp }}/wc/0/meta.json
@@ -123,7 +146,7 @@ jobs:
       - id: kit1
         name: Build bundle 1 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_1 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/1/bundle
           meta-file: ${{ runner.temp }}/wc/1/meta.json
@@ -135,7 +158,7 @@ jobs:
       - id: kit2
         name: Build bundle 2 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_2 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/2/bundle
           meta-file: ${{ runner.temp }}/wc/2/meta.json
@@ -147,7 +170,7 @@ jobs:
       - id: kit3
         name: Build bundle 3 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_3 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/3/bundle
           meta-file: ${{ runner.temp }}/wc/3/meta.json
@@ -155,6 +178,30 @@ jobs:
           item-index: '3'
           fence: ${{ steps.run.outputs.fence_3 }}
           run-key: ${{ steps.run.outputs.run_key_3 }}
+          dry-run: 'true'
+      - id: kit4
+        name: Build bundle 4 (dry run)
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_4 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/4/bundle
+          meta-file: ${{ runner.temp }}/wc/4/meta.json
+          attempt-id: ${{ steps.inputs.outputs.attempt_id }}
+          item-index: '4'
+          fence: ${{ steps.run.outputs.fence_4 }}
+          run-key: ${{ steps.run.outputs.run_key_4 }}
+          dry-run: 'true'
+      - id: kit5
+        name: Build bundle 5 (dry run)
+        if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_5 == 'true' }}
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
+        with:
+          bundle-dir: ${{ runner.temp }}/wc/5/bundle
+          meta-file: ${{ runner.temp }}/wc/5/meta.json
+          attempt-id: ${{ steps.inputs.outputs.attempt_id }}
+          item-index: '5'
+          fence: ${{ steps.run.outputs.fence_5 }}
+          run-key: ${{ steps.run.outputs.run_key_5 }}
           dry-run: 'true'
       - name: Fetch tool-qa's ingest at the pinned commit
         if: ${{ !cancelled() && steps.run.outputs.controls_ok == 'true' }}
@@ -174,6 +221,8 @@ jobs:
           BUNDLE_1: ${{ steps.kit1.outputs.bundle-path }}
           BUNDLE_2: ${{ steps.kit2.outputs.bundle-path }}
           BUNDLE_3: ${{ steps.kit3.outputs.bundle-path }}
+          BUNDLE_4: ${{ steps.kit4.outputs.bundle-path }}
+          BUNDLE_5: ${{ steps.kit5.outputs.bundle-path }}
         run: node loop/check-bundles.mjs --toolqa toolqa-ingest
       - name: Keep the plaintext bundles and the shard record (7 days)
         if: always()

@@ -32,7 +32,7 @@ function runBlocks(text) {
 }
 
 /** The shared part of the job: from the checkout to the teardown. */
-const shared = (t) => t.slice(t.indexOf('      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n      - uses: actions/setup-node'), t.indexOf('        run: loop/teardown.sh\n'));
+const shared = (t) => t.slice(t.indexOf('      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n          ref: '), t.indexOf('        run: loop/teardown.sh\n'));
 
 for (const [name, text] of [['corpus.yml', worker], ['loop-fixture.yml', fixture]]) {
   test(`${name}: permissions {} on top, timeouts, pinned actions, no secrets, no expressions in run`, () => {
@@ -50,24 +50,27 @@ for (const [name, text] of [['corpus.yml', worker], ['loop-fixture.yml', fixture
     const kit = b.match(/isokron-ai\/tool-qa\/worker-kit@([0-9a-f]{40})/g);
     const pin = /WORKER_KIT_REF: '([0-9a-f]{40})'/.exec(b)[1];
     for (const k of kit) assert.ok(k.endsWith(pin), 'every worker-kit step names WORKER_KIT_REF');
-    // R-WC-06, R-WC-09: the sandbox at 4c16b58 (capped volumes, data-root and logs; native builds from source; the guard tests the install network), the
+    // R-WC-06, R-WC-09: the sandbox at 11974fb (capped volumes, data-root and logs; native builds from source; the guard tests the install network), the
     // conformance workflow and the guard both at it.
     const sbx = /SANDBOX_REF: '([0-9a-f]{40})'/.exec(b)[1];
-    assert.equal(sbx, '4c16b586e8e5886acb098285b6ec405fd4db4ac7');
+    assert.equal(sbx, '11974fbb75a8c276214c887a079d6ad6df374124');
     assert.match(b, new RegExp(`\\n {4}uses: isokron-ai/mcp-surface-corpus/\\.github/workflows/sandbox-conformance\\.yml@${sbx} `));
     assert.match(b, new RegExp(`uses: isokron-ai/mcp-surface-corpus/sandbox-guard@${sbx} `));
     assert.match(b, /needs\.conformance\.outputs\.verdict == 'pass'/);
     assert.doesNotMatch(b, /prepare\.sh (sandbox|selftest)/);
-    const job = b.slice(b.lastIndexOf('\n  ', b.indexOf('timeout-minutes: 45')));
+    const at = b.indexOf('loop/run-items.mjs');
+    const heads = [...b.slice(0, at).matchAll(/^ {2}[a-z][a-z0-9-]*:$/gm)]; // job headers before the item runner
+    const job = b.slice(heads[heads.length - 1].index); // the job that runs the items
+    assert.ok(job.includes('sandbox-guard@'), 'the item job itself runs the guard');
     assert.ok(job.indexOf('sandbox-guard@') < job.indexOf('loop/run-items.mjs'), 'the guard runs on this runner before any target');
     assert.match(b, /SEED_REF: '[0-9a-f]{40}'/);
   });
 }
 
-test('corpus.yml: the pump\'s worker contract (dispatch only, three inputs, run name, guard first)', () => {
+test('corpus.yml: the pump\'s worker contract (dispatch only, four inputs, run name, guard first)', () => {
   const b = body(worker);
   assert.match(b, /^on:\n {2}workflow_dispatch:\n {4}inputs:\n {6}shard_id:\n[\s\S]*? {6}attempt_id:\n[\s\S]*? {6}items:\n/m);
-  assert.equal((b.match(/^ {6}[a-z_-]+:\n {8}description:/gm) ?? []).length, 3, 'exactly three inputs');
+  assert.equal((b.match(/^ {6}[a-z_-]+:\n {8}description:/gm) ?? []).length, 4, 'exactly four inputs (tool_sha, R-WC-28)');
   assert.doesNotMatch(b, /^ {2}(push|pull_request|schedule):/m);
   assert.match(b, /^run-name: shard \$\{\{ inputs\.shard_id \}\}$/m);
   const guard = b.slice(b.indexOf('\n  guard:'), b.indexOf('\n  writecheck:'));
@@ -92,7 +95,7 @@ test('corpus.yml: the pump\'s worker contract (dispatch only, three inputs, run 
 });
 
 test('loop-fixture.yml runs the worker\'s steps unchanged, on pull requests from this repository only', () => {
-  const norm = (t) => shared(t).replace(/steps\.inputs\.outputs\.(items|shard_id|attempt_id)/g, 'inputs.$1');
+  const norm = (t) => shared(t).replace(/steps\.inputs\.outputs\.(items|shard_id|attempt_id|tool_sha)/g, 'inputs.$1');
   assert.ok(shared(worker).length > 500);
   assert.equal(norm(fixture), shared(worker));
   const b = body(fixture);
@@ -107,4 +110,44 @@ test('corpus-batch.yml is the older hand-dispatched batch path, kept as it was',
   assert.match(b, /^name: corpus-batch$/m);
   assert.match(b, /^on:\n(?:\s*\n)*  workflow_dispatch:\n    inputs:\n      only:/m);
   assert.match(b, /corpus\/run-ci-shard\.sh/);
+});
+
+test('R-WC-13: the last item cannot outlast the writecheck job or the pump lease', async () => {
+  const { ITEM_GRACE_MS, SHARD_BUDGET_MS } = await import('../loop/run-items.mjs');
+  const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
+  // The running item's unit deadline is the shard deadline plus the grace constant, nothing longer.
+  assert.match(src, /runUnit\(u, Math\.min\(deadline \+ ITEM_GRACE_MS,/);
+  assert.doesNotMatch(src, /deadline \+ \d+ \* 60_000/);
+  const wf = readFileSync(join(root, '.github', 'workflows', 'corpus.yml'), 'utf8');
+  const job = wf.slice(wf.indexOf('\n  writecheck:'));
+  const timeout = Number(/timeout-minutes:\s*(\d+)/.exec(job)[1]);
+  const beforeT0 = 15; // checkout, guard (gVisor install and self test), CLI build, image pulls: measured worst case
+  const afterDeadline = 3 + 5; // host-side overhang of the last item (sweep, collect, start), then teardown and sealing
+  const worst = beforeT0 + SHARD_BUDGET_MS / 60_000 + ITEM_GRACE_MS / 60_000 + afterDeadline;
+  assert.ok(worst <= timeout, `worst case ${worst} min must fit in timeout-minutes ${timeout}`);
+  const lease = 1.5 * (12 + 10 * 2) + 10; // tool-qa pump/slots.mjs with writecheck setup_minutes 12 (tool-qa#66)
+  assert.ok(timeout < lease, `job timeout ${timeout} must be below the pump lease ${lease}`);
+});
+
+test('R-WC-28: the worker runs the commit the pump pins (tool_sha), checked whole, and stops unless the checkout is that commit', () => {
+  const b = body(worker);
+  // An optional input, empty by default, so a dispatch without it runs the dispatched ref as before.
+  assert.match(b, /\n {6}tool_sha:\n {8}description: [^\n]+\n {8}required: false\n {8}type: string\n {8}default: ''\n/);
+  const job = b.slice(b.indexOf('\n  writecheck:'));
+  const check = job.slice(job.indexOf('name: Check the inputs'), job.indexOf('uses: actions/checkout'));
+  assert.match(check, /TOOL_SHA: \$\{\{ inputs\.tool_sha \}\}/);
+  assert.match(check, /if \[ -n "\$TOOL_SHA" \] && \[\[ ! "\$TOOL_SHA" =~ \^\[0-9a-f\]\{40\}\$ \]\]; then [^\n]*exit 1; fi/);
+  // The job that runs the items checks out that commit (else its own) and proves it before anything of it runs.
+  for (const [name, text, expr] of [['corpus.yml', worker, 'inputs.tool_sha'], ['loop-fixture.yml', fixture, 'steps.inputs.outputs.tool_sha']]) {
+    const t = body(text);
+    const at = t.indexOf('uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n        with:\n          persist-credentials: false\n          ref: ');
+    assert.ok(at > 0, name);
+    const seg = t.slice(at, t.indexOf('loop/run-items.mjs', at));
+    assert.match(seg, new RegExp(`ref: \\$\\{\\{ ${expr.replace(/\./g, '\\.')} \\|\\| github\\.sha \\}\\}\\n`), name);
+    assert.match(seg, new RegExp(`TOOL_SHA: \\$\\{\\{ ${expr.replace(/\./g, '\\.')} \\}\\}`), name);
+    assert.match(seg, /head=\$\(git rev-parse HEAD\)\n\s*want="\$\{TOOL_SHA:-\$GITHUB_SHA\}"\n\s*if \[ "\$head" != "\$want" \]; then [^\n]*exit 1; fi\n\s*echo "ACTION_SHA=\$head" >> "\$GITHUB_ENV"/, name);
+    // The check comes right after the checkout, before Node is set up and before any of the checkout's code runs.
+    assert.ok(seg.indexOf('git rev-parse HEAD') < seg.indexOf('actions/setup-node'), name);
+    assert.ok(seg.indexOf('git rev-parse HEAD') < seg.indexOf('loop/items.mjs'), name);
+  }
 });

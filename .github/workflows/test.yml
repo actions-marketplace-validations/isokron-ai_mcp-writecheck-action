@@ -43,3 +43,73 @@ jobs:
               grep '# SKIP' "$TAP" | sed -E 's/^ *ok [0-9]+ - (.*) # SKIP (.*)$/- \1 (\2)/'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  # WC12: the PostgreSQL fixture of the writecheck loop against a real PostgreSQL on the runner (not the sandbox: that is
+  # loop-fixture.yml's job): the pinned CLI over the correct build and over each defect build, test/pg-fixture.test.mjs.
+  # The CLI is built first, from its own lockfile with install scripts off; only then are the fixture's dependencies
+  # installed (the platform package's install script links the PostgreSQL binaries' libraries). No secret, no service
+  # container: the database is a process of this job on 127.0.0.1.
+  pg-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Choose the CLI commit
+        run: dogfood/cli-ref.sh
+      - name: Fetch and build the CLI
+        run: |
+          git init -q mws-cli
+          git -C mws-cli remote add origin https://github.com/isokron-ai/mcp-write-safety.git
+          git -C mws-cli sparse-checkout set --no-cone /packages/writecheck/
+          git -C mws-cli -c protocol.version=2 fetch -q --depth 1 --filter=blob:none origin "$CLI_REF"
+          git -C mws-cli -c advice.detachedHead=false checkout -q FETCH_HEAD
+          dogfood/build-cli.sh
+      - name: Install the fixture's dependencies
+        working-directory: loop/fixtures/pg-tracker
+        run: npm ci --omit=dev --no-audit --no-fund --loglevel=error
+      - name: PostgreSQL fixture tests (known good, known bad)
+        env:
+          CLI_DIR: mws-cli/packages/writecheck
+          PG_LIVE_REQUIRED: "1"
+        run: node --test --test-reporter=spec test/pg-fixture.test.mjs
+
+  # WC13: the Redis fixture of the writecheck loop against a real redis-server on the runner (not the sandbox: that is
+  # loop-fixture.yml's job): the pinned CLI over the correct build and over each defect build, test/redis-fixture.test.mjs.
+  # The CLI is built first, from its own lockfile with install scripts off. The redis-server executable and the two OpenSSL
+  # libraries it links are copied out of the digest-pinned official image (loop/extract-binary.mjs: docker create, never
+  # start; every file checked against its sha256 in loop/fixtures.json) and checked again by the backend before each start.
+  # The fixture has no dependency to install. No secret, no service container: Redis is a process of this job on 127.0.0.1.
+  redis-fixture:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+      - name: Choose the CLI commit
+        run: dogfood/cli-ref.sh
+      - name: Fetch and build the CLI
+        run: |
+          git init -q mws-cli
+          git -C mws-cli remote add origin https://github.com/isokron-ai/mcp-write-safety.git
+          git -C mws-cli sparse-checkout set --no-cone /packages/writecheck/
+          git -C mws-cli -c protocol.version=2 fetch -q --depth 1 --filter=blob:none origin "$CLI_REF"
+          git -C mws-cli -c advice.detachedHead=false checkout -q FETCH_HEAD
+          dogfood/build-cli.sh
+      - name: Copy the pinned redis-server out of its image
+        run: node loop/extract-binary.mjs redis-tracker "$RUNNER_TEMP/redis-bin"
+      - name: Redis fixture tests (known good, known bad)
+        env:
+          CLI_DIR: mws-cli/packages/writecheck
+          REDIS_LIVE_REQUIRED: "1"
+        run: REDISFX_BIN_DIR="$RUNNER_TEMP/redis-bin" node --test --test-reporter=spec test/redis-fixture.test.mjs
