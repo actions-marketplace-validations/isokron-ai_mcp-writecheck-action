@@ -5,7 +5,7 @@
  *
  *   node loop/run-items.mjs --msc <mcp-surface-corpus checkout> --cli <built packages/writecheck>
  *                           --seed <tool-qa history/seed-v1.json> --out <dir> [--lane ci|local]
- *   env: ITEMS, ATTEMPT_ID, SHARD_ID (the dispatch inputs), CLI_REF, SANDBOX_REF, GITHUB_SHA, GITHUB_OUTPUT
+ *   env: ITEMS, ATTEMPT_ID, SHARD_ID (the dispatch inputs), CLI_REF, SANDBOX_REF, ACTION_SHA (the commit checked out), GITHUB_OUTPUT
  *
  * The sandbox is mcp-surface-corpus's, used as a library from a checkout at a pinned commit (src/docker.mjs,
  * src/sandbox-run.mjs, src/sandbox-net.mjs, src/runsc.mjs, src/telemetry.mjs, src/targets.mjs and its sandbox/
@@ -41,6 +41,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { FIXTURE_MANIFEST, InputError, catalogManifest, checkId, isProofLane, loadFixtures, loadSeed, parseItems, resolveSubject } from './items.mjs';
 import { ndjson, observations, planHash, publicSummary, summarize } from './summary.mjs';
 import { dockerPlatform, extractBinaryImage } from './binary-image.mjs';
+import { entryErrorCode, itemSkips } from './skips.mjs';
 import { BundleFiles, buildMeta, forgeryVerdict, knownBadVerdict, knownGoodVerdict, parseCollected, safeRawPath } from './bundle.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -266,7 +267,10 @@ class Shard {
     }
     const image = this.images[plan.image];
     await this.dk.image(image, plan.image);
-    const inst = { kind: u.launch.kind, steps: [], ok: false, image: plan.image, resolved_version: null, egress: [] };
+    // R-WC-31: whether code of the package could run during the install (npm lifecycle scripts), so its output may say
+    // anything; and the package asked for, so pip's "no matching distribution" can be checked to be about it.
+    const scripts = u.launch.kind === 'npm' ? !plan.install.some((st) => st.name === 'install' && st.cmd.includes('--ignore-scripts')) : null;
+    const inst = { kind: u.launch.kind, steps: [], ok: false, image: plan.image, resolved_version: null, egress: [], ...(scripts === null ? {} : { scripts }), ...(typeof u.launch.package === 'string' ? { package: u.launch.package } : {}) };
     const registries = [...plan.registries];
     const inNet = await this.dk.network(`surface-${this.runId}-${u.tag}-in`, true, u.tag, { sandbox: 'install' });
     const netlog = await M.startNetlogOn(u.tdk, { net: 'install', network: inNet, image: this.images.node24, toolsVol: this.toolsVol, labels: this.dk.labels(u.tag), target: u.tag });
@@ -310,6 +314,8 @@ class Shard {
           let j = null;
           try { j = JSON.parse(r.stdout.toString('utf8')); } catch { /* checked below */ }
           entry = j && typeof j.script === 'string' && j.script.startsWith('/work/pkg/') && !/[\u0000\n]/.test(j.script) ? j : null;
+          // R-WC-30: the entry helper's answer is kept out of the install log; its code decides whose a failure is.
+          if (!entry) inst.entry_error = entryErrorCode(j, r.exit);
         }
         if (r.exit !== 0 || (step.name === 'entry' && !entry)) { ok = false; if (r.timed_out) inst.timed_out = true; break; }
       }
@@ -647,12 +653,11 @@ async function runItem(ctx, item, deadline) {
   let summary = null;
   let res = null;
   const stages = { install: false, init: false, plan: false, catalog: false, full: false };
-  if (resolved.skip) {
-    for (const st of ['install', 'init', 'plan', 'catalog']) skips.push({ stage: st, reason: resolved.skip.reason, evidence: 'logs/driver.json' });
-    driver.skip_detail = resolved.skip.detail;
-  } else if (Date.now() >= deadline) {
-    for (const st of ['install', 'init', 'plan', 'catalog']) skips.push({ stage: st, reason: 'timeout_start', retryable: true, evidence: 'logs/driver.json' });
-    driver.skip_detail = 'not started: the shard used its time budget first';
+  if (resolved.skip || Date.now() >= deadline) {
+    // Not run: no package this lane can start (or excluded), or the shard's time budget is spent. R-WC-24: each skip says its fault.
+    const s = itemSkips({ resolved, notStarted: !resolved.skip });
+    skips.push(...s.skips);
+    Object.assign(driver, s.notes);
   } else {
     const u = unitFor(`i${item.index}`, resolved, fixtures, join(shard.shardDir, 'items', String(item.index)), {}, { proofPlan: item.proof_plan === true });
     // A unit's telemetry is its own file, kept in raw/ (it names what the target looked up and reached).
@@ -663,7 +668,7 @@ async function runItem(ctx, item, deadline) {
     // The last item may finish at most ITEM_GRACE_MS past the shard deadline, so the job ends inside its
     // timeout-minutes and the pump's lease (corpus.yml): items 26 + 5 min, plus prepare and teardown.
     try { res = await shard.runUnit(u, Math.min(deadline + ITEM_GRACE_MS, Date.now() + 20 * 60_000)); } finally { shard.tel = shardTel; }
-    driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress) } : null;
+    driver.install = res.install ? { ok: res.install.ok, kind: res.install.kind, image: res.install.image, resolved_version: res.install.resolved_version, timed_out: !!res.install.timed_out, steps: res.install.steps, egress_hosts_allowed: res.install.egress.filter((e) => e.allowed).length, egress_refused: res.install.egress.filter((e) => !e.allowed).length, egress_hosts: egressHosts(res.install.egress), ...(res.install.entry_error ? { entry_error: res.install.entry_error } : {}) } : null;
     driver.error = res.error;
     if (u.binaryInfo) driver.binary_image = u.binaryInfo;
     if (u.proofPlan) { driver.plan_accepted = false; driver.proof_plan_hash = u.acceptedHash; }
@@ -671,25 +676,14 @@ async function runItem(ctx, item, deadline) {
     driver.collected = res.collected;
     stages.install = !!res.install?.ok;
     for (const s of res.steps) if (s.step in stages) stages[s.step] = true;
-    if (res.error === 'harness') {
-      for (const st of ['install', 'init', 'plan', 'catalog'].filter((x) => !stages[x])) skips.push({ stage: st, reason: 'upstream_unavailable', retryable: true, evidence: 'logs/driver.json' });
-    } else if (res.install && !res.install.ok) {
-      const reason = res.install.timed_out ? 'timeout_start' : 'install_failed_registry';
-      for (const st of ['init', 'plan', 'catalog']) skips.push({ stage: st, reason, evidence: 'logs/driver.json' });
-    }
-    // The stages that did not run are recorded too: init where the fixture's server is not started over stdio,
-    // and the full write test wherever it did not start (never for a third-party server; for a fixture, only
-    // under the plan hash a person accepted).
-    if (res.error !== 'harness' && res.install?.ok) {
-      if (!stages.init && u.init === false) { skips.push({ stage: 'init', reason: 'unsupported_transport', evidence: 'logs/driver.json' }); driver.init_detail = 'the fixture server is started over streamable HTTP by its manifest; init drafts from a stdio command'; }
-      if (!res.fullRan) {
-        skips.push({ stage: 'full', reason: 'policy_excluded', evidence: 'logs/driver.json' });
-        driver.full_detail = !u.full ? 'a third-party server is never given a manifest that writes' : 'the plan hash is not the accepted one (or the plan did not run), so the full write test did not start';
-      }
-    }
     summary = summarize({ files: res.files, steps: res.steps, planStdout: res.planStdout, fullRan: res.fullRan, acceptedPlanHash: u.proofPlan ? null : u.acceptedHash }); // a proof item's plan is not accepted: the record says so, with no drift
     const evidenceComplete = ctx.lane !== 'ci' || driver.evidence_missing.length === 0;
-    if (!evidenceComplete) skips.push({ stage: 'catalog', reason: 'trace_unavailable', evidence: 'logs/driver.json' });
+    // Every stage that did not run, with its fault side (R-WC-24): the install's own output is read only to tell a
+    // package-level error (the subject's) from our limits; it stays in raw/.
+    const installLog = res.install && !res.install.ok && existsSync(join(u.stepDir, 'docker.log')) ? readFileSync(join(u.stepDir, 'docker.log'), 'latin1') : '';
+    const s = itemSkips({ resolved, res, unit: u, stages, evidenceComplete, installLog });
+    skips.push(...s.skips);
+    Object.assign(driver, s.notes);
     b.put('results/writecheck.json', json({ subject: item.subject, source: resolved.source, package: resolved.package, resolved_version: res.install?.resolved_version ?? null, ...publicSummary(summary) }));
     b.put('observations/writecheck.ndjson', ndjson(observations(summary, { versions: ctx.versions, stagesRan: stages, evidenceComplete, backend: u.backend })));
     addRaw(b, 'raw', res, u.stepDir);
@@ -716,25 +710,54 @@ async function runItem(ctx, item, deadline) {
   return { skipped: skips.length > 0 && !res, code: resolved.skip?.reason ?? (res?.error ? 'harness_error' : res?.install && !res.install.ok ? 'install_failed' : 'ran') };
 }
 
+/**
+ * The commit of this repository that runs (tool-qa R-PIN-01, R-WC-29): the workflow's checked ACTION_SHA (the pump's
+ * tool_sha, else the run's own commit), which must be the checkout's HEAD; without ACTION_SHA (a local run) the HEAD
+ * itself, or "local". Never GITHUB_SHA: the YAML runs from the dispatched branch while the lane code is the pinned commit.
+ */
+export function actionSha(env, head) {
+  const h = /^[0-9a-f]{40}$/.test(String(head ?? '')) ? head : null;
+  // "local" proves no commit: under tool-qa's pin_check "enforce" such a result is refused (pin_unverified).
+  if (env.ACTION_SHA === undefined || env.ACTION_SHA === '') return h ?? 'local';
+  if (!/^[0-9a-f]{40}$/.test(env.ACTION_SHA)) throw new InputError('ACTION_SHA must be a full commit SHA');
+  if (env.ACTION_SHA !== h) throw new InputError('ACTION_SHA is not the commit checked out');
+  return env.ACTION_SHA;
+}
+
+/** The checkout's HEAD commit, or null. */
+export function gitHead(dir = join(here, '..')) {
+  const r = spawnSync('git', ['-C', dir, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  return r.status === 0 ? r.stdout.trim() : null;
+}
+
+/**
+ * The manifest's `tools`: each named by the key tool-qa pins it under (pump/workflows.json versions.tool and
+ * versions.probe), so ingest can prove every pin (R-WC-29): mcp-writecheck (CLI_REF), mcp-writecheck-action (the commit
+ * that ran), mcp-surface-corpus (SANDBOX_REF), and gVisor's release.
+ */
+export function toolsFor({ cliRef, actionRef, sandboxRef, gvisor }) {
+  return [
+    { name: 'mcp-writecheck', version: cliRef },
+    { name: 'mcp-writecheck-action', version: actionRef },
+    { name: 'mcp-surface-corpus', version: sandboxRef },
+    { name: 'gvisor', version: gvisor },
+  ];
+}
+
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const o = parseArgs(argv);
   checkId('shard_id', env.SHARD_ID);
   checkId('attempt_id', env.ATTEMPT_ID);
   const items = parseItems(env.ITEMS, { proofLane: isProofLane(env) });
   for (const [k, v] of [['CLI_REF', env.CLI_REF], ['SANDBOX_REF', env.SANDBOX_REF]]) if (!/^[0-9a-f]{40}$/.test(String(v ?? ''))) throw new InputError(`${k} must be a full commit SHA`);
+  const actionRef = actionSha(env, gitHead());
   const M = await loadMsc(resolve(o.msc));
   const seed = loadSeed(o.seed);
   const fixtures = loadFixtures(o.fixtures);
   const shard = new Shard({ o, M, env });
-  const actionRef = /^[0-9a-f]{40}$/.test(String(env.GITHUB_SHA ?? '')) ? env.GITHUB_SHA : 'local';
   const ctx = { shard, seed, fixtures, lane: o.lane, cliRef: env.CLI_REF, sandboxRef: env.SANDBOX_REF, actionRef };
   ctx.versions = { mcp_writecheck: env.CLI_REF, mcp_writecheck_action: actionRef, mcp_surface_corpus: env.SANDBOX_REF, gvisor: shard.cfg.release };
-  ctx.tools = [
-    { name: 'mcp-writecheck', version: env.CLI_REF },
-    { name: 'mcp-writecheck-action', version: actionRef },
-    { name: 'mcp-surface-corpus-sandbox', version: env.SANDBOX_REF },
-    { name: 'gvisor', version: shard.cfg.release },
-  ];
+  ctx.tools = toolsFor({ cliRef: env.CLI_REF, actionRef, sandboxRef: env.SANDBOX_REF, gvisor: shard.cfg.release });
   say(`writecheck shard: ${items.length} item(s)`);
   shard.tel.write('run_start', { kind: 'corpus', lane: o.lane, node: process.version, platform: `linux/${arch()}`, runtime: M.RUNTIME, gvisor_release: shard.cfg.release });
   let ok = false;

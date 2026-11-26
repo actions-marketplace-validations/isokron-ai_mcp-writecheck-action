@@ -11,13 +11,18 @@ The hand-dispatched batch workflow that used to be `corpus.yml` is now `corpus-b
 | `shard_id` | The shard's id. The run is named `shard <shard_id>`. |
 | `attempt_id` | The dispatch's id; every result quotes it. |
 | `items` | JSON list of 1 to 10 `{"subject": "owner/name", "run_key": "<64 hex>", "fence": <n>}` |
+| `tool_sha` | Optional, empty by default: the commit of this repository to run (tool-qa R-PIN-01). The pump sends it for a lane whose `pin_check` is `enforce`. |
 
-Every input is checked as a whole string before use (a newline anywhere is refused), then `loop/items.mjs` checks the items in full.
+Every input is checked as a whole string before use (a newline anywhere is refused; `tool_sha` is empty or a full commit SHA), then `loop/items.mjs` checks the items in full.
+
+### Version pins
+
+tool-qa files every result under the versions it pins for this lane (`pump/workflows.json`, writecheck `versions`), and its ingest refuses a result whose manifest reports another version (`pin_mismatch`) or, on an `enforce` lane, cannot prove one (`pin_unverified`). The job that runs the items checks out `tool_sha` (else the run's own commit) and stops unless `git rev-parse HEAD` is exactly that commit (R-WC-28); the YAML itself still runs from `main`. The driver reports in the manifest's `tools`, by the pin keys: `mcp-writecheck` at `CLI_REF`, `mcp-writecheck-action` at the commit checked out (`ACTION_SHA`, never `GITHUB_SHA`), `mcp-surface-corpus` at `SANDBOX_REF`, and gVisor's release (R-WC-29). A merge to `main` changes the commit a run without `tool_sha` reports. While the lane's `pin_check` is `label`, a pin that lags such a merge is only noted by ingest (`self_pin_moved`, tool-qa R-PIN-02) and the result is accepted; on `enforce` the pump sends `tool_sha`, and a result that does not prove its pins is refused and the lane paused for an hour. Bump the pin with each merge either way, so results are filed under the code that ran.
 
 ## How a subject is run
 
 1. **Which package.** `loop/items.mjs` maps the subject the way the live-probe lane does: IsoKron's own fixture servers first (`loop/fixtures.json`: an exact npm version published by the isokron-ai npm account, installed with `npm ci` from a committed lockfile pinned by the package's sha512 integrity; one with install scripts installs in the sandbox's build image, where a native module compiles from source and the install reaches registry.npmjs.org only), else the subject's registry packages in tool-qa's seed (`history/seed-v1.json` at a pinned tool-qa commit), npm first, then PyPI, at the latest version (the record keeps the version that was resolved). A subject with no npm or PyPI package (OCI images, MCPB bundles, crates, NuGet), one whose registry entry offers streamable HTTP only, or one not in the seed gets a skip (`no_runnable_artifact`, `unsupported_transport`, `policy_excluded`).
-2. **The sandbox.** Everything runs in the sandbox of `isokron-ai/mcp-surface-corpus`, fetched at a pinned commit and used as a library (`src/docker.mjs`, `src/sandbox-run.mjs`, `src/sandbox-net.mjs`, `src/runsc.mjs`, `src/telemetry.mjs`, `src/targets.mjs` and its `sandbox/` helpers): gVisor (`runsc`) for every container, user 65534, every capability dropped, a read-only root, memory, process and CPU limits, named volumes only, and no runner environment. The install reaches only its package registry, through the allowlist proxy; the server and the CLI run on an internal network where every name resolves to the network logger and the host firewall logs and drops anything that tries to leave. Before the shard job starts, mcp-surface-corpus's reusable `sandbox-conformance.yml` must pass; inside the job, before any target, its `sandbox-guard` action installs gVisor and the firewall on that runner and runs the hostile self test, and the job stops unless the telemetry check recomputes a pass. Both are pinned to the same commit as the library (`SANDBOX_REF`, 066c15d). This repository's older sandbox (`corpus/`) is not used here.
+2. **The sandbox.** Everything runs in the sandbox of `isokron-ai/mcp-surface-corpus`, fetched at a pinned commit and used as a library (`src/docker.mjs`, `src/sandbox-run.mjs`, `src/sandbox-net.mjs`, `src/runsc.mjs`, `src/telemetry.mjs`, `src/targets.mjs` and its `sandbox/` helpers): gVisor (`runsc`) for every container, user 65534, every capability dropped, a read-only root, memory, process and CPU limits, named volumes only, and no runner environment. The install reaches only its package registry, through the allowlist proxy; the server and the CLI run on an internal network where every name resolves to the network logger and the host firewall logs and drops anything that tries to leave. Before the shard job starts, mcp-surface-corpus's reusable `sandbox-conformance.yml` must pass; inside the job, before any target, its `sandbox-guard` action installs gVisor and the firewall on that runner and runs the hostile self test, and the job stops unless the telemetry check recomputes a pass. Both are pinned to the same commit as the library (`SANDBOX_REF`, 4c16b58). This repository's older sandbox (`corpus/`) is not used here.
 3. **The checks.** The CLI is `mcp-writecheck`, built from `isokron-ai/mcp-write-safety` at the action's pinned commit, before anything else in the job. For every subject (and the forgery control) the server and the CLI run **split**, in two sandbox containers: the server in one of its own at `.3` of the run network, behind our bridge (`loop/sandbox/bridge.mjs`), with its install volume read-only and nothing else of ours; the CLI in another at `.4`, with the output volume the server's container never mounts, reaching the server over TCP through our relay (`loop/sandbox/relay.mjs`) as if it were a stdio server. Each is its own gVisor sandbox, so the server cannot see the CLI's files or processes, write into its output or its stdout, or signal or trace it: its only channel to the CLI is the protocol. IsoKron's own fixture servers (locked, below) run in one container with the CLI, because the full write test needs the CLI's loopback gate in front of their backend and restarts the server.
 
    What runs:
@@ -55,6 +60,22 @@ Everything the CLI wrote ran next to the server under test, in the same containe
 | `annotation_honesty_behaviour_confirmed`, `idempotency_evidence_behaviour`, `conflict_behaviour` | full run | the MWS-ANN, MWS-RETRY and MWS-CONC records and their counts |
 
 With incomplete sandbox evidence (a container that left no syscall trace, an unreadable firewall log) only the first four are written, with a `trace_unavailable` skip.
+
+### Skips and their fault side
+
+Every stage that did not run is a skip in the meta file, and every skip says who it is down to (`fault`, tool-qa `worker-kit/contract.mjs` `SKIP_FAULTS`; `loop/skips.mjs`, R-WC-24). Our own limits are always `tool`, so a server we cannot start yet is counted as a gap of ours, never as the server's failure.
+
+| Skip | Stages | Fault | Why |
+|---|---|---|---|
+| `policy_excluded` | install, init, plan, catalog | `policy` | the subject is not in the seed this lane reads, or the item names a fixture that is not its own |
+| `no_runnable_artifact` | install, init, plan, catalog | `tool` | no package of a kind this lane installs (OCI images, crates, MCPB, NuGet) |
+| `unsupported_transport` | install, init, plan, catalog | `tool` | the registry offers streamable HTTP only; this lane starts stdio servers |
+| `timeout_start` (retryable) | install, init, plan, catalog | `tool` | not started: the shard used its time budget first |
+| `tool_error` (retryable) | the stages that did not run | `tool` | our harness failed around the unit (a helper, the proxy, the bridge, Docker); R-WC-25 |
+| `install_failed_registry`, or `timeout_start` when the install ran out of time | init, plan, catalog | `subject` or `tool` | `subject` only when the install's own output shows a package-level error (no such package or version, nothing to run); our proxy refusing a host, our time or memory limit, a native build or no evidence at all is `tool` (R-WC-26) |
+| `unsupported_transport` | init (fixtures started over HTTP) | `tool` | init drafts from a stdio command |
+| `policy_excluded` | full | `policy` | a third-party server is never given a manifest that writes; a fixture runs only under its accepted plan hash |
+| `trace_unavailable` | catalog | `tool` | incomplete sandbox evidence |
 
 ## Backends
 

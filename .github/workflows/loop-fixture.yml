@@ -32,8 +32,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  WORKER_KIT_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
-  SEED_REF: 'b1f25a9b0b7655f45eb353f31562a93d9319d5a4'
+  WORKER_KIT_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
+  SEED_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
   SANDBOX_REF: '4c16b586e8e5886acb098285b6ec405fd4db4ac7'
 
 jobs:
@@ -65,10 +65,22 @@ jobs:
             echo "shard_id=$shard"
             echo "attempt_id=$shard"
             echo "items=$items"
+            echo "tool_sha="
           } >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          ref: ${{ steps.inputs.outputs.tool_sha || github.sha }}
+      # tool-qa R-PIN-01 (R-WC-28): the lane code is the commit the pump pinned (tool_sha), else this run's own commit; the
+      # job stops unless the checkout is exactly that commit, and the driver reports it as the mcp-writecheck-action that ran.
+      - name: The checkout is the commit to run
+        env:
+          TOOL_SHA: ${{ steps.inputs.outputs.tool_sha }}
+        run: |
+          head=$(git rev-parse HEAD)
+          want="${TOOL_SHA:-$GITHUB_SHA}"
+          if [ "$head" != "$want" ]; then echo "::error title=writecheck::the checkout is not the commit to run"; exit 1; fi
+          echo "ACTION_SHA=$head" >> "$GITHUB_ENV"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
@@ -114,7 +126,7 @@ jobs:
       - id: kit0
         name: Build bundle 0 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_0 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/0/bundle
           meta-file: ${{ runner.temp }}/wc/0/meta.json
@@ -126,7 +138,7 @@ jobs:
       - id: kit1
         name: Build bundle 1 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_1 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/1/bundle
           meta-file: ${{ runner.temp }}/wc/1/meta.json
@@ -138,7 +150,7 @@ jobs:
       - id: kit2
         name: Build bundle 2 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_2 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/2/bundle
           meta-file: ${{ runner.temp }}/wc/2/meta.json
@@ -150,7 +162,7 @@ jobs:
       - id: kit3
         name: Build bundle 3 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_3 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/3/bundle
           meta-file: ${{ runner.temp }}/wc/3/meta.json
@@ -162,7 +174,7 @@ jobs:
       - id: kit4
         name: Build bundle 4 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_4 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/4/bundle
           meta-file: ${{ runner.temp }}/wc/4/meta.json
@@ -174,7 +186,7 @@ jobs:
       - id: kit5
         name: Build bundle 5 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_5 == 'true' }}
-        uses: isokron-ai/tool-qa/worker-kit@b1f25a9b0b7655f45eb353f31562a93d9319d5a4 # WORKER_KIT_REF
+        uses: isokron-ai/tool-qa/worker-kit@2ffcea16117ec679398f83eefe8c6fa66d38bac6 # WORKER_KIT_REF
         with:
           bundle-dir: ${{ runner.temp }}/wc/5/bundle
           meta-file: ${{ runner.temp }}/wc/5/meta.json

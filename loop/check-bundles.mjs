@@ -13,7 +13,8 @@
  * read, its plan hash the accepted one, and the full write test run to completion; kronicle-lite the same, built
  * from source in the build image with install egress to registry.npmjs.org only; pg-tracker (this repository's
  * PostgreSQL fixture) the same with every full-run result labelled hermetic; redis-tracker (the Redis fixture, WC13) the same over
- * Redis, under its accepted plan; a subject with no npm or PyPI package with its skips recorded. Prints one line per check; exits 1 on the
+ * Redis, under its accepted plan; a subject with no npm or PyPI package with its skips recorded (fault tool: our limit). Every
+ * skip of every item must declare its fault side (R-WC-24). Prints one line per check; exits 1 on the
  * first item that does not meet them (all items are still printed).
  */
 import { readFileSync } from 'node:fs';
@@ -104,6 +105,10 @@ for (const it of items) {
   const files = new Map(readTar(plaintext).map((e) => [e.path, e.data]));
   const manifest = JSON.parse(files.get('manifest.json').toString('utf8'));
   say(manifest.controls.length === 3 && manifest.controls.every((c) => c.observed === c.expected), `controls ${manifest.controls.map((c) => `${c.kind}=${c.observed}`).join(', ')}`);
+  // R-WC-24: every skip says its fault side, and ingest read the result's coverage from them (never "unknown").
+  say(manifest.skips.every((s) => typeof s.fault === 'string') && v.report?.bundle?.declared_faults === manifest.skips.length && v.report?.bundle?.skip_faults?.unknown === undefined, `skips declare their fault (${manifest.skips.map((s) => `${s.stage}:${s.reason}:${s.fault}`).join(', ') || 'none'}); coverage ${v.report?.bundle?.coverage}`);
+  // Our own limit: a subject with no package of a kind this lane installs is unassessed by the tool, never the subject's failure.
+  if (manifest.skips.some((s) => s.reason === 'no_runnable_artifact')) say(manifest.skips.filter((s) => s.reason === 'no_runnable_artifact').every((s) => s.fault === 'tool') && v.report?.bundle?.coverage === 'unassessed_tool', 'no_runnable_artifact is our limit (fault tool, coverage unassessed_tool)');
   const res = files.get('results/writecheck.json');
   if (res) {
     const r = JSON.parse(res.toString('utf8'));
