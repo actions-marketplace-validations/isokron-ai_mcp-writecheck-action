@@ -64,11 +64,12 @@ env:
   # test/loop-workflow.test.mjs checks), and the seed the subjects are mapped with.
   WORKER_KIT_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
   SEED_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
-  # isokron-ai/mcp-surface-corpus main at 4c16b58 (pull requests 11 and 12: capped work volumes, data-root and container logs,
+  # isokron-ai/mcp-surface-corpus main at 11974fb (pull requests 14 and 15: the image's WORKDIR, empty VOLUMEs as tmpfs,
+  # amd64 pulls, HTTP-mode stderr, the npm server bin, runsc's boot timing table read as runsc's; 11 and 12: capped work volumes, data-root and container logs,
   # the link-safe readout, and the guard's link, socket, flood and archive-bomb cases; 9 and 10: the install-network cases
   # and the proxy positive control, which this lane's npm installs with scripts need; 8: native npm modules built from
   # source in the node*-build images; 7: the sandbox guard action, the reusable conformance workflow). The conformance job and the sandbox-guard step name this same commit.
-  SANDBOX_REF: '4c16b586e8e5886acb098285b6ec405fd4db4ac7'
+  SANDBOX_REF: '11974fbb75a8c276214c887a079d6ad6df374124'
   # isokron-ai/mcp-check at the commit tool-qa's live-probe lane runs (pump/workflows.json, live-probe versions.tool): its
   # resolver chooses an OCI subject's image for this lane too (loop/launch.mjs, WC14), so both lanes run the same image.
   MCP_CHECK_REF: '116b0ca841dec25116b3b3b7d6f3ce7286fd198f'
@@ -114,7 +115,7 @@ jobs:
     if: needs.guard.outputs.proceed == 'true'
     permissions:
       contents: read
-    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@4c16b586e8e5886acb098285b6ec405fd4db4ac7 # SANDBOX_REF
+    uses: isokron-ai/mcp-surface-corpus/.github/workflows/sandbox-conformance.yml@11974fbb75a8c276214c887a079d6ad6df374124 # SANDBOX_REF
     with:
       mutations: false
       artifact-prefix: writecheck-conformance
@@ -178,7 +179,7 @@ jobs:
       # unless the telemetry check recomputes a pass.
       - id: sandbox
         name: Sandbox guard (gVisor, firewall, self test)
-        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@4c16b586e8e5886acb098285b6ec405fd4db4ac7 # SANDBOX_REF
+        uses: isokron-ai/mcp-surface-corpus/sandbox-guard@11974fbb75a8c276214c887a079d6ad6df374124 # SANDBOX_REF
       - name: The guard ran the pinned sandbox and passed
         env:
           VERDICT: ${{ steps.sandbox.outputs.verdict }}
