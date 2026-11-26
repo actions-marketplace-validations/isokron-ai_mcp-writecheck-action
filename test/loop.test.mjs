@@ -396,12 +396,20 @@ test('R-WC-05: bridge and relay carry a stdio server over TCP, both ways, and th
   } finally { bridge.kill('SIGKILL'); }
 });
 
-test('R-WC-05: every subject and the forgery control run split; only our locked fixtures share the CLI\'s container', () => {
+test('R-WC-05: every subject and the forgery control run split; only our locked fixtures share the CLI\'s container', async () => {
+  const { serverContainer } = await import('../loop/run-items.mjs');
   const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
   assert.match(src, /if \(!u\.manifestFile\) \{\n\s*\/\/ Every subject and the forgery control[^\n]*\n\s*await this\.splitRun\(/);
   const split = src.slice(src.indexOf('async splitRun('), src.indexOf('One unit (an item or a control) end to end'));
-  // The server's container: the install volume read-only and the tools, never the output volume.
-  assert.match(split, /mounts: \[\{ src: work, dst: '\/work', ro: true \}, \{ src: this\.toolsVol, dst: TOOLS, ro: true \}\], env: runEnv/);
+  // The server's container: the install volume read-only and the tools, never the output volume (serverContainer); an
+  // OCI subject's (WC14) gets the tools only, read-only, and its bridge through the portable runtime.
+  assert.match(split, /\.\.\.serverContainer\(u, \{ work, toolsVol: this\.toolsVol, serverCmd, loader: this\.loader \}\), env: runEnv/);
+  assert.doesNotMatch(split.slice(split.indexOf('sandboxRunArgs('), split.indexOf('this.writeSettings(argv')), /\bout\b/);
+  const ours = serverContainer({}, { work: 'w', toolsVol: 't', serverCmd: ['srv'], loader: null });
+  assert.deepEqual(ours.mounts, [{ src: 'w', dst: '/work', ro: true }, { src: 't', dst: '/opt/surface', ro: true }]);
+  const oci = serverContainer({ oci: { workdir: '/app' } }, { work: 'w', toolsVol: 't', serverCmd: ['srv', '--stdio'], loader: 'ld-linux-x86-64.so.2' });
+  assert.deepEqual(oci.mounts, [{ src: 't', dst: '/opt/surface', ro: true }]);
+  assert.equal(oci.workdir, '/app');
   // The CLI's container: our helper at the probe address, with the output volume.
   assert.match(split, /helperRunArgs\(\{ name: cname, image: this\.images\.node24, network, ip: M\.NETS\.run\.probe/);
   const f = loadFixtures(join(root, 'loop', 'fixtures.json'));
@@ -685,5 +693,6 @@ test('R-WC-29: the manifest names each tool by its tool-qa pin key, mcp-writeche
   const src = readFileSync(join(root, 'loop', 'run-items.mjs'), 'utf8');
   assert.doesNotMatch(src.slice(src.indexOf('export async function main')), /GITHUB_SHA|mcp-surface-corpus-sandbox/);
   assert.match(src, /const actionRef = actionSha\(env, gitHead\(\)\);/);
-  assert.match(src, /ctx\.tools = toolsFor\(\{ cliRef: env\.CLI_REF, actionRef, sandboxRef: env\.SANDBOX_REF, gvisor: shard\.cfg\.release \}\);/);
+  assert.match(src, /ctx\.tools = toolsFor\(\{ cliRef: env\.CLI_REF, actionRef, sandboxRef: env\.SANDBOX_REF, gvisor: shard\.cfg\.release(?:, mckRef: ctx\.mckRef)? \}\);/);
+  assert.deepEqual(toolsFor({ cliRef: 'c', actionRef: A, sandboxRef: 'd', gvisor: 'g', mckRef: 'e'.repeat(40) }).at(-1), { name: 'mcp-check', version: 'e'.repeat(40) });
 });

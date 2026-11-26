@@ -40,18 +40,32 @@ export function entryErrorCode(j, exit) {
   const e = typeof j?.error === 'string' ? j.error : null;
   if (e === 'the package declares no bin') return 'declares_no_bin';
   if (e === 'the package has no bin of that name') return 'no_bin_of_that_name';
+  // loop/sandbox/cargo-entry.mjs (WC14) answers with a code of its own.
+  if (CARGO_ENTRY_CODES.includes(e)) return e;
   return 'entry_failed';
 }
 
-/** Whose each entry code is: only the package's own lack of anything to run is the subject's. */
+/** cargo-entry.mjs's codes (WC14). */
+export const CARGO_ENTRY_CODES = Object.freeze(['not_installed', 'no_binary', 'several_binaries']);
+
+/**
+ * Whose each entry code is: only the package's own lack of anything to run is the subject's (an npm package that
+ * declares no bin, a crate that installs no binary, an OCI image with no command). Every other code is ours: a bin
+ * name from our mapping, several binaries we would have to guess between, cargo's record missing, an image config we
+ * could not read, an image of another platform, a helper that crashed or answered nothing usable.
+ */
 export const ENTRY_FAULT = Object.freeze({
   declares_no_bin: 'subject',
+  no_binary: 'subject',
+  image_has_no_command: 'subject',
 });
 
 /** Signs in an install's output that the network, a proxy, or pip's Python-version filter got in the way. */
 const PIP_NOT_THE_PACKAGE = /Retrying|Connection|Max retries|Temporary failure|Ignored the following versions|ProxyError|SSLError|timed out|Read timed out|ConnectTimeout|Name or service not known|Could not fetch URL/i;
 /** Signs that code of the package (or of a dependency) ran during the pip install: a build backend, setup.py. */
 const PIP_CODE_RAN = /Building wheel|Preparing metadata|Getting requirements to build|Running setup\.py|Installing build dependencies|Building editable/i;
+/** Signs that crates.io could not be reached properly (our proxy, DNS, a timeout), not that the crate is missing. */
+const CARGO_NOT_THE_CRATE = /spurious network error|failed to download|failed to query|Couldn't resolve|timed out|Connection|failed to get|proxy/i;
 const pipName = (n) => String(n).toLowerCase().replace(/[-_.]+/g, '-');
 
 /**
@@ -59,6 +73,7 @@ const pipName = (n) => String(n).toLowerCase().replace(/[-_.]+/g, '-');
  * have written it:
  *   npm, with install scripts off only: the final error block npm printed (the last contiguous run of "npm error" lines)
  *     carries code E404, ETARGET or ENOVERSIONS. With scripts on, a lifecycle script could print anything: no evidence.
+ *   cargo: "could not find `<the crate>` in registry `crates-io`" before anything compiled, with no network trouble.
  *   PyPI: pip says "(from versions: none)" and "No matching distribution found for <the package itself>", no build of
  *     anything ran, and nothing shows the network, the proxy or a Python-version filter in the way.
  */
@@ -76,6 +91,13 @@ export function packageErrorShown(inst, logText) {
     // Nothing npm printed after its error block.
     if (lines.slice(last + 1).some((l) => /^npm /.test(l))) return false;
     return lines.slice(first, last + 1).some((l) => /^npm (?:ERR!|error) code (?:E404|ETARGET|ENOVERSIONS)$/.test(l));
+  }
+  if (inst?.kind === 'cargo') {
+    // Before any build: no "Compiling" line (a build script could print anything), no network trouble, and the crate
+    // named is the one asked for.
+    if (/^\s*Compiling /m.test(text) || CARGO_NOT_THE_CRATE.test(text)) return false;
+    const m = /^error: could not find `([A-Za-z0-9_-]{1,64})` in registry `crates-io`/m.exec(text);
+    return !!m && !!inst.package && m[1] === inst.package;
   }
   if (inst?.kind === 'pypi') {
     if (PIP_NOT_THE_PACKAGE.test(text) || PIP_CODE_RAN.test(text)) return false;
@@ -99,6 +121,8 @@ export function installFault(inst, logText = '') {
   const failed = (inst.steps ?? []).find((s) => s.exit !== 0) ?? null;
   if (failed && (failed.timed_out || failed.exit === 124 || failed.exit === 137)) return 'tool';
   if (inst.entry_error) return ENTRY_FAULT[inst.entry_error] ?? 'tool';
+  // An OCI image that would not pull, on a digest the resolver had just read from its registry: ours (as live-probe's image_pull_failed).
+  if (inst.kind === 'docker') return 'tool';
   if (!failed || failed.name !== 'install') return 'tool';
   return packageErrorShown(inst, logText) ? 'subject' : 'tool';
 }
@@ -131,7 +155,11 @@ export function itemSkips({ resolved, notStarted = false, res = null, unit = {},
     return { skips, notes };
   }
   if (!res) return { skips, notes };
-  if (res.error === 'harness') {
+  if (res.error === 'oci_bridge') {
+    // R-WC-37: our bridge would not start in the subject's own image: ours, and the same on every retry.
+    for (const st of ['init', 'plan', 'catalog'].filter((x) => !stages[x])) add(st, 'tool_error', 'tool');
+    notes.error_detail = 'the bridge did not start in the image (oci_bridge_failed)';
+  } else if (res.error === 'harness') {
     for (const st of ['install', 'init', 'plan', 'catalog'].filter((x) => !stages[x])) add(st, 'tool_error', 'tool', { retryable: true });
   } else if (res.install && !res.install.ok) {
     const reason = res.install.timed_out ? 'timeout_start' : 'install_failed_registry';
@@ -141,7 +169,7 @@ export function itemSkips({ resolved, notStarted = false, res = null, unit = {},
   // The stages that did not run are recorded too: init where the fixture's server is not started over stdio, and the
   // full write test wherever it did not start (never for a third-party server; for a fixture, only under the plan hash
   // a person accepted).
-  if (res.error !== 'harness' && res.install?.ok) {
+  if (res.error !== 'harness' && res.error !== 'oci_bridge' && res.install?.ok) {
     if (!stages.init && unit.init === false) {
       add('init', 'unsupported_transport', 'tool');
       notes.init_detail = 'the fixture server is started over streamable HTTP by its manifest; init drafts from a stdio command';

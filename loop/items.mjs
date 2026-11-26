@@ -5,8 +5,9 @@
 // mapping is the live-probe lane's: the seed's registry packages, npm first, then PyPI; the latest version is
 // installed (the record keeps the version that was resolved). IsoKron's own fixture servers (loop/fixtures.json)
 // come first: they name an exact version and, where a person accepted its plan hash, a full write test against a
-// disposable backend inside the sandbox. A subject with no npm or PyPI package (OCI images, MCPB bundles, crates,
-// NuGet) or whose packages are remote-only gets a skip with a code from tool-qa's SKIP_REASONS.
+// disposable backend inside the sandbox. A subject whose seed entry has no npm or PyPI package but an OCI image or a
+// crate is passed on to loop/launch.mjs (WC14); one with neither (MCPB bundles, NuGet) or whose packages are
+// remote-only gets a skip with a code from tool-qa's SKIP_REASONS.
 //
 // Only Node's standard library: the workflow's input check imports this file before anything else is installed.
 import { createHash } from 'node:crypto';
@@ -272,7 +273,10 @@ export function resolveSubject(subject, { seed, fixtures }, fixtureId = null) {
   const pkgs = seedPackages(entry);
   if (pkgs.length === 0) {
     const kinds = [...new Set((entry.packages ?? []).map((p) => String(p?.registry ?? '')).filter((k) => /^[a-z]{1,12}$/.test(k)))].sort();
-    return { skip: { stage: 'install', reason: 'no_runnable_artifact', detail: `no npm or PyPI package (this lane installs those only)${kinds.length ? `; the seed lists ${kinds.join(', ')}` : ''}` } };
+    // An OCI image or a crate is resolved by loop/launch.mjs (resolveBeyondSeed, WC14), which needs the network and
+    // mcp-check's resolver: `beyond` says it may, and this skip stands when it is not loaded.
+    const beyond = kinds.includes('oci') || kinds.includes('cargo');
+    return { skip: { stage: 'install', reason: 'no_runnable_artifact', detail: `no npm or PyPI package${beyond ? ', and the OCI and crate paths were not loaded' : ' (this lane installs npm, PyPI, OCI images and crates)'}${kinds.length ? `; the seed lists ${kinds.join(', ')}` : ''}`, ...(beyond ? { beyond: true } : {}) }, ...(beyond ? { entry } : {}) };
   }
   if (entry.transport === 'http') {
     return { skip: { stage: 'install', reason: 'unsupported_transport', detail: 'the registry lists streamable HTTP only; this lane starts stdio servers' } };
