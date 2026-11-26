@@ -35,6 +35,9 @@ env:
   WORKER_KIT_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
   SEED_REF: '2ffcea16117ec679398f83eefe8c6fa66d38bac6'
   SANDBOX_REF: '4c16b586e8e5886acb098285b6ec405fd4db4ac7'
+  # isokron-ai/mcp-check at the commit tool-qa's live-probe lane runs (pump/workflows.json, live-probe versions.tool): its
+  # resolver chooses an OCI subject's image for this lane too (loop/launch.mjs, WC14), so both lanes run the same image.
+  MCP_CHECK_REF: '116b0ca841dec25116b3b3b7d6f3ce7286fd198f'
 
 jobs:
   conformance:
@@ -113,16 +116,21 @@ jobs:
           SHARD_ID: ${{ steps.inputs.outputs.shard_id }}
           ATTEMPT_ID: ${{ steps.inputs.outputs.attempt_id }}
           ITEMS: ${{ steps.inputs.outputs.items }}
-        run: node loop/run-items.mjs --msc msc --cli "$MWSC_CLI_PATH" --seed toolqa/history/seed-v1.json --out "$RUNNER_TEMP/wc" --lane ci
+        run: |
+          # --mck only when the checkout's own loop/prepare.sh fetched the resolver: this YAML runs from main while the
+          # lane code may be an older pinned commit (tool_sha), whose driver does not take --mck (WC14).
+          mck=(); if [ -d mck/corpus ]; then mck=(--mck mck); fi
+          node loop/run-items.mjs --msc msc "${mck[@]}" --cli "$MWSC_CLI_PATH" --seed toolqa/history/seed-v1.json --out "$RUNNER_TEMP/wc" --lane ci
       - id: teardown
         name: End the sandbox before anything is sealed
         if: ${{ !cancelled() }}
         run: loop/teardown.sh
-      - name: Loop unit tests against the pinned sandbox's exports
+      - name: Loop unit tests against the pinned sandbox's and resolver's exports
         if: ${{ !cancelled() }}
         env:
           MSC_DIR: msc
-        run: node --test test/loop.test.mjs
+          MCK_DIR: mck
+        run: node --test test/loop.test.mjs test/launch.test.mjs
       - id: kit0
         name: Build bundle 0 (dry run)
         if: ${{ !cancelled() && steps.teardown.outcome == 'success' && steps.run.outputs.controls_ok == 'true' && steps.run.outputs.has_0 == 'true' }}
